@@ -122,11 +122,53 @@ public struct CastScreenView: View {
                             Text(viewModel.captureState.statusLabel)
                                 .font(.callout.weight(.medium))
                                 .foregroundStyle(CastoraTheme.textPrimary)
-                            Text("Delivered ScreenCaptureKit callbacks (local only, no streaming): \(viewModel.deliveredFrameCount)")
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(CastoraTheme.textSecondary)
+                            Text(
+                                String(
+                                    format: "Measured Rolling FPS: %.1f FPS · Session Avg: %.2f FPS · All Callbacks: %.1f/s",
+                                    viewModel.captureMetrics.rollingCompleteFps,
+                                    viewModel.captureMetrics.sessionAverageCompleteFps,
+                                    viewModel.captureMetrics.rollingCallbackRate
+                                )
+                            )
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(CastoraTheme.textSecondary)
                         }
                     }
+
+                    let metrics = viewModel.captureMetrics
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 165), spacing: 10)],
+                        spacing: 10
+                    ) {
+                        captureMetricCell(
+                            label: "Complete Frames",
+                            value: "\(metrics.completeFrames)"
+                        )
+                        captureMetricCell(
+                            label: "Received Callbacks",
+                            value: "\(metrics.receivedCallbacks)"
+                        )
+                        captureMetricCell(
+                            label: "Idle (Static Screen)",
+                            value: "\(metrics.idleFrames)"
+                        )
+                        captureMetricCell(
+                            label: "Dropped / Blank",
+                            value: "\(metrics.droppedFrames)"
+                        )
+                        captureMetricCell(
+                            label: "Frame Interval",
+                            value: metrics.lastInterFrameIntervalMs.map { String(format: "%.2f ms", $0) } ?? "—"
+                        )
+                        captureMetricCell(
+                            label: "Last PTS / Elapsed",
+                            value: formatTimestampSummary(metrics: metrics)
+                        )
+                    }
+
+                    Text("ScreenCaptureKit delivers .complete frames only when display pixels change; static content produces .idle callbacks.")
+                        .font(.caption)
+                        .foregroundStyle(CastoraTheme.textSecondary)
 
                     if let errorMessage = viewModel.lastCaptureError {
                         Text(errorMessage)
@@ -141,5 +183,30 @@ public struct CastScreenView: View {
                 await viewModel.refreshDisplays()
             }
         }
+    }
+
+    private func captureMetricCell(label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(CastoraTheme.textSecondary)
+            Text(value)
+                .font(.system(.callout, design: .monospaced).weight(.semibold))
+                .foregroundStyle(CastoraTheme.textPrimary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(CastoraTheme.surfaceElevated)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(CastoraTheme.hairline, lineWidth: 1)
+        )
+    }
+
+    private func formatTimestampSummary(metrics: CaptureMetricsSnapshot) -> String {
+        let ptsText = metrics.lastPresentationTimestampSeconds.map { String(format: "%.2fs", $0) } ?? "—"
+        let elapsedText = metrics.elapsedSeconds > 0 ? String(format: "%.1fs", metrics.elapsedSeconds) : "0.0s"
+        return "\(ptsText) / \(elapsedText)"
     }
 }

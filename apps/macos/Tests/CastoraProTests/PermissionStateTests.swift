@@ -44,6 +44,7 @@ final class PermissionStateTests: XCTestCase {
         XCTAssertEqual(viewModel.permissionState.screenRecording, .deniedOrNotGranted)
         XCTAssertTrue(viewModel.displays.isEmpty)
         XCTAssertEqual(viewModel.deliveredFrameCount, 0)
+        XCTAssertEqual(viewModel.captureMetrics, .empty)
         XCTAssertEqual(viewModel.transportStatus, .notImplementedInPhase3)
     }
 

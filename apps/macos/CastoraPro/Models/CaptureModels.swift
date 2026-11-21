@@ -147,3 +147,73 @@ public struct VideoToolboxEncoderCapability: Equatable, Sendable {
         self.summary = summary
     }
 }
+
+public enum CaptureFrameOutcome: Sendable, Equatable {
+    case complete
+    case idle
+    case dropped
+    case lifecycle
+}
+
+public struct CaptureMetricsSnapshot: Equatable, Sendable {
+    public let receivedCallbacks: Int
+    public let completeFrames: Int
+    public let idleFrames: Int
+    public let droppedFrames: Int
+    public let lifecycleCallbacks: Int
+    public let rollingCompleteFps: Double
+    public let rollingCallbackRate: Double
+    public let sessionAverageCompleteFps: Double
+    public let elapsedSeconds: TimeInterval
+    public let lastCallbackTimestamp: TimeInterval?
+    public let lastCompleteFrameTimestamp: TimeInterval?
+    public let lastPresentationTimestampSeconds: Double?
+    public let lastInterFrameIntervalMs: Double?
+
+    public static let empty = CaptureMetricsSnapshot(
+        receivedCallbacks: 0,
+        completeFrames: 0,
+        idleFrames: 0,
+        droppedFrames: 0,
+        lifecycleCallbacks: 0,
+        rollingCompleteFps: 0,
+        rollingCallbackRate: 0,
+        sessionAverageCompleteFps: 0,
+        elapsedSeconds: 0,
+        lastCallbackTimestamp: nil,
+        lastCompleteFrameTimestamp: nil,
+        lastPresentationTimestampSeconds: nil,
+        lastInterFrameIntervalMs: nil
+    )
+
+    public init(
+        receivedCallbacks: Int,
+        completeFrames: Int,
+        idleFrames: Int,
+        droppedFrames: Int,
+        lifecycleCallbacks: Int,
+        rollingCompleteFps: Double,
+        rollingCallbackRate: Double,
+        sessionAverageCompleteFps: Double,
+        elapsedSeconds: TimeInterval,
+        lastCallbackTimestamp: TimeInterval?,
+        lastCompleteFrameTimestamp: TimeInterval?,
+        lastPresentationTimestampSeconds: Double?,
+        lastInterFrameIntervalMs: Double?
+    ) {
+        self.receivedCallbacks = receivedCallbacks
+        self.completeFrames = completeFrames
+        self.idleFrames = idleFrames
+        self.droppedFrames = droppedFrames
+        self.lifecycleCallbacks = lifecycleCallbacks
+        self.rollingCompleteFps = rollingCompleteFps
+        self.rollingCallbackRate = rollingCallbackRate
+        self.sessionAverageCompleteFps = sessionAverageCompleteFps
+        self.elapsedSeconds = elapsedSeconds
+        self.lastCallbackTimestamp = lastCallbackTimestamp
+        self.lastCompleteFrameTimestamp = lastCompleteFrameTimestamp
+        self.lastPresentationTimestampSeconds = lastPresentationTimestampSeconds
+        self.lastInterFrameIntervalMs = lastInterFrameIntervalMs
+    }
+}
+

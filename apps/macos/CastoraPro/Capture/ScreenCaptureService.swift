@@ -51,15 +51,15 @@ public struct VideoToolboxCapabilityProbe: Sendable {
     }
 }
 
-private final class CaptureStreamDelegate: NSObject, SCStreamDelegate, SCStreamOutput {
-    private let onCompleteFrame: @Sendable () -> Void
+private final class CaptureStreamDelegate: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
+    private let metricsTracker: CaptureMetricsTracker
     private let onStreamError: @Sendable (Error) -> Void
 
     init(
-        onCompleteFrame: @escaping @Sendable () -> Void,
+        metricsTracker: CaptureMetricsTracker,
         onStreamError: @escaping @Sendable (Error) -> Void
     ) {
-        self.onCompleteFrame = onCompleteFrame
+        self.metricsTracker = metricsTracker
         self.onStreamError = onStreamError
     }
 
@@ -68,7 +68,13 @@ private final class CaptureStreamDelegate: NSObject, SCStreamDelegate, SCStreamO
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        guard type == .screen, sampleBuffer.isValid else { return }
+        guard type == .screen else { return }
+        let receiptTimestamp = ProcessInfo.processInfo.systemUptime
+
+        guard sampleBuffer.isValid else {
+            metricsTracker.recordCallback(outcome: .dropped, at: receiptTimestamp)
+            return
+        }
 
         guard
             let attachments = CMSampleBufferGetSampleAttachmentsArray(
@@ -77,13 +83,42 @@ private final class CaptureStreamDelegate: NSObject, SCStreamDelegate, SCStreamO
             ) as? [[SCStreamFrameInfo: Any]],
             let firstAttachment = attachments.first,
             let statusRawValue = firstAttachment[.status] as? Int,
-            let frameStatus = SCFrameStatus(rawValue: statusRawValue),
-            frameStatus == .complete
+            let frameStatus = SCFrameStatus(rawValue: statusRawValue)
         else {
+            metricsTracker.recordCallback(outcome: .dropped, at: receiptTimestamp)
             return
         }
 
-        onCompleteFrame()
+        let outcome: CaptureFrameOutcome
+        var presentationSeconds: Double?
+
+        switch frameStatus {
+        case .complete:
+            if CMSampleBufferGetImageBuffer(sampleBuffer) != nil {
+                outcome = .complete
+                let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                if pts.isValid && pts.isNumeric {
+                    presentationSeconds = pts.seconds
+                }
+            } else {
+                outcome = .dropped
+            }
+        case .idle:
+            outcome = .idle
+        case .blank, .suspended:
+            outcome = .dropped
+        case .started:
+            outcome = .lifecycle
+        @unknown default:
+            // Raw value 5 corresponds to SCFrameStatus.stopped introduced in macOS 14.
+            outcome = frameStatus.rawValue == 5 ? .lifecycle : .dropped
+        }
+
+        metricsTracker.recordCallback(
+            outcome: outcome,
+            presentationTimestampSeconds: presentationSeconds,
+            at: receiptTimestamp
+        )
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -95,6 +130,7 @@ private final class CaptureStreamDelegate: NSObject, SCStreamDelegate, SCStreamO
 public final class ScreenCaptureService {
     private let permissionChecker: ScreenRecordingPermissionChecking
     private let captureQueue = DispatchQueue(label: "com.castorapro.macos.screencapture", qos: .userInteractive)
+    private let metricsTracker = CaptureMetricsTracker(rollingWindowSeconds: 2.0)
 
     private var cachedDisplays: [CGDirectDisplayID: SCDisplay] = [:]
     private var activeStream: SCStream?
@@ -102,6 +138,10 @@ public final class ScreenCaptureService {
 
     public init(permissionChecker: ScreenRecordingPermissionChecking = SystemScreenRecordingPermissionService()) {
         self.permissionChecker = permissionChecker
+    }
+
+    public func currentCaptureMetrics() -> CaptureMetricsSnapshot {
+        metricsTracker.snapshot()
     }
 
     public func enumerateDisplays() async throws -> [DisplayDescriptor] {
@@ -164,14 +204,13 @@ public final class ScreenCaptureService {
         )
         streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
         streamConfig.showsCursor = configuration.showsCursor
-        streamConfig.queueDepth = 5
+        streamConfig.queueDepth = 8
         return streamConfig
     }
 
     public func startLocalCapture(
         display descriptor: DisplayDescriptor,
         configuration: CaptureConfiguration,
-        onCompleteFrame: @escaping @MainActor () -> Void,
         onUnexpectedStop: @escaping @MainActor (String) -> Void
     ) async throws -> (width: Int, height: Int) {
         guard permissionChecker.checkStatus() == .granted else {
@@ -192,13 +231,10 @@ public final class ScreenCaptureService {
 
         let filter = SCContentFilter(display: scDisplay, excludingWindows: [])
         let streamConfig = buildStreamConfiguration(for: descriptor, configuration: configuration)
+        metricsTracker.reset()
 
         let delegate = CaptureStreamDelegate(
-            onCompleteFrame: {
-                Task { @MainActor in
-                    onCompleteFrame()
-                }
-            },
+            metricsTracker: metricsTracker,
             onStreamError: { error in
                 Task { @MainActor in
                     onUnexpectedStop(error.localizedDescription)

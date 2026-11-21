@@ -9,6 +9,7 @@ public final class CastoraAppViewModel: ObservableObject {
     @Published public var selectedDisplayID: CGDirectDisplayID?
     @Published public var captureConfiguration = CaptureConfiguration()
     @Published public private(set) var captureState: ScreenCaptureState = .idle
+    @Published public private(set) var captureMetrics: CaptureMetricsSnapshot = .empty
     @Published public private(set) var deliveredFrameCount: Int = 0
     @Published public private(set) var lastCaptureError: String?
     @Published public private(set) var encoderCapability: VideoToolboxEncoderCapability
@@ -22,6 +23,7 @@ public final class CastoraAppViewModel: ObservableObject {
     private let captureService: ScreenCaptureService
     private let identityService: DeviceIdentityService
     private let encoderProbe: VideoToolboxCapabilityProbe
+    private var metricsPollingTask: Task<Void, Never>?
 
     public init(
         permissionService: ScreenRecordingPermissionChecking = SystemScreenRecordingPermissionService(),
@@ -140,17 +142,18 @@ public final class CastoraAppViewModel: ObservableObject {
 
         captureState = .starting
         lastCaptureError = nil
+        captureMetrics = .empty
         deliveredFrameCount = 0
+        stopMetricsPolling()
 
         do {
             let resolvedSize = try await captureService.startLocalCapture(
                 display: targetDisplay,
                 configuration: captureConfiguration,
-                onCompleteFrame: { [weak self] in
-                    self?.deliveredFrameCount += 1
-                },
                 onUnexpectedStop: { [weak self] reason in
                     guard let self else { return }
+                    self.stopMetricsPolling()
+                    self.syncCaptureMetrics()
                     self.captureState = .failed(reason)
                     self.lastCaptureError = reason
                 }
@@ -161,7 +164,9 @@ public final class CastoraAppViewModel: ObservableObject {
                 height: resolvedSize.height,
                 targetFps: captureConfiguration.frameRatePreset.rawValue
             )
+            startMetricsPolling()
         } catch {
+            stopMetricsPolling()
             captureState = .failed(error.localizedDescription)
             lastCaptureError = error.localizedDescription
         }
@@ -169,8 +174,32 @@ public final class CastoraAppViewModel: ObservableObject {
 
     public func stopLocalCaptureTest() async {
         captureState = .stopping
+        stopMetricsPolling()
         await captureService.stopLocalCapture()
+        syncCaptureMetrics()
         captureState = .idle
+    }
+
+    private func startMetricsPolling() {
+        stopMetricsPolling()
+        metricsPollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled, let self else { break }
+                self.syncCaptureMetrics()
+            }
+        }
+    }
+
+    private func stopMetricsPolling() {
+        metricsPollingTask?.cancel()
+        metricsPollingTask = nil
+    }
+
+    private func syncCaptureMetrics() {
+        let snapshot = captureService.currentCaptureMetrics()
+        captureMetrics = snapshot
+        deliveredFrameCount = snapshot.completeFrames
     }
 
     public func saveDeviceDisplayName() {
