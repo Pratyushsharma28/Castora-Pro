@@ -88,7 +88,11 @@ export function probeBrowserCapabilities(): BrowserCapabilityReport {
     supportsVideoH264Decode: receiverCodecs.some((m) => m.toLowerCase() === 'video/h264'),
     detectedVideoCodecs: uniqueCodecs,
     supportsBarcodeDetector: 'BarcodeDetector' in window,
-    supportsFullscreen: Boolean(document.documentElement?.requestFullscreen),
+    supportsFullscreen: Boolean(
+      document.documentElement?.requestFullscreen ||
+        (document.documentElement as unknown as { webkitRequestFullscreen?: () => Promise<void> } | null)
+          ?.webkitRequestFullscreen
+    ),
     detectedPlatform: detectPlatform(ua),
     userAgentSummary: summarizeUserAgent(ua),
   };

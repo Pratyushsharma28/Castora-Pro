@@ -66,12 +66,13 @@ export function IncomingScreensPanel({
             const hasAudio = Boolean(entry.stream?.getAudioTracks().length);
 
             return (
-              <div key={entry.senderDeviceId} className="space-y-3">
+              <div key={entry.senderDeviceId} className="min-w-0 space-y-3">
                 <VideoSurface
                   slotLabel={`IN-${String(idx + 1).padStart(2, '0')}`}
                   title={`${entry.senderName} (${entry.senderPlatform} · ${entry.senderDeviceId})`}
                   stream={entry.stream}
                   muted={muted}
+                  allowFullscreen
                   highlight={entry.phase === 'connected' && entry.stream !== null}
                   standbyReason={
                     entry.errorMessage ??

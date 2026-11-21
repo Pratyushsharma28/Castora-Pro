@@ -45,3 +45,14 @@
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
+
+:fullscreen,
+:-webkit-full-screen {
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  background-color: #101214 !important;
+}
+

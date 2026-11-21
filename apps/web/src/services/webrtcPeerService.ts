@@ -669,6 +669,7 @@ export class CastoraWebRtcPeer {
         return;
       }
 
+      this.ignoreOffer = false;
       const answerInit: RTCSessionDescriptionInit = { type: 'answer', sdp };
       await this.pc.setRemoteDescription(
         typeof RTCSessionDescription !== 'undefined'

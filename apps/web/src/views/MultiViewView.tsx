@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react';
-import { Maximize2, Power, Volume2, VolumeX } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Maximize2, Minimize2, Power, Volume2, VolumeX } from 'lucide-react';
 import type {
   BrowserCapabilityReport,
   ConnectedReceiverSlot,
@@ -57,7 +57,23 @@ export function MultiViewView({
 }: MultiViewViewProps) {
   const [spotlightIndex, setSpotlightIndex] = useState<number>(0);
   const [wallNotice, setWallNotice] = useState<string | null>(null);
+  const [isWallFullscreen, setIsWallFullscreen] = useState<boolean>(false);
   const wallRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const syncWallFullscreen = () => {
+      const fsDoc = document as Document & { webkitFullscreenElement?: Element | null };
+      const activeEl = document.fullscreenElement ?? fsDoc.webkitFullscreenElement ?? null;
+      setIsWallFullscreen(activeEl !== null && activeEl === wallRef.current);
+    };
+    document.addEventListener('fullscreenchange', syncWallFullscreen);
+    document.addEventListener('webkitfullscreenchange', syncWallFullscreen);
+    return () => {
+      document.removeEventListener('fullscreenchange', syncWallFullscreen);
+      document.removeEventListener('webkitfullscreenchange', syncWallFullscreen);
+    };
+  }, []);
 
   const slotCount = LAYOUT_OPTIONS.find((opt) => opt.id === layout)?.count ?? 6;
   const activeStreamCount = slots.filter((s) => s.stream !== null).length;
@@ -79,16 +95,37 @@ export function MultiViewView({
   );
 
   const handleWallFullscreen = async () => {
-    if (!capabilities.supportsFullscreen || !wallRef.current) {
+    const wallEl = wallRef.current as (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void }) | null;
+    if (!capabilities.supportsFullscreen || !wallEl) {
       setWallNotice('Fullscreen API is not available in this browser context.');
       return;
     }
+    const fsDoc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      webkitExitFullscreen?: () => Promise<void> | void;
+    };
+    const activeEl = document.fullscreenElement ?? fsDoc.webkitFullscreenElement ?? null;
     try {
-      if (document.fullscreenElement) {
-        await document.exitFullscreen();
+      if (activeEl === wallEl) {
+        if (typeof document.exitFullscreen === 'function') {
+          await document.exitFullscreen();
+        } else if (typeof fsDoc.webkitExitFullscreen === 'function') {
+          await fsDoc.webkitExitFullscreen();
+        }
         onLogEvent('ui', 'Exited monitor wall fullscreen', 'Returned Multi-View to standard viewport.');
       } else {
-        await wallRef.current.requestFullscreen();
+        if (activeEl) {
+          if (typeof document.exitFullscreen === 'function') {
+            await document.exitFullscreen();
+          } else if (typeof fsDoc.webkitExitFullscreen === 'function') {
+            await fsDoc.webkitExitFullscreen();
+          }
+        }
+        if (typeof wallEl.requestFullscreen === 'function') {
+          await wallEl.requestFullscreen();
+        } else if (typeof wallEl.webkitRequestFullscreen === 'function') {
+          await wallEl.webkitRequestFullscreen();
+        }
         onLogEvent('ui', 'Entered monitor wall fullscreen', `Expanded ${layout} wall to fullscreen.`);
       }
       setWallNotice(null);
@@ -264,8 +301,12 @@ export function MultiViewView({
             onClick={handleWallFullscreen}
             className="inline-flex min-h-[36px] items-center gap-1.5 border border-[#252A2F] bg-[#191D20] px-3 text-xs font-medium text-[#F2F3F0] hover:border-[#FF7849]"
           >
-            <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Fullscreen Wall</span>
+            {isWallFullscreen ? (
+              <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
+            ) : (
+              <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>{isWallFullscreen ? 'Exit Wall Fullscreen' : 'Fullscreen Wall'}</span>
           </button>
         </div>
       </div>
@@ -276,10 +317,17 @@ export function MultiViewView({
         </div>
       )}
 
-      <div ref={wallRef} className="bg-[#101214]">
+      <div
+        ref={wallRef}
+        className={
+          isWallFullscreen
+            ? 'h-screen w-screen overflow-y-auto bg-[#101214] p-4'
+            : 'min-w-0 bg-[#101214]'
+        }
+      >
         {layout === 'spotlight' ? (
           <div className="space-y-4">
-            <div>
+            <div className="min-w-0">
               {renderTile(
                 normalizedSlots[spotlightIndex] ?? normalizedSlots[0],
                 true

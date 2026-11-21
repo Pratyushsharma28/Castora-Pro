@@ -280,7 +280,7 @@ export function ReceiversView({
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Left: Join / Host Pairing Panel */}
-        <section className="space-y-4 lg:col-span-5" aria-label="Room Pairing">
+        <section className="min-w-0 space-y-4 lg:col-span-5" aria-label="Room Pairing">
           <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-4">
             <div className="grid grid-cols-2 border border-[#252A2F] bg-[#131619]">
               <button
@@ -472,7 +472,7 @@ export function ReceiversView({
         </section>
 
         {/* Right: Pairing Status, Bidirectional Controls, Incoming Screens, Approval Queue */}
-        <section className="space-y-4 lg:col-span-7" aria-label="Approval Queue and Pairing Status">
+        <section className="min-w-0 space-y-4 lg:col-span-7" aria-label="Approval Queue and Pairing Status">
           {/* Participant Pairing Status Card */}
           {(activeRoomRole === 'receiver' ||
             pairingStatus === 'Rejected' ||
@@ -531,7 +531,7 @@ export function ReceiversView({
                   </h2>
                   <p className="mt-0.5 text-xs text-[#929A9D]">
                     {activeRoomRole === 'receiver'
-                      ? `Share your screen back to ${activeRoom?.hostDeviceName ?? 'the host'} while watching incoming screens.`
+                      ? 'Share your screen to all connected participants in this room while watching incoming screens.'
                       : 'Share your screen to approved participants or view incoming participant screens below.'}
                   </p>
                 </div>

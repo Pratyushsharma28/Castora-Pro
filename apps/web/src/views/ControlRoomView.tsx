@@ -165,7 +165,7 @@ export function ControlRoomView({
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Left: Dominant Program Monitor Bay + Incoming Screens */}
-        <section className="space-y-4 lg:col-span-8" aria-label="Program Monitor Workspace">
+        <section className="min-w-0 space-y-4 lg:col-span-8" aria-label="Program Monitor Workspace">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h1 className="font-display text-lg font-semibold tracking-tight text-[#F2F3F0]">

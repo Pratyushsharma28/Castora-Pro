@@ -121,6 +121,8 @@ export class WebRtcSignalingBridge {
 
   private captureSession: CapturedScreenSession | null = null;
   private outboundStreamId: string | null = null;
+  private autoBroadcastToRoom = false;
+  private pendingAutoPublishPeers = new Set<string>();
   private peers = new Map<string, CastoraWebRtcPeer>();
   private incomingMap = new Map<string, IncomingScreenEntry>();
   private outboundMap = new Map<string, OutboundPeerEntry>();
@@ -450,6 +452,8 @@ export class WebRtcSignalingBridge {
         this.captureSession = null;
       }
       this.outboundStreamId = null;
+      this.autoBroadcastToRoom = false;
+      this.pendingAutoPublishPeers.clear();
       this.statusDetail = null;
       this.errorMessage = null;
       this.emit();
@@ -487,6 +491,29 @@ export class WebRtcSignalingBridge {
       }
     }
 
+    if (
+      this.captureSession &&
+      this.autoBroadcastToRoom &&
+      this.isSelfAuthorizedInRoom()
+    ) {
+      const roomPeers = this.resolvePublishTargets('ALL');
+      for (const peerId of roomPeers) {
+        if (
+          !this.outboundMap.has(peerId) &&
+          !this.pendingAutoPublishPeers.has(peerId)
+        ) {
+          this.pendingAutoPublishPeers.add(peerId);
+          void this.publishActiveCaptureToPeer(peerId)
+            .catch(() => {
+              // Ignore transient peer connection failures on auto-broadcast; error logged via peer callback
+            })
+            .finally(() => {
+              this.pendingAutoPublishPeers.delete(peerId);
+            });
+        }
+      }
+    }
+
     if (changed) {
       this.emit();
     }
@@ -507,7 +534,7 @@ export class WebRtcSignalingBridge {
       }
     }
 
-    if (targetSelection === 'ALL') {
+    if (targetSelection === 'ALL' || targetSelection === null) {
       return connectedPeers;
     }
 
@@ -517,15 +544,6 @@ export class WebRtcSignalingBridge {
 
     if (typeof targetSelection === 'string' && targetSelection.trim().length > 0) {
       return connectedPeers.includes(targetSelection) ? [targetSelection] : [];
-    }
-
-    // Default target:
-    // - Paired friend defaults to publishing to the room host
-    // - Host defaults to all connected paired receivers (1:1 or 1:N)
-    if (this.activeRoomRole === 'receiver') {
-      return connectedPeers.includes(this.activeRoom.hostDeviceId)
-        ? [this.activeRoom.hostDeviceId]
-        : connectedPeers.slice(0, 1);
     }
 
     return connectedPeers;
@@ -569,6 +587,7 @@ export class WebRtcSignalingBridge {
     }
     this.captureSession = session;
     this.outboundStreamId = createId('stream');
+    this.autoBroadcastToRoom = targetSelection === null || targetSelection === 'ALL';
 
     const resLabel =
       session.actualWidth && session.actualHeight
@@ -730,6 +749,8 @@ export class WebRtcSignalingBridge {
   }
 
   stopSharing(reason: 'user_stopped' | 'capture_revoked' = 'user_stopped'): void {
+    this.autoBroadcastToRoom = false;
+    this.pendingAutoPublishPeers.clear();
     const activeTargetIds = Array.from(this.outboundMap.keys());
     for (const peerId of activeTargetIds) {
       void this.stopPublishingToPeer(peerId, reason);

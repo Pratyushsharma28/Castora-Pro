@@ -1869,6 +1869,135 @@ async function main() {
     );
     console.log('  [PASS] 4B.9. Unexpected participant disconnect isolated to failing peer; surviving Friend 2 stream & reconnect verified');
 
+    // 4B.11: Universal 3-way bidirectional sharing (Mac A, Mac B, Mac C publish simultaneously with default null target)
+    // First clear existing shares cleanly
+    hostBridge.stopSharing('user_stopped');
+    friend1ReconnectedBridge.stopSharing('user_stopped');
+    friend2Bridge.stopSharing('user_stopped');
+    await waitUntil(
+      () =>
+        hostBridge.getSnapshot().incomingStreams.length === 0 &&
+        friend1ReconnectedBridge.getSnapshot().incomingStreams.length === 0 &&
+        friend2Bridge.getSnapshot().incomingStreams.length === 0,
+      'All participants cleared prior streams before 3-way mesh test'
+    );
+
+    // Ensure latestRoomSnapshot reflects all 3 connected peers before simultaneous broadcast
+    const meshRoomRes = (await (await fetch(`${baseUrl}/api/rooms/${room4bId}`)).json()) as {
+      room: RoomSnapshot;
+    };
+    latestRoomSnapshot = meshRoomRes.room;
+    hostBridge.updateContext({
+      deviceId: bHostId,
+      activeRoom: latestRoomSnapshot,
+      activeRoomRole: 'host',
+      preferences: prefs4b,
+      networkPrefs: netPrefs4b,
+    });
+    friend1ReconnectedBridge.updateContext({
+      deviceId: bFriend1Id,
+      activeRoom: latestRoomSnapshot,
+      activeRoomRole: 'receiver',
+      preferences: prefs4b,
+      networkPrefs: netPrefs4b,
+    });
+    friend2Bridge.updateContext({
+      deviceId: bFriend2Id,
+      activeRoom: latestRoomSnapshot,
+      activeRoomRole: 'receiver',
+      preferences: prefs4b,
+      networkPrefs: netPrefs4b,
+    });
+
+    // All 3 participants start default room-wide sharing (targetSelection = null) simultaneously!
+    await Promise.all([
+      hostBridge.startScreenSharing(null),
+      friend1ReconnectedBridge.startScreenSharing(null),
+      friend2Bridge.startScreenSharing(null),
+    ]);
+
+    await waitUntil(
+      () =>
+        hostBridge.getSnapshot().incomingStreams.filter((s) => s.stream !== null).length === 2 &&
+        friend1ReconnectedBridge.getSnapshot().incomingStreams.filter((s) => s.stream !== null).length === 2 &&
+        friend2Bridge.getSnapshot().incomingStreams.filter((s) => s.stream !== null).length === 2,
+      'All 3 participants simultaneously share and receive each other (2 incoming streams each)'
+    );
+
+    const meshMidRes = (await (await fetch(`${baseUrl}/api/rooms/${room4bId}`)).json()) as {
+      room: { activeStreams: Array<{ publisherDeviceId: string; targetDeviceId: string }> };
+    };
+    assert.equal(meshMidRes.room.activeStreams.length, 6, '3-way full mesh must register 6 active directional streams');
+
+    // Mac B stops its own stream independently; Mac A and Mac C streams must continue uninterrupted
+    friend1ReconnectedBridge.stopSharing('user_stopped');
+    await waitUntil(
+      () =>
+        friend1ReconnectedBridge.getSnapshot().isSharingLocal === false &&
+        hostBridge.getSnapshot().incomingStreams.filter((s) => s.stream !== null).length === 1 &&
+        friend2Bridge.getSnapshot().incomingStreams.filter((s) => s.stream !== null).length === 1,
+      'Mac B stopped independently while Mac A and Mac C continued receiving each other'
+    );
+    assert.equal(
+      friend1ReconnectedBridge.getSnapshot().incomingStreams.filter((s) => s.stream !== null).length,
+      2,
+      'Mac B must continue receiving both Mac A and Mac C after stopping its own share'
+    );
+    assert.equal(
+      hostBridge.getSnapshot().incomingStreams[0]?.senderDeviceId,
+      bFriend2Id,
+      'Mac A must keep receiving Mac C after Mac B stopped'
+    );
+    assert.equal(
+      friend2Bridge.getSnapshot().incomingStreams[0]?.senderDeviceId,
+      bHostId,
+      'Mac C must keep receiving Mac A after Mac B stopped'
+    );
+
+    // Mac C stops its own stream independently; Mac A continues publishing to both Mac B and Mac C
+    friend2Bridge.stopSharing('user_stopped');
+    await waitUntil(
+      () =>
+        friend2Bridge.getSnapshot().isSharingLocal === false &&
+        hostBridge.getSnapshot().incomingStreams.length === 0 &&
+        friend1ReconnectedBridge.getSnapshot().incomingStreams.filter((s) => s.stream !== null).length === 1,
+      'Mac C stopped independently while Mac A continued sharing to Mac B and Mac C'
+    );
+    assert.equal(
+      friend2Bridge.getSnapshot().incomingStreams[0]?.senderDeviceId,
+      bHostId,
+      'Mac C must keep receiving Mac A after stopping its own share'
+    );
+
+    // Late-joiner / newly approved peer auto-broadcast: approve bPendingId while Mac A is actively sharing
+    const pendingBridge = new WebRtcSignalingBridge({
+      deviceId: bPendingId,
+      preferences: prefs4b,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(bPendingWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeBridgeCapture('pending-approved'),
+      rtcFactory: () => new FakeRtcPeerConnection() as unknown as RTCPeerConnection,
+    });
+    wireBridgeToWs(bPendingWs, pendingBridge, 'receiver', bPendingId);
+    const approvePendingRes = await fetch(
+      `${baseUrl}/api/rooms/${room4bId}/pair-requests/${bPendingId}/approve`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${room4bCreated.hostToken}` },
+      }
+    );
+    assert.equal(approvePendingRes.status, 200);
+    await waitUntil(
+      () =>
+        pendingBridge.getSnapshot().incomingStreams.some(
+          (s) => s.senderDeviceId === bHostId && s.stream !== null
+        ),
+      'Newly approved participant automatically receives ongoing room-wide screen share from Mac A'
+    );
+    pendingBridge.dispose();
+    console.log('  [PASS] 4B.11. Universal 3-way simultaneous sharing, independent stop & late-joiner auto-broadcast verified');
+
     // Dispose bridges & close Stage 4B room cleanly
     hostBridge.dispose();
     friend1Bridge.dispose();

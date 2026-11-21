@@ -849,13 +849,13 @@ export function App() {
               const targetId = multiViewSlots[slotIndex]?.receiverDeviceId ?? String(slotIndex);
               setMutedSlots((prev) => ({ ...prev, [targetId]: !(prev[targetId] ?? true) }));
             }}
-            onDisconnectSlot={(peerId) => {
-              if (activeRoomRole === 'host') {
-                void handleRemoveReceiver(peerId);
-              } else {
-                void handleLeaveRoom();
-              }
-            }}
+            onDisconnectSlot={
+              activeRoomRole === 'host'
+                ? (peerId) => {
+                    void handleRemoveReceiver(peerId);
+                  }
+                : undefined
+            }
             onLogEvent={logEvent}
           />
         )}

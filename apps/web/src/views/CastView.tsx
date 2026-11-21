@@ -243,7 +243,7 @@ export function CastView({
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Left: Capture Configuration & Target Participants */}
-        <section className="space-y-4 lg:col-span-5" aria-label="Capture Parameters">
+        <section className="min-w-0 space-y-4 lg:col-span-5" aria-label="Capture Parameters">
           <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-5">
             <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
@@ -551,7 +551,7 @@ export function CastView({
         </section>
 
         {/* Right: Local Preview + Outbound Telemetry + Incoming Screens */}
-        <section className="space-y-4 lg:col-span-7" aria-label="Local Capture Preview and Incoming Screens">
+        <section className="min-w-0 space-y-4 lg:col-span-7" aria-label="Local Capture Preview and Incoming Screens">
           <VideoSurface
             slotLabel="OUT-01"
             title={
