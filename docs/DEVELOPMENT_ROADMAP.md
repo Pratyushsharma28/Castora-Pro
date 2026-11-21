@@ -5,9 +5,9 @@ This roadmap breaks Castora Pro into **15 small, testable phases**. We do not sk
 ---
 
 ## Status Legend
-- **Implemented:** Phase 1 core documentation and Phase 2 `castora.v1` signaling protocol, Draft 2020-12 JSON Schema, 37 fixtures, and automated `npm run test:protocol` validator.
-- **Planned:** Phases 3 through 15 (native macOS, Android, Android TV apps, and WebRTC streaming).
-- **Tested:** Protocol schema validation (`npm run test:protocol`) passes; native builds and streaming remain **Not Yet Tested**.
+- **Implemented:** Phase 1 core documentation, Phase 2 `castora.v1` signaling protocol (`npm run test:protocol`), and Phase 3 native macOS Swift/SwiftUI source code in `apps/macos/`.
+- **Planned:** Phases 4 through 15 (native Android/Android TV apps, Bonjour/NSD discovery, WebSocket signaling, WebRTC streaming).
+- **Tested:** Protocol schema validation (`npm run test:protocol`) passes; Phase 3 macOS build and `CastoraProTests` are **Pending macOS/Xcode Execution** (no Xcode in Linux workspace).
 
 ---
 
@@ -42,15 +42,15 @@ Phases 7 + 8 + 9 ──► Phase 10 (WebRTC 1:1 Media + DTLS-SRTP + Adaptive Bit
 - **Deliverables:** `README.md`, `.gitignore`, `docs/PROJECT_ARCHITECTURE.md`, `docs/DEVELOPMENT_ROADMAP.md`, `docs/TESTING_STRATEGY.md`.
 - **Exit Gate:** All Phase 1 files reviewed, valid, and committed to GitHub.
 
-### Phase 2: Shared Signaling Protocol (`castora.v1`) & Test Fixtures *(Current — Implemented & Validated)*
+### Phase 2: Shared Signaling Protocol (`castora.v1`) & Test Fixtures *(Completed — Implemented & Validated)*
 - **Depends on:** Phase 1
 - **Goal:** Finalize the 16-message `castora.v1` JSON signaling contract, strict Draft 2020-12 JSON Schema (`protocol/castora-protocol.schema.json`), shared valid/invalid fixtures (`protocol/fixtures/`), automated `npm run test:protocol` validator (`scripts/validate-protocol.mjs`), and Swift/Kotlin guide (`docs/PROTOCOL_IMPLEMENTATION.md`).
 - **Exit Gate:** `npm run test:protocol` passes all 16 valid fixtures and rejects all 21 invalid fixtures for their intended reasons.
 
-### Phase 3: Native macOS Project Bootstrap & Permissions Shell *(Planned)*
+### Phase 3: Native macOS Project Bootstrap & Permissions Shell *(Current — Implemented, Pending macOS Xcode Build & Verification)*
 - **Depends on:** Phase 1
-- **Goal:** Create the Xcode SwiftUI project (`macos/`), configure `Info.plist` (`NSLocalNetworkUsageDescription`, `NSBonjourServices`), entitlements, and Screen Recording permission preflight UI.
-- **Exit Gate:** macOS app compiles in Xcode, launches cleanly, and accurately detects Screen Recording permission status.
+- **Goal:** Create the Swift/SwiftUI macOS foundation (`apps/macos/`), configure `Info.plist` (`NSLocalNetworkUsageDescription`, `NSBonjourServices`), entitlements, Screen Recording preflight/settings UI, `ScreenCaptureKit` + `VideoToolbox` capability foundation, `castora.v1` Swift `Codable` models, and `XCTest` suites.
+- **Exit Gate:** macOS app compiles in Xcode 15+ on macOS 13+, `swift test` passes, and the app accurately detects Screen Recording permission and captures local frames via `ScreenCaptureKit`.
 
 ### Phase 4: Native Android & Android TV Project Bootstrap & Permissions Shell *(Planned)*
 - **Depends on:** Phase 1

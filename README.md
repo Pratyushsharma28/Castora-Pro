@@ -2,7 +2,7 @@
 
 Castora Pro is a cross-platform, local-network-first screen-casting system built with native **macOS** (Swift / SwiftUI) and **Android & Android TV** (Kotlin / Jetpack Compose) applications, powered by **WebRTC** with **DTLS-SRTP** encryption.
 
-> **Project Stage:** Phase 2 — Shared Signaling Protocol (`castora.v1`) & Automated Test Fixtures  
+> **Project Stage:** Phase 3 — Native macOS Project Bootstrap & Permissions Shell *(Awaiting Xcode/macOS Build Verification)*  
 > **Official Repository:** `https://github.com/Pratyushsharma28/Castora-Pro`
 
 ---
@@ -14,10 +14,10 @@ Castora Pro is a cross-platform, local-network-first screen-casting system built
 | Phase 1 Documentation (`README.md`, `.gitignore`, Architecture, 15-Phase Roadmap, Testing Strategy) | **Implemented** | Completed in Phase 1 |
 | Signaling Protocol (`castora.v1`), Draft 2020-12 JSON Schema, 37 Valid/Invalid Fixtures & `npm run test:protocol` | **Implemented & Validated** | Automated Ajv schema validation passes all 16 valid and 21 invalid fixtures |
 | Cross-Platform Protocol Guide (`docs/PROTOCOL_IMPLEMENTATION.md`) | **Implemented** | Swift `Codable` and Kotlin `kotlinx.serialization` reference models |
-| Native macOS App (`ScreenCaptureKit`, `VideoToolbox`, `Bonjour`, SwiftUI) | **Planned** | Starts in Phase 3 |
+| Native macOS Foundation (`apps/macos/`: SwiftUI dark UI, Screen Recording permission service, `ScreenCaptureKit` + `VideoToolbox` probe, `castora.v1` Swift models, `XCTest` suites) | **Implemented — Pending macOS Build** | Authored in `apps/macos/`; requires Xcode 15+ on macOS 13+ to compile & verify TCC permissions (Linux build sandbox has no Xcode) |
 | Native Android & Android TV App (`MediaProjection`, `MediaCodec`, `NSD`, Compose) | **Planned** | Starts in Phase 4 |
-| WebRTC Media Engine, Multi-Stream Grid, QR Pairing & Real `RTCStatsReport` Metrics | **Planned** | Starts in Phases 7–14 |
-| Native Device & Cross-Platform Streaming Tests | **Not Yet Tested** | No native Swift/Kotlin apps or WebRTC engine exist yet |
+| Bonjour/NSD Discovery, WebSocket Signaling, WebRTC Media, Multi-Stream Grid & Real `RTCStatsReport` | **Planned** | Starts in Phases 5–14 |
+| Native Device & Cross-Platform Streaming Tests | **Not Yet Tested** | Swift tests written in `apps/macos/Tests/CastoraProTests/`; awaiting macOS execution |
 
 ---
 
@@ -37,6 +37,8 @@ Castora Pro is a cross-platform, local-network-first screen-casting system built
 - **[`docs/PROTOCOL_IMPLEMENTATION.md`](docs/PROTOCOL_IMPLEMENTATION.md)** — Swift (`Codable`) and Kotlin (`kotlinx.serialization`) implementation patterns, unknown-field handling, and version checks.
 - **[`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md)** — Complete **15-phase** development plan, phase dependencies, deliverables, and exit gates.
 - **[`docs/TESTING_STRATEGY.md`](docs/TESTING_STRATEGY.md)** — Unit, integration, macOS, Android phone, Android TV, cross-platform, network interruption, performance, and release testing strategy.
+- **[`docs/PHASE_3_REPORT.md`](docs/PHASE_3_REPORT.md)** — Phase 3 implementation report and macOS verification ledger.
+- **[`apps/macos/README.md`](apps/macos/README.md)** — Setup, Xcode bundling, `swift test`, and Screen Recording verification guide for macOS.
 - **[`.gitignore`](.gitignore)** — Ignore patterns for macOS/Xcode, Android/Gradle, local environment secrets, and workspace build artifacts.
 
 ---
@@ -53,12 +55,14 @@ Castora-Pro/
 │   ├── DEVELOPMENT_ROADMAP.md        # 15-phase build plan & dependency map
 │   ├── TESTING_STRATEGY.md           # Multi-platform & network testing plan
 │   ├── SIGNALING_PROTOCOL.md         # castora.v1 16-message signaling specification
-│   └── PROTOCOL_IMPLEMENTATION.md    # Swift Codable & Kotlin kotlinx.serialization guide
+│   ├── PROTOCOL_IMPLEMENTATION.md    # Swift Codable & Kotlin kotlinx.serialization guide
+│   └── PHASE_3_REPORT.md             # Phase 3 macOS bootstrap status report
 ├── protocol/
 │   ├── castora-protocol.schema.json  # JSON Schema (Draft 2020-12)
 │   └── fixtures/                     # 16 valid + 21 invalid JSON test fixtures
 ├── scripts/
 │   └── validate-protocol.mjs         # Automated Ajv Draft 2020-12 validator (`npm run test:protocol`)
-├── macos/                            # Planned (Phase 3+): Native Swift/SwiftUI Xcode project
-└── android/                          # Planned (Phase 4+): Native Kotlin/Compose Android & TV project
+├── apps/
+│   ├── macos/                        # Phase 3: Native Swift/SwiftUI app, capture foundation & XCTests
+│   └── android/                      # Planned (Phase 4+): Native Kotlin/Compose Android & TV project
 ```

@@ -1,0 +1,149 @@
+import Foundation
+import CoreGraphics
+
+public struct DisplayDescriptor: Identifiable, Hashable, Sendable {
+    public let id: CGDirectDisplayID
+    public let name: String
+    public let width: Int
+    public let height: Int
+    public let isMainDisplay: Bool
+
+    public var resolutionText: String {
+        "\(width) × \(height)"
+    }
+
+    public init(
+        id: CGDirectDisplayID,
+        name: String,
+        width: Int,
+        height: Int,
+        isMainDisplay: Bool
+    ) {
+        self.id = id
+        self.name = name
+        self.width = width
+        self.height = height
+        self.isMainDisplay = isMainDisplay
+    }
+}
+
+public enum CaptureResolutionPreset: String, CaseIterable, Identifiable, Sendable {
+    case hd720 = "720p"
+    case fullHD1080 = "1080p"
+    case nativeDisplay = "Native"
+
+    public var id: String { rawValue }
+
+    public func targetSize(for display: DisplayDescriptor) -> (width: Int, height: Int) {
+        let rawWidth: Int
+        let rawHeight: Int
+
+        switch self {
+        case .hd720:
+            rawWidth = 1280
+            rawHeight = max(2, Int((Double(display.height) / Double(max(display.width, 1))) * 1280.0))
+        case .fullHD1080:
+            rawWidth = min(1920, display.width)
+            rawHeight = max(2, Int((Double(display.height) / Double(max(display.width, 1))) * Double(rawWidth)))
+        case .nativeDisplay:
+            rawWidth = display.width
+            rawHeight = display.height
+        }
+
+        // Hardware encoders (VideoToolbox H.264/HEVC) expect even pixel dimensions.
+        return (width: rawWidth - (rawWidth % 2), height: rawHeight - (rawHeight % 2))
+    }
+}
+
+public enum CaptureFrameRatePreset: Int, CaseIterable, Identifiable, Sendable {
+    case fps30 = 30
+    case fps60 = 60
+
+    public var id: Int { rawValue }
+    public var label: String { "\(rawValue) FPS" }
+}
+
+public struct CaptureConfiguration: Equatable, Sendable {
+    public var resolutionPreset: CaptureResolutionPreset
+    public var frameRatePreset: CaptureFrameRatePreset
+    public var showsCursor: Bool
+    public var preferredCodec: CastoraVideoCodec
+
+    public init(
+        resolutionPreset: CaptureResolutionPreset = .fullHD1080,
+        frameRatePreset: CaptureFrameRatePreset = .fps60,
+        showsCursor: Bool = true,
+        preferredCodec: CastoraVideoCodec = .h264
+    ) {
+        self.resolutionPreset = resolutionPreset
+        self.frameRatePreset = frameRatePreset
+        self.showsCursor = showsCursor
+        self.preferredCodec = preferredCodec
+    }
+}
+
+public enum ScreenCaptureState: Equatable, Sendable {
+    case idle
+    case enumerating
+    case starting
+    case capturing(displayName: String, width: Int, height: Int, targetFps: Int)
+    case stopping
+    case failed(String)
+
+    public var isCapturing: Bool {
+        if case .capturing = self { return true }
+        return false
+    }
+
+    public var statusLabel: String {
+        switch self {
+        case .idle:
+            return "Idle"
+        case .enumerating:
+            return "Checking Displays"
+        case .starting:
+            return "Starting Local Capture"
+        case .capturing(let displayName, let width, let height, let targetFps):
+            return "Capturing \(displayName) (\(width)×\(height) @ \(targetFps) FPS target)"
+        case .stopping:
+            return "Stopping Capture"
+        case .failed(let message):
+            return "Capture Error: \(message)"
+        }
+    }
+}
+
+public enum CaptureServiceError: LocalizedError, Equatable, Sendable {
+    case permissionDenied
+    case noDisplaysFound
+    case selectedDisplayUnavailable
+    case alreadyCapturing
+    case captureStartFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .permissionDenied:
+            return "Screen Recording permission is not granted. Authorize Castora Pro in System Settings and retry."
+        case .noDisplaysFound:
+            return "ScreenCaptureKit found no shareable displays."
+        case .selectedDisplayUnavailable:
+            return "The selected display is no longer available."
+        case .alreadyCapturing:
+            return "A local ScreenCaptureKit session is already running."
+        case .captureStartFailed(let detail):
+            return "ScreenCaptureKit failed to start: \(detail)"
+        }
+    }
+}
+
+public struct VideoToolboxEncoderCapability: Equatable, Sendable {
+    public let h264HardwareSupported: Bool
+    public let hevcHardwareSupported: Bool
+    public let summary: String
+
+    public init(h264HardwareSupported: Bool, hevcHardwareSupported: Bool, summary: String) {
+        self.h264HardwareSupported = h264HardwareSupported
+        self.hevcHardwareSupported = hevcHardwareSupported
+        self.summary = summary
+    }
+}

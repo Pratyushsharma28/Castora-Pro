@@ -53,9 +53,9 @@ export const ROADMAP_PHASES: RoadmapPhase[] = [
     phase: 3,
     title: 'Native macOS Project Bootstrap & Permissions Shell',
     dependsOn: 'Phase 1',
-    status: 'Planned',
-    goal: 'Create Xcode SwiftUI project with Info.plist local network/Bonjour keys and Screen Recording preflight.',
-    exitGate: 'macOS app compiles cleanly and detects Screen Recording permission status.',
+    status: 'Implemented',
+    goal: 'Create native Swift/SwiftUI foundation in apps/macos/ with Screen Recording permission handling, ScreenCaptureKit local capture, VideoToolbox probe, castora.v1 models, and XCTests (pending macOS Xcode verification).',
+    exitGate: 'Compiles in Xcode 15+, swift test passes, and ScreenCaptureKit capture respects real TCC permissions.',
   },
   {
     phase: 4,
@@ -165,6 +165,7 @@ export const REPO_FILES = [
   { path: 'docs/PROTOCOL_IMPLEMENTATION.md', role: 'Swift Codable & Kotlin kotlinx.serialization implementation guide' },
   { path: 'protocol/castora-protocol.schema.json', role: 'Strict Draft 2020-12 JSON Schema shared by Swift & Kotlin' },
   { path: 'scripts/validate-protocol.mjs', role: 'Automated Ajv validator for 16 valid & 21 invalid fixtures' },
+  { path: 'apps/macos/Package.swift', role: 'Native macOS Swift/SwiftUI app, ScreenCaptureKit shell & XCTest suite' },
 ];
 
 export const PLATFORM_STACK: PlatformLayerRow[] = [
