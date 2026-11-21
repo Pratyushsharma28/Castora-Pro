@@ -1,0 +1,42 @@
+# macOS & Xcode
+.DS_Store
+.AppleDouble
+.LSOverride
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcshareddata/swiftpm/
+DerivedData/
+.build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Android & Gradle
+.gradle/
+local.properties
+*.iml
+.idea/
+captures/
+.cxx/
+.externalNativeBuild/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Keystores & Local Secrets
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+.env*
+!.env.example
+
+# Web / Tooling Workspace
+node_modules/
+build/
+dist/
+coverage/
+*.log

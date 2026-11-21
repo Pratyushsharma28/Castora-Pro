@@ -1,0 +1,6 @@
+{
+  "name": "Castora — Architecture & Protocol Blueprint",
+  "description": "Phase 1 repository structure, system architecture, and castora.v1 WebRTC signaling protocol specification for native macOS, Android, and Android TV screen casting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

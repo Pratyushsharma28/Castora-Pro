@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Pratyushsharma28/Castora/protocol/castora-protocol.schema.json",
+  "title": "Castora Signaling Protocol v1.0",
+  "description": "Shared JSON signaling envelope and payload definitions for macOS and Android/Android TV Castora clients.",
+  "type": "object",
+  "required": [
+    "version",
+    "type",
+    "messageId",
+    "timestampMs",
+    "senderPeerId",
+    "payload"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "pair_request",
+        "pair_approval",
+        "sdp_offer",
+        "sdp_answer",
+        "ice_candidate",
+        "stream_control",
+        "ping",
+        "pong",
+        "disconnect",
+        "error"
+      ]
+    },
+    "messageId": {
+      "type": "string",
+      "minLength": 8
+    },
+    "timestampMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sessionId": {
+      "type": "string"
+    },
+    "senderPeerId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "targetPeerId": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "type": { "const": "pair_request" } }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["roomCode", "sessionToken", "deviceName", "platform", "role", "capabilities"],
+            "properties": {
+              "roomCode": { "type": "string", "pattern": "^[A-Z0-9]{6}$" },
+              "sessionToken": { "type": "string", "minLength": 16 },
+              "deviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "platform": { "type": "string", "enum": ["macos", "android", "android-tv"] },
+              "role": { "type": "string", "enum": ["sender", "receiver"] },
+              "capabilities": {
+                "type": "object",
+                "required": ["maxWidth", "maxHeight", "maxFps", "codecs", "supportsAudio"],
+                "properties": {
+                  "maxWidth": { "type": "integer", "minimum": 640 },
+                  "maxHeight": { "type": "integer", "minimum": 360 },
+                  "maxFps": { "type": "integer", "minimum": 15, "maximum": 120 },
+                  "codecs": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "type": "string", "enum": ["H264", "HEVC", "VP8", "VP9", "AV1"] }
+                  },
+                  "supportsAudio": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "pair_approval" } }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["approved", "receiverName", "receiverPlatform"],
+            "properties": {
+              "approved": { "type": "boolean" },
+              "reason": { "type": ["string", "null"] },
+              "receiverName": { "type": "string", "minLength": 1 },
+              "receiverPlatform": { "type": "string", "enum": ["macos", "android", "android-tv"] },
+              "assignedStreamId": { "type": "string" },
+              "iceConfig": {
+                "type": "object",
+                "properties": {
+                  "iceServers": { "type": "array" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "enum": ["sdp_offer", "sdp_answer"] } }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["streamId", "sdp"],
+            "properties": {
+              "streamId": { "type": "string", "minLength": 1 },
+              "sdp": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "ice_candidate" } }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["streamId", "sdpMid", "sdpMLineIndex", "candidate"],
+            "properties": {
+              "streamId": { "type": "string", "minLength": 1 },
+              "sdpMid": { "type": ["string", "null"] },
+              "sdpMLineIndex": { "type": "integer", "minimum": 0 },
+              "candidate": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "stream_control" } }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["streamId", "action"],
+            "properties": {
+              "streamId": { "type": "string", "minLength": 1 },
+              "action": {
+                "type": "string",
+                "enum": ["start", "pause", "resume", "focus_fullscreen", "return_to_grid", "stop"]
+              },
+              "targetMaxWidth": { "type": "integer", "minimum": 320 },
+              "targetMaxHeight": { "type": "integer", "minimum": 240 },
+              "targetMaxFps": { "type": "integer", "minimum": 5, "maximum": 120 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "disconnect" } }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["reason"],
+            "properties": {
+              "streamId": { "type": "string" },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "error" } }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["code", "message", "recoverable"],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "UNSUPPORTED_VERSION",
+                  "INVALID_MESSAGE",
+                  "INVALID_TOKEN",
+                  "INVALID_ROOM_CODE",
+                  "APPROVAL_DECLINED",
+                  "SESSION_FULL",
+                  "CAPTURE_PERMISSION_DENIED",
+                  "WEBRTC_NEGOTIATION_FAILED"
+                ]
+              },
+              "message": { "type": "string", "minLength": 1 },
+              "recoverable": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
