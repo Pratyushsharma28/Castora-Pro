@@ -1,0 +1,275 @@
+import { ArrowRight, Cast, ShieldAlert, Smartphone } from 'lucide-react';
+import type {
+  BrowserCapabilityReport,
+  CapturePreferences,
+  ConnectedReceiverSlot,
+  SessionSummaryRecord,
+  StreamTelemetrySnapshot,
+  StudioDestination,
+} from '../types/studio';
+import { SignalBadge } from '../components/common/SignalBadge';
+import { TelemetryStrip } from '../components/common/TelemetryStrip';
+import { VideoSurface } from '../components/common/VideoSurface';
+
+interface ControlRoomViewProps {
+  deviceId: string;
+  deviceName: string;
+  capabilities: BrowserCapabilityReport;
+  preferences: CapturePreferences;
+  receivers: ConnectedReceiverSlot[];
+  localStream: MediaStream | null;
+  programTelemetry: StreamTelemetrySnapshot;
+  recentSessions: SessionSummaryRecord[];
+  onNavigate: (destination: StudioDestination) => void;
+}
+
+const MAX_INITIAL_RECEIVERS = 6;
+
+export function ControlRoomView({
+  deviceId,
+  deviceName,
+  capabilities,
+  preferences,
+  receivers,
+  localStream,
+  programTelemetry,
+  recentSessions,
+  onNavigate,
+}: ControlRoomViewProps) {
+  const activeCount = receivers.filter((r) => r.connectionState === 'connected').length;
+
+  return (
+    <div className="space-y-6">
+      {!capabilities.isSecureContext && (
+        <div
+          role="alert"
+          className="flex flex-col gap-3 border border-[#F59E0B]/50 bg-[#191D20] px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div className="flex items-start gap-3">
+            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[#F59E0B]" aria-hidden="true" />
+            <div className="text-xs leading-relaxed text-[#F2F3F0]">
+              <span className="font-semibold text-[#F59E0B]">Non-secure HTTP origin detected</span>
+              <span className="text-[#929A9D]">
+                {' '}
+                ({capabilities.origin || 'unknown origin'}). Mac and Android Chrome require HTTPS for reliable screen capture and WebRTC over LAN.
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate('settings')}
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 border border-[#252A2F] bg-[#131619] px-3 text-xs font-medium text-[#F2F3F0] hover:border-[#FF7849] whitespace-nowrap"
+          >
+            <span>HTTPS Setup Guide</span>
+            <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+        {/* Left: Dominant Program Monitor Bay */}
+        <section className="space-y-4 lg:col-span-8" aria-label="Program Monitor Workspace">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <div>
+              <h1 className="font-display text-lg font-semibold tracking-tight text-[#F2F3F0]">
+                Control Room
+              </h1>
+              <p className="text-xs text-[#929A9D]">
+                Master broadcast preview, receiver capacity, and measured runtime telemetry.
+              </p>
+            </div>
+            <SignalBadge
+              label={localStream ? 'LOCAL CAPTURE LIVE' : 'PROGRAM STANDBY'}
+              tone={localStream ? 'active' : 'standby'}
+            />
+          </div>
+
+          <VideoSurface
+            slotLabel="PGM-01"
+            title={localStream ? `${deviceName} — Local Program` : 'Master Program Monitor'}
+            stream={localStream}
+            muted
+            standbyReason="No local screen capture or inbound receiver feed is active. Start a cast session from Cast Studio or join a room as a receiver."
+            statusBadge={
+              <SignalBadge
+                label={localStream ? 'STREAMING' : 'IDLE'}
+                tone={localStream ? 'active' : 'standby'}
+              />
+            }
+            actions={
+              <>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('cast')}
+                  className="inline-flex min-h-[40px] items-center gap-2 bg-[#FF7849] px-4 text-xs font-semibold text-[#101214] hover:opacity-90"
+                >
+                  <Cast className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Open Cast Studio</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('receivers')}
+                  className="inline-flex min-h-[40px] items-center gap-2 border border-[#252A2F] bg-[#191D20] px-4 text-xs font-medium text-[#F2F3F0] hover:border-[#FF7849]"
+                >
+                  <Smartphone className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Join as Receiver</span>
+                </button>
+              </>
+            }
+          />
+
+          <div>
+            <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-[0.08em] text-[#929A9D]">
+              <span>Program Telemetry</span>
+              <span className="tabular-metrics">
+                Target {preferences.resolution.toUpperCase()} · {preferences.targetFps} FPS · {preferences.codecPreference}
+              </span>
+            </div>
+            <TelemetryStrip telemetry={programTelemetry} />
+          </div>
+        </section>
+
+        {/* Right: Master Control Rail */}
+        <aside className="space-y-4 lg:col-span-4" aria-label="Master Control Rail">
+          {/* Session Status */}
+          <div className="border border-[#252A2F] bg-[#191D20] p-4">
+            <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
+              <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
+                Session Status
+              </h2>
+              <SignalBadge label="STAGE 1 READY" tone="standby" />
+            </div>
+
+            <dl className="mt-3 space-y-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[#929A9D]">Signaling Transport</dt>
+                <dd className="font-mono text-[#F2F3F0]">Standby (Stage 2)</dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[#929A9D]">Protocol Contract</dt>
+                <dd className="font-mono text-[#F2F3F0]">castora.v1</dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[#929A9D]">Secure Context</dt>
+                <dd className="font-mono">
+                  {capabilities.isSecureContext ? (
+                    <span className="text-[#8BD7B0]">HTTPS / Secure</span>
+                  ) : (
+                    <span className="text-[#F59E0B]">HTTP (Restricted)</span>
+                  )}
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          {/* Sender Device Info */}
+          <div className="border border-[#252A2F] bg-[#191D20] p-4">
+            <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
+              <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
+                Local Endpoint
+              </h2>
+              <button
+                type="button"
+                onClick={() => onNavigate('settings')}
+                className="text-[11px] font-medium text-[#FF7849] hover:underline"
+              >
+                Edit
+              </button>
+            </div>
+            <dl className="mt-3 space-y-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[#929A9D]">Device Name</dt>
+                <dd className="truncate font-medium text-[#F2F3F0]">{deviceName}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[#929A9D]">Device ID</dt>
+                <dd className="font-mono text-[#F2F3F0] tabular-metrics">{deviceId}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[#929A9D]">Runtime</dt>
+                <dd className="text-[#F2F3F0]">{capabilities.userAgentSummary}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[#929A9D]">H.264 Encode / Decode</dt>
+                <dd className="font-mono text-[#F2F3F0]">
+                  {capabilities.supportsVideoH264Encode ? 'ENC OK' : 'NO ENC'} /{' '}
+                  {capabilities.supportsVideoH264Decode ? 'DEC OK' : 'NO DEC'}
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          {/* Receiver Capacity Meter (0 / 6) */}
+          <div className="border border-[#252A2F] bg-[#191D20] p-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
+                Receiver Capacity
+              </h2>
+              <span className="font-mono text-xs font-semibold text-[#F2F3F0] tabular-metrics">
+                {activeCount} / {MAX_INITIAL_RECEIVERS}
+              </span>
+            </div>
+
+            <div
+              className="mt-3 grid grid-cols-6 gap-1.5"
+              aria-label={`Receiver capacity ${activeCount} of ${MAX_INITIAL_RECEIVERS} active`}
+            >
+              {Array.from({ length: MAX_INITIAL_RECEIVERS }, (_, idx) => {
+                const slot = receivers[idx];
+                const isConnected = slot?.connectionState === 'connected';
+                return (
+                  <div
+                    key={idx}
+                    className={`h-2.5 border ${
+                      isConnected
+                        ? 'border-[#8BD7B0] bg-[#8BD7B0]'
+                        : 'border-[#252A2F] bg-[#131619]'
+                    }`}
+                    title={slot ? `${slot.deviceName} (${slot.connectionState})` : `Slot ${idx + 1}: Empty`}
+                  />
+                );
+              })}
+            </div>
+
+            <p className="mt-2.5 text-[11px] leading-relaxed text-[#929A9D]">
+              Progressive scaling target: 1 → 2 → 3 → 6 verified receivers based on live encode headroom.
+            </p>
+          </div>
+
+          {/* Live Stream Health & Recent Sessions */}
+          <div className="border border-[#252A2F] bg-[#191D20] p-4">
+            <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
+              <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
+                Recent Sessions
+              </h2>
+              <button
+                type="button"
+                onClick={() => onNavigate('activity')}
+                className="text-[11px] font-medium text-[#929A9D] hover:text-[#F2F3F0]"
+              >
+                View Log
+              </button>
+            </div>
+
+            {recentSessions.length === 0 ? (
+              <p className="mt-3 text-xs leading-relaxed text-[#929A9D]">
+                No completed sessions in this runtime yet. Real WebRTC sessions and measured FPS summaries will appear here once Stage 2–4 transport is active.
+              </p>
+            ) : (
+              <ul className="mt-3 divide-y divide-[#252A2F] text-xs">
+                {recentSessions.map((session) => (
+                  <li key={session.sessionId} className="flex items-center justify-between py-2">
+                    <span className="text-[#F2F3F0]">{session.peerName}</span>
+                    <span className="font-mono text-[#929A9D] tabular-metrics">
+                      {session.resolution} · {session.durationLabel}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}

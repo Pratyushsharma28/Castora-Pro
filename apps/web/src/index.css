@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+:root {
+  --castora-bg: #101214;
+  --castora-surface: #191D20;
+  --castora-bay: #131619;
+  --castora-line: #252A2F;
+  --castora-text: #F2F3F0;
+  --castora-muted: #929A9D;
+  --castora-signal: #FF7849;
+  --castora-active: #8BD7B0;
+  --castora-warn: #F59E0B;
+  --castora-fault: #EF4444;
+}
+
+@layer base {
+  html,
+  body {
+    background-color: var(--castora-bg);
+    color: var(--castora-text);
+    font-family: var(--font-sans);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+  }
+
+  button:not(:disabled),
+  a[href],
+  select:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+.tabular-metrics {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
