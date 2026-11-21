@@ -8,11 +8,12 @@ import {
   validateCastoraEnvelope,
   type CastoraEnvelope,
 } from './protocolValidator.ts';
-import { toRoomStatePayload, type RoomManager } from './roomManager.ts';
+import { toRoomStatePayload, type RoomManager, type TerminatedStreamNotice } from './roomManager.ts';
 import type { SlidingWindowRateLimiter } from './security.ts';
 import type {
   CastoraDeviceRole,
   CastoraPlatform,
+  CastoraVideoCodec,
   DeviceCapabilities,
   PairingMethod,
   PublicRoomSnapshot,
@@ -79,6 +80,30 @@ export function broadcastRoomState(
     if (sock.readyState === WebSocket.OPEN) {
       sock.send(encoded);
     }
+  }
+}
+
+export function emitTerminatedStreams(
+  roomId: string,
+  terminatedStreams: TerminatedStreamNotice[],
+  reason: 'network_lost' | 'receiver_closed'
+): void {
+  for (const item of terminatedStreams) {
+    if (!item.targetSocket || item.targetSocket.readyState !== WebSocket.OPEN) continue;
+    sendJson(
+      item.targetSocket,
+      createServerEnvelope({
+        messageType: 'stream_stop',
+        senderDeviceId: item.publisherDeviceId,
+        receiverDeviceId: item.targetDeviceId,
+        roomId,
+        payload: {
+          sessionId: item.sessionId,
+          streamId: item.streamId,
+          reason,
+        },
+      })
+    );
   }
 }
 
@@ -241,6 +266,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
       const cleanup = roomManager.handleDisconnect(ws);
       if (cleanup.disconnectedDeviceId) {
         for (const item of cleanup.updatedRooms) {
+          emitTerminatedStreams(item.room.roomId, item.terminatedStreams, 'network_lost');
           const notice = createServerEnvelope({
             messageType: 'disconnect',
             receiverDeviceId: null,
@@ -262,7 +288,13 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
     });
 
     ws.on('error', () => {
-      roomManager.handleDisconnect(ws);
+      const cleanup = roomManager.handleDisconnect(ws);
+      if (cleanup.disconnectedDeviceId) {
+        for (const item of cleanup.updatedRooms) {
+          emitTerminatedStreams(item.room.roomId, item.terminatedStreams, 'network_lost');
+          broadcastRoomState(roomManager, item.room, item.peerSockets);
+        }
+      }
     });
   });
 
@@ -610,6 +642,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
             );
             return;
           }
+          emitTerminatedStreams(envelope.roomId, removed.terminatedStreams, 'receiver_closed');
           if (removed.removedSocket) {
             sendJson(
               removed.removedSocket,
@@ -641,6 +674,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
             memberToken: meta.token,
           });
           if (left.ok) {
+            emitTerminatedStreams(envelope.roomId, left.terminatedStreams, 'receiver_closed');
             broadcastRoomState(roomManager, left.room, [ws]);
             return;
           }
@@ -648,6 +682,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
 
         const cleanup = roomManager.handleDisconnect(ws);
         for (const item of cleanup.updatedRooms) {
+          emitTerminatedStreams(item.room.roomId, item.terminatedStreams, 'network_lost');
           for (const peerSocket of item.peerSockets) {
             sendJson(peerSocket, envelope);
           }
@@ -741,8 +776,80 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
         return;
       }
 
-      case 'stream_start':
-      case 'stream_stop':
+      case 'stream_start': {
+        const p = envelope.payload as {
+          sessionId: string;
+          streamId: string;
+          width: number;
+          height: number;
+          fps: number;
+          codec: CastoraVideoCodec;
+        };
+        const reg = roomManager.registerStreamStart({
+          socket: ws,
+          roomId: envelope.roomId,
+          senderDeviceId: envelope.senderDeviceId,
+          targetDeviceId: envelope.receiverDeviceId,
+          token: meta.token,
+          sessionId: p.sessionId,
+          streamId: p.streamId,
+          width: p.width,
+          height: p.height,
+          fps: p.fps,
+          codec: p.codec,
+        });
+        if (!reg.ok) {
+          sendJson(
+            ws,
+            createErrorEnvelope({
+              receiverDeviceId: envelope.senderDeviceId,
+              roomId: envelope.roomId,
+              code: reg.code,
+              message: reg.message,
+              recoverable: true,
+              relatedMessageId: envelope.messageId,
+            })
+          );
+          return;
+        }
+        sendJson(reg.targetSocket, envelope);
+        broadcastRoomState(roomManager, reg.room, reg.authorizedSockets);
+        return;
+      }
+
+      case 'stream_stop': {
+        const p = envelope.payload as {
+          sessionId: string;
+          streamId: string;
+        };
+        const reg = roomManager.registerStreamStop({
+          socket: ws,
+          roomId: envelope.roomId,
+          senderDeviceId: envelope.senderDeviceId,
+          targetDeviceId: envelope.receiverDeviceId,
+          token: meta.token,
+          sessionId: p.sessionId,
+          streamId: p.streamId,
+        });
+        if (!reg.ok) {
+          sendJson(
+            ws,
+            createErrorEnvelope({
+              receiverDeviceId: envelope.senderDeviceId,
+              roomId: envelope.roomId,
+              code: reg.code,
+              message: reg.message,
+              recoverable: true,
+              relatedMessageId: envelope.messageId,
+            })
+          );
+          return;
+        }
+        sendJson(reg.targetSocket, envelope);
+        broadcastRoomState(roomManager, reg.room, reg.authorizedSockets);
+        return;
+      }
+
       case 'stream_status': {
         const auth = roomManager.authorizePeerSignaling({
           socket: ws,

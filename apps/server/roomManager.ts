@@ -7,9 +7,11 @@ import {
   verifyToken,
 } from './security.ts';
 import type {
+  ActiveRoomStream,
   CastoraDeviceRole,
   CastoraPlatform,
   CastoraRoom,
+  CastoraVideoCodec,
   DeviceCapabilities,
   PairedReceiverMember,
   PairingMethod,
@@ -67,12 +69,21 @@ export type RejectPairResult =
     }
   | { ok: false; code: RoomOperationErrorCode; message: string };
 
+export interface TerminatedStreamNotice {
+  streamId: string;
+  sessionId: string;
+  publisherDeviceId: string;
+  targetDeviceId: string;
+  targetSocket: WebSocket | null;
+}
+
 export type RemoveReceiverResult =
   | {
       ok: true;
       room: PublicRoomSnapshot;
       removedDeviceId: string;
       removedSocket: WebSocket | null;
+      terminatedStreams: TerminatedStreamNotice[];
     }
   | { ok: false; code: RoomOperationErrorCode; message: string };
 
@@ -80,6 +91,7 @@ export type LeaveRoomResult =
   | {
       ok: true;
       room: PublicRoomSnapshot;
+      terminatedStreams: TerminatedStreamNotice[];
     }
   | { ok: false; code: RoomOperationErrorCode; message: string };
 
@@ -87,6 +99,19 @@ export type PeerSignalingAuthResult =
   | {
       ok: true;
       targetSocket: WebSocket;
+    }
+  | {
+      ok: false;
+      code: 'INVALID_ROOM_ID' | 'APPROVAL_DECLINED' | 'WEBRTC_NEGOTIATION_FAILED';
+      message: string;
+    };
+
+export type StreamRegistrationResult =
+  | {
+      ok: true;
+      targetSocket: WebSocket;
+      room: PublicRoomSnapshot;
+      authorizedSockets: WebSocket[];
     }
   | {
       ok: false;
@@ -105,6 +130,7 @@ export function toRoomStatePayload(snapshot: PublicRoomSnapshot): Record<string,
     maxReceivers: snapshot.maxReceivers,
     pendingRequests: snapshot.pendingRequests,
     pairedReceivers: snapshot.pairedReceivers,
+    activeStreams: snapshot.activeStreams,
   };
 }
 
@@ -174,6 +200,25 @@ export class RoomManager {
 
     const activeReceiverCount = pairedReceivers.filter((r) => r.connected).length;
 
+    const activeStreams =
+      status === 'active'
+        ? Array.from(room.activeStreams.values())
+            .sort((a, b) => a.startedAt - b.startedAt)
+            .map((stream) => ({
+              streamId: stream.streamId,
+              sessionId: stream.sessionId,
+              publisherDeviceId: stream.publisherDeviceId,
+              publisherName: stream.publisherName,
+              publisherPlatform: stream.publisherPlatform,
+              targetDeviceId: stream.targetDeviceId,
+              width: stream.width,
+              height: stream.height,
+              fps: stream.fps,
+              codec: stream.codec,
+              startedAt: new Date(stream.startedAt).toISOString(),
+            }))
+        : [];
+
     return {
       roomId: room.roomId,
       status,
@@ -189,6 +234,7 @@ export class RoomManager {
       pendingCount: pendingRequests.length,
       pendingRequests,
       pairedReceivers,
+      activeStreams,
     };
   }
 
@@ -439,6 +485,7 @@ export class RoomManager {
       maxReceivers: MAX_RECEIVERS_PER_ROOM,
       pendingRequests: new Map(),
       pairedReceivers: new Map(),
+      activeStreams: new Map(),
     };
 
     this.rooms.set(roomId, room);
@@ -684,6 +731,7 @@ export class RoomManager {
     }
 
     room.pairedReceivers.delete(params.receiverDeviceId);
+    const terminatedStreams = this.cleanupStreamsForParticipant(room, params.receiverDeviceId);
     const dev = this.devices.get(params.receiverDeviceId);
     if (dev && dev.roomId === room.roomId) {
       dev.roomId = null;
@@ -694,6 +742,7 @@ export class RoomManager {
       room: this.toPublicSnapshot(room),
       removedDeviceId: params.receiverDeviceId,
       removedSocket: this.getOpenSocket(params.receiverDeviceId),
+      terminatedStreams,
     };
   }
 
@@ -720,6 +769,7 @@ export class RoomManager {
 
     room.pairedReceivers.delete(params.deviceId);
     room.pendingRequests.delete(params.deviceId);
+    const terminatedStreams = this.cleanupStreamsForParticipant(room, params.deviceId);
 
     const dev = this.devices.get(params.deviceId);
     if (dev && dev.roomId === room.roomId) {
@@ -729,6 +779,7 @@ export class RoomManager {
     return {
       ok: true,
       room: this.toPublicSnapshot(room),
+      terminatedStreams,
     };
   }
 
@@ -896,12 +947,194 @@ export class RoomManager {
     };
   }
 
+  private getAuthorizedMemberSockets(room: CastoraRoom, excludeDeviceId?: string): WebSocket[] {
+    const sockets: WebSocket[] = [];
+    const seen = new Set<WebSocket>();
+
+    const candidateIds = [room.hostDeviceId, ...Array.from(room.pairedReceivers.keys())];
+    for (const id of candidateIds) {
+      if (excludeDeviceId && id === excludeDeviceId) continue;
+      const sock = this.getOpenSocket(id);
+      if (sock && !seen.has(sock)) {
+        seen.add(sock);
+        sockets.push(sock);
+      }
+    }
+    return sockets;
+  }
+
+  private resolveAuthenticatedMemberIdentity(
+    room: CastoraRoom,
+    deviceId: string
+  ): { deviceName: string; platform: CastoraPlatform } | null {
+    if (deviceId === room.hostDeviceId) {
+      return {
+        deviceName: room.hostDeviceName,
+        platform: room.hostPlatform,
+      };
+    }
+    const paired = room.pairedReceivers.get(deviceId);
+    if (paired) {
+      return {
+        deviceName: paired.deviceName,
+        platform: paired.platform,
+      };
+    }
+    return null;
+  }
+
+  private streamLinkKey(publisherDeviceId: string, targetDeviceId: string): string {
+    return `${publisherDeviceId}=>${targetDeviceId}`;
+  }
+
+  private cleanupStreamsForParticipant(
+    room: CastoraRoom,
+    deviceId: string
+  ): TerminatedStreamNotice[] {
+    const notices: TerminatedStreamNotice[] = [];
+    for (const [key, stream] of room.activeStreams.entries()) {
+      if (stream.publisherDeviceId === deviceId || stream.targetDeviceId === deviceId) {
+        room.activeStreams.delete(key);
+        if (stream.publisherDeviceId === deviceId) {
+          notices.push({
+            streamId: stream.streamId,
+            sessionId: stream.sessionId,
+            publisherDeviceId: stream.publisherDeviceId,
+            targetDeviceId: stream.targetDeviceId,
+            targetSocket: this.getOpenSocket(stream.targetDeviceId),
+          });
+        }
+      }
+    }
+    return notices;
+  }
+
+  registerStreamStart(params: {
+    socket: WebSocket;
+    roomId: string | null;
+    senderDeviceId: string;
+    targetDeviceId: string | null;
+    token?: string;
+    sessionId: string;
+    streamId: string;
+    width: number;
+    height: number;
+    fps: number;
+    codec: CastoraVideoCodec;
+  }): StreamRegistrationResult {
+    const auth = this.authorizePeerSignaling({
+      socket: params.socket,
+      roomId: params.roomId,
+      senderDeviceId: params.senderDeviceId,
+      targetDeviceId: params.targetDeviceId,
+      token: params.token,
+    });
+    if (!auth.ok) return auth;
+
+    const room = this.rooms.get(params.roomId!)!;
+    const identity = this.resolveAuthenticatedMemberIdentity(room, params.senderDeviceId);
+    if (!identity) {
+      return {
+        ok: false,
+        code: 'APPROVAL_DECLINED',
+        message: 'Unauthorized: publisher is not an authenticated member of this room',
+      };
+    }
+
+    for (const existing of room.activeStreams.values()) {
+      if (existing.streamId === params.streamId && existing.publisherDeviceId !== params.senderDeviceId) {
+        return {
+          ok: false,
+          code: 'APPROVAL_DECLINED',
+          message: 'Unauthorized: streamId is bound to another authenticated publisher',
+        };
+      }
+    }
+
+    const linkKey = this.streamLinkKey(params.senderDeviceId, params.targetDeviceId!);
+    const record: ActiveRoomStream = {
+      streamId: params.streamId,
+      sessionId: params.sessionId,
+      publisherDeviceId: params.senderDeviceId,
+      publisherName: identity.deviceName,
+      publisherPlatform: identity.platform,
+      targetDeviceId: params.targetDeviceId!,
+      width: params.width,
+      height: params.height,
+      fps: params.fps,
+      codec: params.codec,
+      startedAt: Date.now(),
+    };
+    room.activeStreams.set(linkKey, record);
+
+    return {
+      ok: true,
+      targetSocket: auth.targetSocket,
+      room: this.toPublicSnapshot(room),
+      authorizedSockets: this.getAuthorizedMemberSockets(room),
+    };
+  }
+
+  registerStreamStop(params: {
+    socket: WebSocket;
+    roomId: string | null;
+    senderDeviceId: string;
+    targetDeviceId: string | null;
+    token?: string;
+    sessionId: string;
+    streamId: string;
+  }): StreamRegistrationResult {
+    const auth = this.authorizePeerSignaling({
+      socket: params.socket,
+      roomId: params.roomId,
+      senderDeviceId: params.senderDeviceId,
+      targetDeviceId: params.targetDeviceId,
+      token: params.token,
+    });
+    if (!auth.ok) return auth;
+
+    const room = this.rooms.get(params.roomId!)!;
+    for (const existing of room.activeStreams.values()) {
+      if (existing.streamId === params.streamId && existing.publisherDeviceId !== params.senderDeviceId) {
+        return {
+          ok: false,
+          code: 'APPROVAL_DECLINED',
+          message: 'Unauthorized: only the authenticated stream publisher may stop this stream',
+        };
+      }
+    }
+
+    const linkKey = this.streamLinkKey(params.senderDeviceId, params.targetDeviceId!);
+    const current = room.activeStreams.get(linkKey);
+    if (current && current.streamId === params.streamId) {
+      room.activeStreams.delete(linkKey);
+    } else {
+      for (const [k, s] of room.activeStreams.entries()) {
+        if (
+          s.publisherDeviceId === params.senderDeviceId &&
+          s.targetDeviceId === params.targetDeviceId &&
+          (s.streamId === params.streamId || s.sessionId === params.sessionId)
+        ) {
+          room.activeStreams.delete(k);
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      targetSocket: auth.targetSocket,
+      room: this.toPublicSnapshot(room),
+      authorizedSockets: this.getAuthorizedMemberSockets(room),
+    };
+  }
+
   handleDisconnect(socket: WebSocket): {
     disconnectedDeviceId: string | null;
     updatedRooms: Array<{
       room: PublicRoomSnapshot;
       peerSockets: WebSocket[];
       wasHost: boolean;
+      terminatedStreams: TerminatedStreamNotice[];
     }>;
   } {
     const deviceId = this.socketToDeviceId.get(socket) ?? null;
@@ -920,6 +1153,7 @@ export class RoomManager {
       room: PublicRoomSnapshot;
       peerSockets: WebSocket[];
       wasHost: boolean;
+      terminatedStreams: TerminatedStreamNotice[];
     }> = [];
 
     for (const room of this.rooms.values()) {
@@ -946,11 +1180,14 @@ export class RoomManager {
         touched = true;
       }
 
+      const terminatedStreams = this.cleanupStreamsForParticipant(room, deviceId);
+
       if (touched) {
         updatedRooms.push({
           room: this.toPublicSnapshot(room),
           peerSockets: this.getAllRoomSockets(room, deviceId),
           wasHost,
+          terminatedStreams,
         });
       }
     }

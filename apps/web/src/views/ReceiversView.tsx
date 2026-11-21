@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Cast, Check, LogOut, QrCode, ScanLine, ShieldCheck, Trash2, Volume2, VolumeX, X } from 'lucide-react';
+import { Cast, Check, LogOut, MonitorPlay, QrCode, ScanLine, ShieldCheck, Square, Trash2, X } from 'lucide-react';
 import type {
   PairingLifecycleStatus,
   RoomSnapshot,
@@ -11,9 +11,8 @@ import type {
   StudioDestination,
   WebRtcConnectionPhase,
 } from '../types/studio';
+import { IncomingScreensPanel } from '../components/common/IncomingScreensPanel';
 import { SignalBadge, type SignalTone } from '../components/common/SignalBadge';
-import { TelemetryStrip } from '../components/common/TelemetryStrip';
-import { VideoSurface } from '../components/common/VideoSurface';
 
 interface ReceiversViewProps {
   deviceId: string;
@@ -34,6 +33,8 @@ interface ReceiversViewProps {
   onRemoveReceiver: (receiverDeviceId: string) => Promise<RoomSnapshot>;
   onLeaveRoom: () => Promise<void>;
   onCloseRoom: () => Promise<void>;
+  onStartSharing: (targetSelection: string | string[] | null) => Promise<void>;
+  onStopSharing: () => void;
   onNavigate: (destination: StudioDestination) => void;
   onLogEvent: (category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error', title: string, detail: string) => void;
 }
@@ -57,23 +58,6 @@ function statusToTone(status: PairingLifecycleStatus): SignalTone {
   }
 }
 
-function webrtcPhaseToBadge(phase: WebRtcConnectionPhase): { label: string; tone: SignalTone; pulse?: boolean } {
-  switch (phase) {
-    case 'connected':
-      return { label: 'CONNECTED', tone: 'active' };
-    case 'connecting':
-      return { label: 'CONNECTING', tone: 'signal', pulse: true };
-    case 'reconnecting':
-      return { label: 'RECONNECTING', tone: 'warn', pulse: true };
-    case 'failed':
-      return { label: 'ERROR', tone: 'fault' };
-    case 'disconnected':
-      return { label: 'DISCONNECTED', tone: 'warn' };
-    default:
-      return { label: 'WAITING FOR HOST', tone: 'standby' };
-  }
-}
-
 export function ReceiversView({
   deviceId,
   deviceName,
@@ -93,6 +77,8 @@ export function ReceiversView({
   onRemoveReceiver,
   onLeaveRoom,
   onCloseRoom,
+  onStartSharing,
+  onStopSharing,
   onNavigate,
   onLogEvent,
 }: ReceiversViewProps) {
@@ -102,14 +88,18 @@ export function ReceiversView({
   const [roomCode, setRoomCode] = useState<string>(initialRoomCode);
   const [qrInput, setQrInput] = useState<string>('');
   const [busy, setBusy] = useState<boolean>(false);
+  const [shareBusy, setShareBusy] = useState<boolean>(false);
   const [actionId, setActionId] = useState<string | null>(null);
-  const [receiverMuted, setReceiverMuted] = useState<boolean>(true);
   const [feedback, setFeedback] = useState<{ tone: 'info' | 'error'; text: string } | null>(null);
 
   const pendingRequests = activeRoom?.pendingRequests ?? [];
   const pairedReceivers = activeRoom?.pairedReceivers ?? [];
   const myPairedSlot = pairedReceivers.find((r) => r.deviceId === deviceId);
-  const webrtcBadge = webrtcPhaseToBadge(webrtcState.phase);
+  const isApprovedMember =
+    Boolean(activeRoom) &&
+    (activeRoomRole === 'host' || Boolean(myPairedSlot));
+  const canShareScreen =
+    capabilities.isSecureContext && capabilities.supportsDisplayMedia && isApprovedMember;
 
   const handleRoomInputChange = (raw: string) => {
     const cleaned = raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
@@ -215,6 +205,19 @@ export function ReceiversView({
     }
   };
 
+  const handleShareBack = async () => {
+    setShareBusy(true);
+    try {
+      await onStartSharing(null);
+      setFeedback({ tone: 'info', text: 'Started sharing your screen in the active room.' });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to share your screen';
+      setFeedback({ tone: 'error', text: message });
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
   const runHostDecision = async (
     targetDeviceId: string,
     action: 'approve' | 'reject' | 'remove'
@@ -247,7 +250,7 @@ export function ReceiversView({
             Receivers &amp; Pairing
           </h1>
           <p className="text-xs text-[#929A9D]">
-            Server-verified room codes, explicit host approval, and up to 6 paired receivers per room.
+            Server-verified room codes, explicit host approval, bidirectional screen sharing, and up to 6 paired participants per room.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -440,7 +443,7 @@ export function ReceiversView({
             )}
           </div>
 
-          {/* Receiver Identity */}
+          {/* Local Identity */}
           <div className="border border-[#252A2F] bg-[#191D20] p-4">
             <h2 className="border-b border-[#252A2F] pb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
               Local Endpoint Identity
@@ -468,9 +471,9 @@ export function ReceiversView({
           </div>
         </section>
 
-        {/* Right: Host Approval Queue & Paired Receivers OR Receiver Pairing Status */}
+        {/* Right: Pairing Status, Bidirectional Controls, Incoming Screens, Approval Queue */}
         <section className="space-y-4 lg:col-span-7" aria-label="Approval Queue and Pairing Status">
-          {/* Receiver Pairing Status Card (always shown when acting as receiver or when status is Rejected/Expired/Disconnected) */}
+          {/* Participant Pairing Status Card */}
           {(activeRoomRole === 'receiver' ||
             pairingStatus === 'Rejected' ||
             pairingStatus === 'Expired' ||
@@ -480,7 +483,7 @@ export function ReceiversView({
             <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-3">
               <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
                 <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                  Receiver Pairing Status
+                  Participant Pairing Status
                 </h2>
                 <SignalBadge
                   label={pairingStatus}
@@ -518,78 +521,77 @@ export function ReceiversView({
             </div>
           )}
 
-          {/* Receiver Live WebRTC Screen Player */}
-          {activeRoomRole === 'receiver' &&
-            (pairingStatus === 'Paired' ||
-              webrtcState.remoteStream !== null ||
-              webrtcState.phase === 'connecting' ||
-              webrtcState.phase === 'reconnecting' ||
-              webrtcState.phase === 'failed' ||
-              webrtcState.phase === 'disconnected') && (
-              <div className="space-y-3">
-                <VideoSurface
-                  slotLabel={
-                    myPairedSlot
-                      ? `SLOT ${String(myPairedSlot.assignedSlotIndex + 1).padStart(2, '0')}`
-                      : 'RX-01'
-                  }
-                  title={
-                    activeRoom
-                      ? `${activeRoom.hostDeviceName} — Live Shared Screen`
-                      : 'Inbound Screen Stream'
-                  }
-                  stream={webrtcState.remoteStream}
-                  muted={receiverMuted}
-                  highlight={webrtcState.phase === 'connected'}
-                  standbyReason={
-                    webrtcState.errorMessage ??
-                    webrtcState.statusDetail ??
-                    'Paired with host. Waiting for host to click Start Sharing in Cast Studio.'
-                  }
-                  statusBadge={
-                    <SignalBadge
-                      label={webrtcBadge.label}
-                      tone={webrtcBadge.tone}
-                      pulse={webrtcBadge.pulse}
-                    />
-                  }
-                  footerMeta={
-                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                      <span className="font-mono text-[11px] text-[#929A9D] tabular-metrics">
-                        ICE: {webrtcState.iceConnectionState ?? 'idle'}
-                        {webrtcState.remoteStreamMeta
-                          ? ` · Host ${webrtcState.remoteStreamMeta.width}×${webrtcState.remoteStreamMeta.height} @ ${webrtcState.remoteStreamMeta.fps} FPS (${webrtcState.remoteStreamMeta.codec})`
-                          : ''}
-                      </span>
-                      <button
-                        type="button"
-                        disabled={!webrtcState.remoteStream}
-                        onClick={() => setReceiverMuted((m) => !m)}
-                        className="inline-flex min-h-[30px] items-center gap-1.5 border border-[#252A2F] bg-[#191D20] px-2.5 text-[11px] font-medium text-[#F2F3F0] hover:border-[#FF7849] disabled:opacity-40"
-                      >
-                        {receiverMuted ? (
-                          <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
-                        ) : (
-                          <Volume2 className="h-3.5 w-3.5 text-[#8BD7B0]" aria-hidden="true" />
-                        )}
-                        <span>{receiverMuted ? 'Unmute Audio' : 'Mute Audio'}</span>
-                      </button>
-                    </div>
-                  }
-                />
-
-                {webrtcState.errorMessage && (
-                  <div
-                    role="alert"
-                    className="border border-[#EF4444]/60 bg-[#191D20] px-3 py-2 text-xs text-[#EF4444]"
+          {/* Quick Bidirectional Screen Sharing Controls when approved in room */}
+          {isApprovedMember && (
+            <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
+                    Bidirectional Screen Share
+                  </h2>
+                  <p className="mt-0.5 text-xs text-[#929A9D]">
+                    {activeRoomRole === 'receiver'
+                      ? `Share your screen back to ${activeRoom?.hostDeviceName ?? 'the host'} while watching incoming screens.`
+                      : 'Share your screen to approved participants or view incoming participant screens below.'}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={shareBusy || !canShareScreen}
+                    onClick={handleShareBack}
+                    className="inline-flex min-h-[38px] items-center gap-1.5 bg-[#FF7849] px-3 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
                   >
-                    {webrtcState.errorMessage}
-                  </div>
-                )}
-
-                <TelemetryStrip telemetry={webrtcState.telemetry} />
+                    <MonitorPlay className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>
+                      {shareBusy
+                        ? 'Starting...'
+                        : webrtcState.isSharingLocal
+                          ? 'Replace My Screen'
+                          : 'Share My Screen'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!webrtcState.isSharingLocal}
+                    onClick={onStopSharing}
+                    className="inline-flex min-h-[38px] items-center gap-1.5 border border-[#EF4444]/60 bg-[#131619] px-3 text-xs font-semibold text-[#EF4444] hover:bg-[#EF4444]/10 disabled:border-[#252A2F] disabled:text-[#929A9D] disabled:opacity-50"
+                  >
+                    <Square className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Stop My Screen</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('cast')}
+                    className="inline-flex min-h-[38px] items-center gap-1.5 border border-[#252A2F] bg-[#131619] px-3 text-xs font-medium text-[#F2F3F0] hover:border-[#FF7849]"
+                  >
+                    <Cast className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Open Cast Studio</span>
+                  </button>
+                </div>
               </div>
-            )}
+              {webrtcState.errorMessage && (
+                <div
+                  role="alert"
+                  className="border border-[#EF4444]/60 bg-[#131619] px-3 py-2 text-xs text-[#EF4444]"
+                >
+                  {webrtcState.errorMessage}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Incoming Screens Panel (works symmetrically for Host & Paired Participant) */}
+          {(isApprovedMember || webrtcState.incomingStreams.length > 0) && (
+            <IncomingScreensPanel
+              streams={webrtcState.incomingStreams}
+              emptyMessage={
+                activeRoomRole === 'receiver'
+                  ? `Paired with ${activeRoom?.hostDeviceName ?? 'host'}. Waiting for host to click Share My Screen — or click Share My Screen above to cast your screen to them.`
+                  : 'No paired participant is sharing their screen back yet. Approved participants can click Share My Screen to publish to this room.'
+              }
+            />
+          )}
 
           {/* Host Incoming Approval Queue */}
           <div className="border border-[#252A2F] bg-[#191D20] p-4">
@@ -614,7 +616,7 @@ export function ReceiversView({
                   <span className="text-right">Action</span>
                 </div>
                 <p className="mt-4 text-xs leading-relaxed text-[#929A9D]">
-                  No incoming pairing requests. Receivers never auto-pair — every device joining a room code must be explicitly approved by the host before pairing completes.
+                  No incoming pairing requests. Participants never auto-pair — every device joining a room code must be explicitly approved by the host before pairing completes.
                 </p>
               </div>
             ) : (
@@ -658,11 +660,11 @@ export function ReceiversView({
             )}
           </div>
 
-          {/* Host / Room Paired Receivers Roster */}
+          {/* Host / Room Paired Participants Roster */}
           <div className="border border-[#252A2F] bg-[#191D20] p-4">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#252A2F] pb-2.5">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                Paired Receivers
+                Paired Participants
               </h2>
               <div className="flex items-center gap-3">
                 <span className="font-mono text-xs text-[#929A9D] tabular-metrics">
@@ -683,7 +685,7 @@ export function ReceiversView({
 
             {pairedReceivers.length === 0 ? (
               <p className="mt-3 text-xs leading-relaxed text-[#929A9D]">
-                No paired receivers in this room yet. Approved receivers appear here with assigned slots (up to 6) and individual disconnect controls.
+                No paired participants in this room yet. Approved devices appear here with assigned slots (up to 6) and individual disconnect controls.
               </p>
             ) : (
               <ul className="mt-3 divide-y divide-[#252A2F]">

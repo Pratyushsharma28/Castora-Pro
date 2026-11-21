@@ -15,7 +15,7 @@ interface MultiViewViewProps {
   slots: ConnectedReceiverSlot[];
   capabilities: BrowserCapabilityReport;
   onToggleMute?: (slotIndex: number) => void;
-  onDisconnectSlot?: (receiverDeviceId: string) => void;
+  onDisconnectSlot?: (peerDeviceId: string) => void;
   onLogEvent: (category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error', title: string, detail: string) => void;
 }
 
@@ -41,6 +41,11 @@ const EMPTY_TELEMETRY: StreamTelemetrySnapshot = {
   connectionState: 'idle',
 };
 
+function formatBitrate(kbps: number | null): string {
+  if (kbps === null || !Number.isFinite(kbps)) return '—';
+  return kbps >= 1000 ? `${(kbps / 1000).toFixed(2)} Mbps` : `${Math.round(kbps)} kbps`;
+}
+
 export function MultiViewView({
   layout,
   onChangeLayout,
@@ -55,15 +60,16 @@ export function MultiViewView({
   const wallRef = useRef<HTMLDivElement | null>(null);
 
   const slotCount = LAYOUT_OPTIONS.find((opt) => opt.id === layout)?.count ?? 6;
+  const activeStreamCount = slots.filter((s) => s.stream !== null).length;
 
   const normalizedSlots: ConnectedReceiverSlot[] = Array.from(
     { length: slotCount },
     (_, idx) =>
       slots[idx] ?? {
         slotIndex: idx,
-        receiverDeviceId: `standby-${idx + 1}`,
-        deviceName: `Receiver Slot ${String(idx + 1).padStart(2, '0')}`,
-        platform: 'android',
+        receiverDeviceId: '',
+        deviceName: `Standby Feed ${String(idx + 1).padStart(2, '0')}`,
+        platform: 'macos',
         connectionState: 'idle',
         stream: null,
         hasAudioTrack: false,
@@ -101,32 +107,52 @@ export function MultiViewView({
           : 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-3';
 
   const renderTile = (slot: ConnectedReceiverSlot, isPrimarySpotlight = false) => {
-    const slotCode = `SLOT ${String(slot.slotIndex + 1).padStart(2, '0')}`;
-    const isActive = slot.connectionState === 'connected' && slot.stream !== null;
+    const slotCode = `IN-${String(slot.slotIndex + 1).padStart(2, '0')}`;
+    const hasRealPeer = slot.receiverDeviceId.length > 0;
+    const isActive = hasRealPeer && slot.connectionState === 'connected' && slot.stream !== null;
+    const isConnecting = hasRealPeer && (slot.connectionState === 'connecting' || slot.connectionState === 'reconnecting');
+    const isError = hasRealPeer && slot.connectionState === 'failed';
     const isSpotlightTarget = layout === 'spotlight' && slot.slotIndex === spotlightIndex;
+
+    const measuredFps = slot.telemetry.decodedFps ?? slot.telemetry.encodedFps ?? slot.telemetry.captureFps;
 
     return (
       <VideoSurface
-        key={slot.slotIndex}
+        key={`${slot.slotIndex}-${slot.receiverDeviceId || 'standby'}`}
         slotLabel={slotCode}
-        title={isActive ? slot.deviceName : `${slot.deviceName} (Standby)`}
+        title={
+          hasRealPeer
+            ? `${slot.deviceName} (${slot.receiverDeviceId})`
+            : `${slot.deviceName}`
+        }
         stream={slot.stream}
         muted={slot.muted}
-        highlight={isPrimarySpotlight || isSpotlightTarget}
-        standbyReason="Awaiting Stage 3–4 receiver pairing. Real inbound tracks, decoded FPS, and RTT will populate this tile automatically."
+        highlight={isPrimarySpotlight || isSpotlightTarget || isActive}
+        standbyReason={
+          hasRealPeer
+            ? `Connecting to incoming stream from ${slot.deviceName}...`
+            : 'No incoming stream on this feed. Real incoming participant screens and getStats() telemetry appear automatically when shared.'
+        }
         statusBadge={
           <SignalBadge
-            label={isActive ? 'LIVE' : 'STANDBY'}
-            tone={isActive ? 'active' : 'standby'}
+            label={isActive ? 'LIVE' : isConnecting ? 'CONNECTING' : isError ? 'ERROR' : 'STANDBY'}
+            tone={isActive ? 'active' : isConnecting ? 'signal' : isError ? 'fault' : 'standby'}
+            pulse={isConnecting}
           />
         }
         footerMeta={
           <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] tabular-metrics">
-            <div className="flex items-center gap-3 text-[#929A9D]">
+            <div className="flex flex-wrap items-center gap-3 text-[#929A9D]">
               <span>
                 FPS:{' '}
                 <strong className="font-medium text-[#F2F3F0]">
-                  {slot.telemetry.decodedFps !== null ? slot.telemetry.decodedFps.toFixed(1) : '—'}
+                  {measuredFps !== null ? measuredFps.toFixed(1) : '—'}
+                </strong>
+              </span>
+              <span>
+                Bitrate:{' '}
+                <strong className="font-medium text-[#F2F3F0]">
+                  {formatBitrate(slot.telemetry.bitrateKbps)}
                 </strong>
               </span>
               <span>
@@ -156,11 +182,17 @@ export function MultiViewView({
                   Focus
                 </button>
               )}
-                <button
+              <button
                 type="button"
-                disabled={!isActive || !onToggleMute}
+                disabled={!isActive || !slot.hasAudioTrack || !onToggleMute}
                 onClick={() => onToggleMute?.(slot.slotIndex)}
-                title={isActive ? (slot.muted ? 'Unmute tile' : 'Mute tile') : 'Available when stream is active'}
+                title={
+                  isActive && slot.hasAudioTrack
+                    ? slot.muted
+                      ? 'Unmute tile'
+                      : 'Mute tile'
+                    : 'Available when stream has audio'
+                }
                 className="inline-flex h-7 w-7 items-center justify-center border border-[#252A2F] bg-[#191D20] text-[#929A9D] hover:border-[#FF7849] hover:text-[#F2F3F0] disabled:opacity-40"
                 aria-label={`Toggle mute for ${slotCode}`}
               >
@@ -172,9 +204,9 @@ export function MultiViewView({
               </button>
               <button
                 type="button"
-                disabled={!isActive || !onDisconnectSlot}
+                disabled={!hasRealPeer || !onDisconnectSlot}
                 onClick={() => onDisconnectSlot?.(slot.receiverDeviceId)}
-                title={isActive ? 'Disconnect receiver' : 'Available when stream is active'}
+                title={hasRealPeer ? 'Disconnect participant' : 'Available when participant is connected'}
                 className="inline-flex h-7 w-7 items-center justify-center border border-[#252A2F] bg-[#191D20] text-[#929A9D] hover:border-[#EF4444] hover:text-[#EF4444] disabled:opacity-40"
                 aria-label={`Disconnect ${slotCode}`}
               >
@@ -192,10 +224,10 @@ export function MultiViewView({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="font-display text-lg font-semibold tracking-tight text-[#F2F3F0]">
-            Multi-View Monitor Wall
+            Multi-View Incoming Screens
           </h1>
           <p className="text-xs text-[#929A9D]">
-            Up to 6 simultaneous screen slots with per-tile telemetry and independent spotlight / fullscreen staging.
+            Live incoming participant screens ({activeStreamCount} active) with real getStats() FPS, bitrate, resolution, and RTT.
           </p>
         </div>
 

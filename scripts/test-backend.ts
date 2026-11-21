@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import WebSocket from 'ws';
+import type { RoomSnapshot } from '../apps/web/src/services/backendClient.ts';
 import {
   ScreenCaptureError,
   startScreenCapture,
 } from '../apps/web/src/services/screenCaptureService.ts';
+import { WebRtcSignalingBridge } from '../apps/web/src/services/webrtcSignalingBridge.ts';
+import type { CastoraEnvelope } from '../apps/web/src/types/protocol.ts';
 import { startCastoraServer } from '../server.ts';
 
 type JsonRecord = Record<string, unknown>;
@@ -1241,6 +1244,646 @@ async function main() {
     assert.equal(nativeEndTriggered, 0, 'Programmatic stop must detach ended listener cleanly');
     console.log('  [PASS] 4A.10. Screen capture permission denial, secure-context guard & track cleanup verified');
 
+    // =========================================================================
+    // STAGE 4B VERIFICATION: Bidirectional WebRTC, Perfect Negotiation & Multi-Peer
+    // =========================================================================
+    console.log('\nStarting Stage 4B bidirectional WebRTC & multi-peer integration tests...');
+
+    // Lightweight stateful fake RTCPeerConnection implementing Unified Plan SDP state machine,
+    // rollback for Perfect Negotiation, transceivers/senders, ICE candidates, and remote ontrack delivery.
+    class FakeMediaStream {
+      readonly id: string;
+      private tracks: Array<{
+        id: string;
+        kind: string;
+        readyState: string;
+        muted: boolean;
+        contentHint: string;
+        _listeners: Map<string, Set<() => void>>;
+        getSettings: () => { width: number; height: number; frameRate: number };
+        addEventListener: (evt: string, cb: () => void) => void;
+        removeEventListener: (evt: string, cb: () => void) => void;
+        dispatchEventName: (evt: string) => void;
+        stop: () => void;
+      }>;
+      constructor(id: string, trackLabel = 'screen') {
+        this.id = id;
+        const listeners = new Map<string, Set<() => void>>();
+        const track = {
+          id: `${trackLabel}-${id}`,
+          kind: 'video',
+          readyState: 'live',
+          muted: false,
+          contentHint: 'motion',
+          _listeners: listeners,
+          getSettings: () => ({ width: 1920, height: 1080, frameRate: 60 }),
+          addEventListener: (evt: string, cb: () => void) => {
+            if (!listeners.has(evt)) listeners.set(evt, new Set());
+            listeners.get(evt)!.add(cb);
+          },
+          removeEventListener: (evt: string, cb: () => void) => {
+            listeners.get(evt)?.delete(cb);
+          },
+          dispatchEventName: (evt: string) => {
+            for (const cb of listeners.get(evt) ?? []) cb();
+          },
+          stop: () => {
+            track.readyState = 'ended';
+            track.dispatchEventName('ended');
+          },
+        };
+        this.tracks = [track];
+      }
+      getVideoTracks() {
+        return this.tracks.filter((t) => t.kind === 'video');
+      }
+      getAudioTracks() {
+        return [];
+      }
+      getTracks() {
+        return [...this.tracks];
+      }
+      addTrack(track: (typeof this.tracks)[number]) {
+        this.tracks.push(track);
+      }
+    }
+
+    class FakeRtcPeerConnection {
+      signalingState: RTCSignalingState = 'stable';
+      iceConnectionState: RTCIceConnectionState = 'connected';
+      connectionState: RTCPeerConnectionState = 'connected';
+      localDescription: RTCSessionDescriptionInit | null = null;
+      remoteDescription: RTCSessionDescriptionInit | null = null;
+      onicecandidate: ((ev: { candidate: RTCIceCandidateInit | null }) => void) | null = null;
+      ontrack: ((ev: { track: unknown; streams: unknown[] }) => void) | null = null;
+      oniceconnectionstatechange: (() => void) | null = null;
+      onconnectionstatechange: (() => void) | null = null;
+
+      private transceivers: Array<{
+        direction: RTCRtpTransceiverDirection;
+        sender: {
+          track: unknown;
+          replaceTrack: (t: unknown) => Promise<void>;
+          getParameters: () => { encodings: unknown[]; degradationPreference?: string };
+          setParameters: () => Promise<void>;
+        };
+      }> = [];
+      private deliveredRemoteStream: FakeMediaStream | null = null;
+
+      addTrack(track: unknown) {
+        const sender = {
+          track,
+          replaceTrack: async (next: unknown) => {
+            sender.track = next;
+          },
+          getParameters: () => ({ encodings: [{}] }),
+          setParameters: async () => {},
+        };
+        this.transceivers.push({ direction: 'sendonly', sender });
+        return sender;
+      }
+
+      removeTrack(sender: unknown) {
+        const tr = this.transceivers.find((t) => t.sender === sender);
+        if (tr) tr.sender.track = null;
+      }
+
+      getSenders() {
+        return this.transceivers.map((t) => t.sender);
+      }
+
+      getTransceivers() {
+        return this.transceivers;
+      }
+
+      async createOffer() {
+        const activeSending = this.transceivers.some(
+          (t) =>
+            t.sender.track !== null &&
+            (t.direction === 'sendonly' || t.direction === 'sendrecv')
+        );
+        return {
+          type: 'offer' as const,
+          sdp: `v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=${activeSending ? 'sendrecv' : 'recvonly'}\r\n`,
+        };
+      }
+
+      async createAnswer() {
+        const activeSending = this.transceivers.some(
+          (t) =>
+            t.sender.track !== null &&
+            (t.direction === 'sendonly' || t.direction === 'sendrecv')
+        );
+        return {
+          type: 'answer' as const,
+          sdp: `v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=${activeSending ? 'sendrecv' : 'recvonly'}\r\n`,
+        };
+      }
+
+      async setLocalDescription(desc?: RTCSessionDescriptionInit) {
+        if (!desc) return;
+        if (desc.type === 'rollback') {
+          this.localDescription = null;
+          this.signalingState = 'stable';
+          return;
+        }
+        this.localDescription = desc;
+        if (desc.type === 'offer') {
+          this.signalingState = 'have-local-offer';
+          queueMicrotask(() => {
+            this.onicecandidate?.({
+              candidate: {
+                candidate: 'candidate:1 1 UDP 2122252543 127.0.0.1 54321 typ host',
+                sdpMid: '0',
+                sdpMLineIndex: 0,
+              },
+            });
+          });
+        } else if (desc.type === 'answer') {
+          this.signalingState = 'stable';
+        }
+      }
+
+      async setRemoteDescription(desc: RTCSessionDescriptionInit) {
+        this.remoteDescription = desc;
+        if (desc.type === 'offer') {
+          this.signalingState = 'have-remote-offer';
+          const remoteSending = Boolean(desc.sdp?.includes('a=sendrecv'));
+          if (remoteSending) {
+            if (!this.deliveredRemoteStream) {
+              this.deliveredRemoteStream = new FakeMediaStream(
+                `remote-${Math.random().toString(36).slice(2, 8)}`
+              );
+              const track = this.deliveredRemoteStream.getVideoTracks()[0];
+              this.ontrack?.({ track, streams: [this.deliveredRemoteStream] });
+            } else {
+              const track = this.deliveredRemoteStream.getVideoTracks()[0];
+              if (track.muted) {
+                track.muted = false;
+                track.dispatchEventName('unmute');
+              }
+            }
+          } else if (this.deliveredRemoteStream) {
+            const track = this.deliveredRemoteStream.getVideoTracks()[0];
+            if (!track.muted) {
+              track.muted = true;
+              track.dispatchEventName('mute');
+            }
+          }
+        } else if (desc.type === 'answer') {
+          this.signalingState = 'stable';
+        }
+      }
+
+      async addIceCandidate() {
+        // Accepted cleanly
+      }
+
+      async getStats() {
+        return new Map();
+      }
+
+      close() {
+        this.signalingState = 'closed';
+        this.iceConnectionState = 'closed';
+        this.connectionState = 'closed';
+      }
+    }
+
+    // Create Room 4B with Host + Friend 1 + Friend 2 + Room B isolation host
+    const bHostId = 'dev-mac-a-host';
+    const bFriend1Id = 'dev-mac-b-friend1';
+    const bFriend2Id = 'dev-mac-c-friend2';
+    const bPendingId = 'dev-mac-pending';
+
+    const room4bRes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: bHostId,
+        hostDeviceName: 'MacBook Pro Host (A)',
+        hostPlatform: 'macos',
+      }),
+    });
+    assert.equal(room4bRes.status, 201);
+    const room4bCreated = (await room4bRes.json()) as {
+      room: RoomSnapshot;
+      hostToken: string;
+    };
+    const room4bId = room4bCreated.room.roomId;
+
+    const bHostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: bHostId,
+      deviceName: 'MacBook Pro Host (A)',
+      platform: 'macos',
+      role: 'both',
+      roomId: room4bId,
+      token: room4bCreated.hostToken,
+    });
+    await bHostWs.waitForMessage((m) => m.messageType === 'room_state');
+
+    const friend1Join = (await (
+      await fetch(`${baseUrl}/api/rooms/${room4bId}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiverDeviceId: bFriend1Id,
+          deviceName: 'MacBook Air Friend (B)',
+          platform: 'macos',
+        }),
+      })
+    ).json()) as { memberToken: string; sessionId: string };
+    const bFriend1Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: bFriend1Id,
+      deviceName: 'MacBook Air Friend (B)',
+      platform: 'macos',
+      role: 'both',
+      roomId: room4bId,
+      token: friend1Join.memberToken,
+    });
+    await fetch(`${baseUrl}/api/rooms/${room4bId}/pair-requests/${bFriend1Id}/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${room4bCreated.hostToken}` },
+    });
+
+    const friend2Join = (await (
+      await fetch(`${baseUrl}/api/rooms/${room4bId}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiverDeviceId: bFriend2Id,
+          deviceName: 'Mac Mini Studio (C)',
+          platform: 'macos',
+        }),
+      })
+    ).json()) as { memberToken: string; sessionId: string };
+    const bFriend2Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: bFriend2Id,
+      deviceName: 'Mac Mini Studio (C)',
+      platform: 'macos',
+      role: 'both',
+      roomId: room4bId,
+      token: friend2Join.memberToken,
+    });
+    await fetch(`${baseUrl}/api/rooms/${room4bId}/pair-requests/${bFriend2Id}/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${room4bCreated.hostToken}` },
+    });
+
+    const pendingJoin = (await (
+      await fetch(`${baseUrl}/api/rooms/${room4bId}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiverDeviceId: bPendingId,
+          deviceName: 'Pending Mac',
+          platform: 'macos',
+        }),
+      })
+    ).json()) as { memberToken: string };
+    const bPendingWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: bPendingId,
+      deviceName: 'Pending Mac',
+      platform: 'macos',
+      role: 'both',
+      roomId: room4bId,
+      token: pendingJoin.memberToken,
+    });
+
+    // Fetch authoritative room snapshot for bridges
+    const latestRoomRes = (await (await fetch(`${baseUrl}/api/rooms/${room4bId}`)).json()) as {
+      room: RoomSnapshot;
+    };
+    let latestRoomSnapshot = latestRoomRes.room;
+
+    const prefs4b = {
+      resolution: '1080p' as const,
+      targetFps: 60 as const,
+      codecPreference: 'H264' as const,
+      includeAudio: false,
+    };
+    const netPrefs4b = {
+      preferLanDirectP2P: true,
+      stunUrls: 'stun:stun.l.google.com:19302',
+      turnUrl: '',
+      turnUsername: '',
+      turnCredential: '',
+    };
+
+    const makeBridgeCapture = (label: string) => async ({ onNativeEnded }: { onNativeEnded: () => void }) => {
+      const stream = new FakeMediaStream(`cap-${label}-${Date.now()}`, label) as unknown as MediaStream;
+      const videoTrack = stream.getVideoTracks()[0];
+      void onNativeEnded;
+      return {
+        stream,
+        videoTrack,
+        actualWidth: 1920,
+        actualHeight: 1080,
+        actualFrameRate: 60,
+        hasAudio: false,
+        stop: () => {
+          for (const t of stream.getTracks()) t.stop();
+        },
+      };
+    };
+
+    const wrapWsSender = (wsClient: TestWsClient) => ({
+      sendEnvelope: (partial: Omit<CastoraEnvelope, 'protocolVersion' | 'messageId' | 'timestamp'>): boolean => {
+        wsClient.sendJson({
+          protocolVersion: 'castora.v1',
+          messageId: `b4-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          timestamp: new Date().toISOString(),
+          ...partial,
+        });
+        return true;
+      },
+    });
+
+    const hostBridge = new WebRtcSignalingBridge({
+      deviceId: bHostId,
+      preferences: prefs4b,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(bHostWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeBridgeCapture('host'),
+      rtcFactory: () => new FakeRtcPeerConnection() as unknown as RTCPeerConnection,
+    });
+
+    const friend1Bridge = new WebRtcSignalingBridge({
+      deviceId: bFriend1Id,
+      preferences: prefs4b,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(bFriend1Ws),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeBridgeCapture('friend1'),
+      rtcFactory: () => new FakeRtcPeerConnection() as unknown as RTCPeerConnection,
+    });
+
+    const friend2Bridge = new WebRtcSignalingBridge({
+      deviceId: bFriend2Id,
+      preferences: prefs4b,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(bFriend2Ws),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeBridgeCapture('friend2'),
+      rtcFactory: () => new FakeRtcPeerConnection() as unknown as RTCPeerConnection,
+    });
+
+    hostBridge.updateContext({
+      deviceId: bHostId,
+      activeRoom: latestRoomSnapshot,
+      activeRoomRole: 'host',
+      preferences: prefs4b,
+      networkPrefs: netPrefs4b,
+    });
+    friend1Bridge.updateContext({
+      deviceId: bFriend1Id,
+      activeRoom: latestRoomSnapshot,
+      activeRoomRole: 'receiver',
+      preferences: prefs4b,
+      networkPrefs: netPrefs4b,
+    });
+    friend2Bridge.updateContext({
+      deviceId: bFriend2Id,
+      activeRoom: latestRoomSnapshot,
+      activeRoomRole: 'receiver',
+      preferences: prefs4b,
+      networkPrefs: netPrefs4b,
+    });
+
+    // Attach real WebSocket listeners that feed incoming signaling envelopes directly into each bridge
+    const wireBridgeToWs = (wsClient: TestWsClient, bridge: WebRtcSignalingBridge, role: 'host' | 'receiver', devId: string) => {
+      wsClient.ws.on('message', (raw, isBinary) => {
+        if (isBinary) return;
+        const msg = JSON.parse(raw.toString('utf8')) as CastoraEnvelope;
+        if (msg.messageType === 'room_state' && msg.roomId === room4bId) {
+          latestRoomSnapshot = {
+            ...latestRoomSnapshot,
+            ...(msg.payload as Partial<RoomSnapshot>),
+          };
+          bridge.updateContext({
+            deviceId: devId,
+            activeRoom: latestRoomSnapshot,
+            activeRoomRole: role,
+            preferences: prefs4b,
+            networkPrefs: netPrefs4b,
+          });
+        } else if (
+          msg.messageType === 'stream_start' ||
+          msg.messageType === 'session_offer' ||
+          msg.messageType === 'session_answer' ||
+          msg.messageType === 'ice_candidate' ||
+          msg.messageType === 'stream_stop'
+        ) {
+          void bridge.handleIncomingEnvelope(msg);
+        }
+      });
+    };
+
+    wireBridgeToWs(bHostWs, hostBridge, 'host', bHostId);
+    wireBridgeToWs(bFriend1Ws, friend1Bridge, 'receiver', bFriend1Id);
+    wireBridgeToWs(bFriend2Ws, friend2Bridge, 'receiver', bFriend2Id);
+
+    const waitUntil = async (fn: () => boolean, label: string, timeoutMs = 4000) => {
+      const start = Date.now();
+      while (!fn()) {
+        if (Date.now() - start > timeoutMs) {
+          throw new Error(`Timed out waiting for condition: ${label}`);
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    };
+
+    // 4B.1 - 4B.4 & 4B.10: Simultaneous Host <-> Friend1 sharing (triggers real glare collision!)
+    await Promise.all([
+      hostBridge.startScreenSharing(bFriend1Id),
+      friend1Bridge.startScreenSharing(bHostId),
+    ]);
+
+    await waitUntil(
+      () =>
+        hostBridge.getSnapshot().incomingStreams.some(
+          (s) => s.senderDeviceId === bFriend1Id && s.stream !== null
+        ) &&
+        friend1Bridge.getSnapshot().incomingStreams.some(
+          (s) => s.senderDeviceId === bHostId && s.stream !== null
+        ),
+      'Simultaneous bidirectional Host <-> Friend 1 WebRTC streams active'
+    );
+
+    assert.equal(hostBridge.getPeerCount(), 1, 'Host must keep exactly 1 shared RTCPeerConnection for Friend 1');
+    assert.equal(friend1Bridge.getPeerCount(), 1, 'Friend 1 must keep exactly 1 shared RTCPeerConnection for Host');
+
+    const roomMidRes = (await (await fetch(`${baseUrl}/api/rooms/${room4bId}`)).json()) as {
+      room: { activeStreams: Array<{ publisherDeviceId: string; targetDeviceId: string }> };
+    };
+    assert.equal(roomMidRes.room.activeStreams.length, 2, 'Server must track both independent stream directions');
+    console.log('  [PASS] 4B.1-4B.4 & 4B.10. Simultaneous Host <-> Friend bidirectional capture, Perfect Negotiation glare recovery & single shared RTCPeerConnection verified');
+
+    // 4B.5: Host stops sharing while Friend 1 continues
+    hostBridge.stopSharing('user_stopped');
+    await waitUntil(
+      () =>
+        hostBridge.getSnapshot().isSharingLocal === false &&
+        friend1Bridge.getSnapshot().incomingStreams.length === 0,
+      'Friend 1 cleared inbound stream from stopped Host'
+    );
+    assert.equal(
+      hostBridge.getSnapshot().incomingStreams.some(
+        (s) => s.senderDeviceId === bFriend1Id && s.stream !== null
+      ),
+      true,
+      'Host MUST continue receiving Friend 1 incoming stream after stopping own screen share'
+    );
+    assert.equal(hostBridge.getPeerCount(), 1, 'Host keeps peer connection alive while Friend 1 is still streaming');
+    console.log('  [PASS] 4B.5. Host stopped own stream independently while continuing to receive Friend 1 uninterrupted');
+
+    // 4B.6: Host re-shares, then Friend 1 stops while Host continues
+    await hostBridge.startScreenSharing(bFriend1Id);
+    await waitUntil(
+      () =>
+        friend1Bridge.getSnapshot().incomingStreams.some(
+          (s) => s.senderDeviceId === bHostId && s.stream !== null
+        ),
+      'Friend 1 receiving Host screen again after re-share'
+    );
+    assert.equal(hostBridge.getPeerCount(), 1, 'Re-sharing reuses existing RTCPeerConnection without duplicate connections');
+
+    friend1Bridge.stopSharing('user_stopped');
+    await waitUntil(
+      () =>
+        friend1Bridge.getSnapshot().isSharingLocal === false &&
+        hostBridge.getSnapshot().incomingStreams.length === 0,
+      'Host cleared Friend 1 incoming stream while continuing outbound share'
+    );
+    assert.equal(
+      friend1Bridge.getSnapshot().incomingStreams.some(
+        (s) => s.senderDeviceId === bHostId && s.stream !== null
+      ),
+      true,
+      'Friend 1 MUST continue receiving Host screen after stopping own screen share'
+    );
+    console.log('  [PASS] 4B.6. Host re-share reused peer connection cleanly; Friend 1 stopped own stream while continuing to receive Host');
+
+    // 4B.7 & 4B.8: Unauthorized publisher, spoofed stream_stop, and cross-room signaling rejection
+    const pendingErrPromise4b = bPendingWs.waitForMessage((m) => m.messageType === 'error');
+    bPendingWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'stream_start',
+      messageId: 'b4-unauth-pub',
+      senderDeviceId: bPendingId,
+      receiverDeviceId: bHostId,
+      roomId: room4bId,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: 'fake-sess',
+        streamId: 'unauth-stream-1',
+        width: 1280,
+        height: 720,
+        fps: 30,
+        codec: 'H264',
+      },
+    });
+    const pendingErr4b = await pendingErrPromise4b;
+    assert.equal((pendingErr4b.payload as { code: string }).code, 'APPROVAL_DECLINED');
+
+    // Friend 2 tries to spoof stream_stop for Host's streamId -> must be rejected
+    const activeHostStreamId = hostBridge.getSnapshot().activeStreamId!;
+    const spoofStopErrPromise = bFriend2Ws.waitForMessage((m) => m.messageType === 'error');
+    bFriend2Ws.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'stream_stop',
+      messageId: 'b4-spoof-stop',
+      senderDeviceId: bFriend2Id,
+      receiverDeviceId: bFriend1Id,
+      roomId: room4bId,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: friend1Join.sessionId,
+        streamId: activeHostStreamId,
+        reason: 'user_stopped',
+      },
+    });
+    const spoofStopErr = await spoofStopErrPromise;
+    assert.equal((spoofStopErr.payload as { code: string }).code, 'APPROVAL_DECLINED');
+    console.log('  [PASS] 4B.7 & 4B.8. Pending publisher and spoofed stream_stop ownership hijacking rejected');
+
+    // 4B.9: Multi-peer incoming isolation + unexpected participant disconnect & reconnect
+    // Both Friend 1 and Friend 2 stream to Host simultaneously -> Host tracks 2 distinct peers
+    await Promise.all([
+      friend1Bridge.startScreenSharing(bHostId),
+      friend2Bridge.startScreenSharing(bHostId),
+    ]);
+    await waitUntil(
+      () => hostBridge.getSnapshot().incomingStreams.length === 2,
+      'Host receives 2 independent incoming streams (Friend 1 & Friend 2)'
+    );
+    assert.equal(hostBridge.getPeerCount(), 2, 'Host maintains 1 distinct peer per participant (2 total)');
+
+    // Friend 1 unexpectedly drops WS connection -> Host must clean ONLY Friend 1, keeping Friend 2 untouched!
+    await bFriend1Ws.close();
+    await waitUntil(
+      () =>
+        hostBridge.getSnapshot().incomingStreams.length === 1 &&
+        hostBridge.getSnapshot().incomingStreams[0].senderDeviceId === bFriend2Id,
+      'Host dropped disconnected Friend 1 while keeping Friend 2 incoming stream active'
+    );
+    assert.equal(hostBridge.getPeerCount(), 1, 'Host closed disconnected Friend 1 peer connection cleanly');
+
+    // Friend 1 reconnects with valid token and streams again -> restored cleanly
+    friend1Bridge.dispose();
+    const bFriend1Reconnected = await connectAndAnnounce({
+      wsUrl,
+      deviceId: bFriend1Id,
+      deviceName: 'MacBook Air Friend (B)',
+      platform: 'macos',
+      role: 'both',
+      roomId: room4bId,
+      token: friend1Join.memberToken,
+    });
+    const friend1ReconnectedBridge = new WebRtcSignalingBridge({
+      deviceId: bFriend1Id,
+      preferences: prefs4b,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(bFriend1Reconnected),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeBridgeCapture('friend1-reconn'),
+      rtcFactory: () => new FakeRtcPeerConnection() as unknown as RTCPeerConnection,
+    });
+    wireBridgeToWs(bFriend1Reconnected, friend1ReconnectedBridge, 'receiver', bFriend1Id);
+    friend1ReconnectedBridge.updateContext({
+      deviceId: bFriend1Id,
+      activeRoom: latestRoomSnapshot,
+      activeRoomRole: 'receiver',
+      preferences: prefs4b,
+      networkPrefs: netPrefs4b,
+    });
+    await friend1ReconnectedBridge.startScreenSharing(bHostId);
+    await waitUntil(
+      () => hostBridge.getSnapshot().incomingStreams.length === 2,
+      'Host receives Friend 1 again alongside surviving Friend 2 after reconnect'
+    );
+    console.log('  [PASS] 4B.9. Unexpected participant disconnect isolated to failing peer; surviving Friend 2 stream & reconnect verified');
+
+    // Dispose bridges & close Stage 4B room cleanly
+    hostBridge.dispose();
+    friend1Bridge.dispose();
+    friend1ReconnectedBridge.dispose();
+    friend2Bridge.dispose();
+    assert.equal(hostBridge.getPeerCount(), 0);
+    await fetch(`${baseUrl}/api/rooms/${room4bId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${room4bCreated.hostToken}` },
+    });
+    await bHostWs.close();
+    await bFriend1Reconnected.close();
+    await bFriend2Ws.close();
+    await bPendingWs.close();
+
     // Rate limiting check (exceed 40 window attempts on lookup)
     let hit429 = false;
     for (let i = 0; i < 45; i += 1) {
@@ -1253,7 +1896,7 @@ async function main() {
     assert.equal(hit429, true, 'Rate limiter must return HTTP 429 after exceeding window limit');
     console.log('  [PASS] Extra. Room lookup rate limiting verified (HTTP 429)');
 
-    console.log('\nAll Stage 3 (14) + Stage 4A (10) backend, signaling, and capture tests passed!');
+    console.log('\nAll Stage 3 (14) + Stage 4A (10) + Stage 4B (10) backend, Perfect Negotiation, and multi-peer tests passed!');
   } finally {
     await instance.close();
   }

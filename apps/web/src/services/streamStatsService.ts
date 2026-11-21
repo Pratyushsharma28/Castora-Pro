@@ -8,6 +8,11 @@ interface PriorRtpSample {
   packetsTotal: number;
 }
 
+export interface BidirectionalTelemetrySample {
+  outbound: StreamTelemetrySnapshot;
+  inbound: StreamTelemetrySnapshot;
+}
+
 export function createEmptyTelemetry(
   targetFps: number,
   connectionState: WebRtcConnectionPhase = 'idle'
@@ -28,15 +33,25 @@ export function createEmptyTelemetry(
 }
 
 export class WebRtcStatsCollector {
-  private readonly role: 'sender' | 'receiver';
-  private priorRtp: PriorRtpSample | null = null;
+  private readonly role: 'sender' | 'receiver' | 'bidirectional';
+  private priorOutbound: PriorRtpSample | null = null;
+  private priorInbound: PriorRtpSample | null = null;
 
-  constructor(role: 'sender' | 'receiver') {
+  constructor(role: 'sender' | 'receiver' | 'bidirectional' = 'bidirectional') {
     this.role = role;
   }
 
   reset(): void {
-    this.priorRtp = null;
+    this.priorOutbound = null;
+    this.priorInbound = null;
+  }
+
+  resetOutbound(): void {
+    this.priorOutbound = null;
+  }
+
+  resetInbound(): void {
+    this.priorInbound = null;
   }
 
   async sample(params: {
@@ -45,27 +60,50 @@ export class WebRtcStatsCollector {
     connectionState: WebRtcConnectionPhase;
     localVideoTrack?: MediaStreamTrack | null;
   }): Promise<StreamTelemetrySnapshot> {
-    const base = createEmptyTelemetry(params.targetFps, params.connectionState);
+    const dual = await this.sampleBidirectional({
+      pc: params.pc,
+      outboundTargetFps: params.targetFps,
+      inboundTargetFps: params.targetFps,
+      connectionState: params.connectionState,
+      localVideoTrack: params.localVideoTrack ?? null,
+      hasInboundVideo: this.role !== 'sender',
+    });
+    if (this.role === 'receiver') {
+      return dual.inbound;
+    }
+    return dual.outbound;
+  }
 
-    if (params.localVideoTrack) {
+  async sampleBidirectional(params: {
+    pc: RTCPeerConnection | null;
+    outboundTargetFps: number;
+    inboundTargetFps: number;
+    connectionState: WebRtcConnectionPhase;
+    localVideoTrack?: MediaStreamTrack | null;
+    hasInboundVideo: boolean;
+  }): Promise<BidirectionalTelemetrySample> {
+    const outbound = createEmptyTelemetry(params.outboundTargetFps, params.connectionState);
+    const inbound = createEmptyTelemetry(params.inboundTargetFps, params.connectionState);
+
+    if (params.localVideoTrack && params.localVideoTrack.readyState === 'live') {
       const settings = params.localVideoTrack.getSettings();
       if (typeof settings.width === 'number' && typeof settings.height === 'number') {
-        base.resolution = `${settings.width}×${settings.height}`;
+        outbound.resolution = `${settings.width}×${settings.height}`;
       }
       if (typeof settings.frameRate === 'number' && Number.isFinite(settings.frameRate)) {
-        base.captureFps = settings.frameRate;
+        outbound.captureFps = settings.frameRate;
       }
     }
 
     if (!params.pc || params.pc.signalingState === 'closed') {
-      return base;
+      return { outbound, inbound };
     }
 
     let report: RTCStatsReport;
     try {
       report = await params.pc.getStats();
     } catch {
-      return base;
+      return { outbound, inbound };
     }
 
     let selectedPairRttSec: number | null = null;
@@ -93,16 +131,23 @@ export class WebRtcStatsCollector {
     });
 
     if (selectedPairRttSec !== null) {
-      base.rttMs = selectedPairRttSec * 1000;
+      outbound.rttMs = selectedPairRttSec * 1000;
+      inbound.rttMs = selectedPairRttSec * 1000;
     }
 
-    if (this.role === 'sender') {
-      this.extractSenderStats(report, base);
+    if (params.localVideoTrack && params.localVideoTrack.readyState === 'live') {
+      this.extractSenderStats(report, outbound);
     } else {
-      this.extractReceiverStats(report, base);
+      this.priorOutbound = null;
     }
 
-    return base;
+    if (params.hasInboundVideo) {
+      this.extractReceiverStats(report, inbound);
+    } else {
+      this.priorInbound = null;
+    }
+
+    return { outbound, inbound };
   }
 
   private extractSenderStats(report: RTCStatsReport, target: StreamTelemetrySnapshot): void {
@@ -113,7 +158,10 @@ export class WebRtcStatsCollector {
     report.forEach((stat) => {
       const rec = stat as unknown as Record<string, unknown>;
       if (stat.type === 'outbound-rtp' && rec.kind === 'video') {
-        outbound = rec;
+        // Prefer active outbound stream if multiple historical senders exist
+        if (rec.active !== false || !outbound) {
+          outbound = rec;
+        }
       } else if (stat.type === 'remote-inbound-rtp' && rec.kind === 'video') {
         remoteInbound = rec;
       } else if (stat.type === 'media-source' && rec.kind === 'video') {
@@ -126,7 +174,7 @@ export class WebRtcStatsCollector {
       if (typeof ms.framesPerSecond === 'number' && Number.isFinite(ms.framesPerSecond)) {
         target.captureFps = ms.framesPerSecond;
       }
-      if (typeof ms.width === 'number' && typeof ms.height === 'number') {
+      if (typeof ms.width === 'number' && typeof ms.height === 'number' && ms.width > 0) {
         target.resolution = `${ms.width}×${ms.height}`;
       }
     }
@@ -145,17 +193,17 @@ export class WebRtcStatsCollector {
         target.encodedFps = ob.framesPerSecond;
       }
 
-      if (this.priorRtp && ts > this.priorRtp.timestampMs) {
-        const dtSec = (ts - this.priorRtp.timestampMs) / 1000;
-        const dBytes = Math.max(0, bytesSent - this.priorRtp.bytes);
+      if (this.priorOutbound && ts > this.priorOutbound.timestampMs) {
+        const dtSec = (ts - this.priorOutbound.timestampMs) / 1000;
+        const dBytes = Math.max(0, bytesSent - this.priorOutbound.bytes);
         target.bitrateKbps = (dBytes * 8) / 1000 / dtSec;
 
-        if (target.encodedFps === null && framesEncoded >= this.priorRtp.frames) {
-          target.encodedFps = (framesEncoded - this.priorRtp.frames) / dtSec;
+        if (target.encodedFps === null && framesEncoded >= this.priorOutbound.frames) {
+          target.encodedFps = (framesEncoded - this.priorOutbound.frames) / dtSec;
         }
       }
 
-      this.priorRtp = {
+      this.priorOutbound = {
         timestampMs: ts,
         bytes: bytesSent,
         frames: framesEncoded,
@@ -184,7 +232,12 @@ export class WebRtcStatsCollector {
     report.forEach((stat) => {
       const rec = stat as unknown as Record<string, unknown>;
       if (stat.type === 'inbound-rtp' && rec.kind === 'video') {
-        inbound = rec;
+        const bytes = typeof rec.bytesReceived === 'number' ? rec.bytesReceived : 0;
+        const prevBytes =
+          inbound && typeof inbound.bytesReceived === 'number' ? inbound.bytesReceived : -1;
+        if (!inbound || bytes >= prevBytes) {
+          inbound = rec;
+        }
       }
     });
 
@@ -214,23 +267,23 @@ export class WebRtcStatsCollector {
       target.jitterMs = ib.jitter * 1000;
     }
 
-    if (this.priorRtp && ts > this.priorRtp.timestampMs) {
-      const dtSec = (ts - this.priorRtp.timestampMs) / 1000;
-      const dBytes = Math.max(0, bytesReceived - this.priorRtp.bytes);
+    if (this.priorInbound && ts > this.priorInbound.timestampMs) {
+      const dtSec = (ts - this.priorInbound.timestampMs) / 1000;
+      const dBytes = Math.max(0, bytesReceived - this.priorInbound.bytes);
       target.bitrateKbps = (dBytes * 8) / 1000 / dtSec;
 
-      if (target.decodedFps === null && framesDecoded >= this.priorRtp.frames) {
-        target.decodedFps = (framesDecoded - this.priorRtp.frames) / dtSec;
+      if (target.decodedFps === null && framesDecoded >= this.priorInbound.frames) {
+        target.decodedFps = (framesDecoded - this.priorInbound.frames) / dtSec;
       }
 
-      const dTotal = packetsTotal - this.priorRtp.packetsTotal;
-      const dLost = Math.max(0, packetsLost - this.priorRtp.packetsLost);
+      const dTotal = packetsTotal - this.priorInbound.packetsTotal;
+      const dLost = Math.max(0, packetsLost - this.priorInbound.packetsLost);
       if (dTotal > 0) {
         target.packetLossPct = Math.min(100, (dLost / dTotal) * 100);
       }
     }
 
-    this.priorRtp = {
+    this.priorInbound = {
       timestampMs: ts,
       bytes: bytesReceived,
       frames: framesDecoded,

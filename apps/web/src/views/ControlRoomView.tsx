@@ -1,4 +1,5 @@
-import { ArrowRight, Cast, RefreshCw, ShieldAlert, Smartphone, Square } from 'lucide-react';
+import { useState } from 'react';
+import { ArrowRight, Cast, MonitorPlay, RefreshCw, ShieldAlert, Smartphone, Square } from 'lucide-react';
 import type {
   BackendHealthResponse,
   PairingLifecycleStatus,
@@ -14,6 +15,7 @@ import type {
   StudioDestination,
   WebRtcConnectionPhase,
 } from '../types/studio';
+import { IncomingScreensPanel } from '../components/common/IncomingScreensPanel';
 import { SignalBadge, type SignalTone } from '../components/common/SignalBadge';
 import { TelemetryStrip } from '../components/common/TelemetryStrip';
 import { VideoSurface } from '../components/common/VideoSurface';
@@ -32,6 +34,7 @@ interface ControlRoomViewProps {
   activeRoom: RoomSnapshot | null;
   activeRoomRole: 'host' | 'receiver' | null;
   pairingStatus: PairingLifecycleStatus;
+  onStartSharing: (targetSelection: string | string[] | null) => Promise<void>;
   onStopSharing: () => void;
   onReconnectBackend: () => void;
   onNavigate: (destination: StudioDestination) => void;
@@ -59,17 +62,17 @@ function pairingTone(status: PairingLifecycleStatus): SignalTone {
 function phaseBadge(phase: WebRtcConnectionPhase): { label: string; tone: SignalTone; pulse?: boolean } {
   switch (phase) {
     case 'connected':
-      return { label: 'STREAM LIVE', tone: 'active' };
+      return { label: 'CONNECTED', tone: 'active' };
     case 'connecting':
       return { label: 'CONNECTING', tone: 'signal', pulse: true };
     case 'reconnecting':
       return { label: 'RECONNECTING', tone: 'warn', pulse: true };
     case 'failed':
-      return { label: 'STREAM ERROR', tone: 'fault' };
+      return { label: 'ERROR', tone: 'fault' };
     case 'disconnected':
       return { label: 'DISCONNECTED', tone: 'warn' };
     default:
-      return { label: 'IDLE', tone: 'standby' };
+      return { label: 'STANDBY', tone: 'standby' };
   }
 }
 
@@ -87,24 +90,50 @@ export function ControlRoomView({
   activeRoom,
   activeRoomRole,
   pairingStatus,
+  onStartSharing,
   onStopSharing,
   onReconnectBackend,
   onNavigate,
 }: ControlRoomViewProps) {
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
+
   const pairedReceivers = activeRoom?.pairedReceivers ?? [];
   const connectedPairedCount = pairedReceivers.filter((r) => r.connected).length;
   const capacityCount = activeRoom
     ? connectedPairedCount
     : receivers.filter((r) => r.connectionState === 'connected').length;
 
-  const programStream = webrtcState.localStream ?? webrtcState.remoteStream;
+  const isApprovedInRoom =
+    Boolean(activeRoom) &&
+    (activeRoomRole === 'host' ||
+      Boolean(activeRoom?.pairedReceivers.some((r) => r.deviceId === deviceId)));
+  const canShareScreen =
+    capabilities.isSecureContext &&
+    capabilities.supportsDisplayMedia &&
+    (!activeRoom || isApprovedInRoom);
+
+  const firstIncoming = webrtcState.incomingStreams.find((s) => s.stream !== null) ?? webrtcState.incomingStreams[0] ?? null;
+  const programStream = webrtcState.localStream ?? firstIncoming?.stream ?? null;
   const streamBadge = phaseBadge(webrtcState.phase);
 
   const monitorTitle = webrtcState.localStream
     ? `${deviceName} — Outbound Screen Capture`
-    : webrtcState.remoteStream
-      ? `${activeRoom?.hostDeviceName ?? 'Host'} — Inbound Remote Screen`
+    : firstIncoming
+      ? `${firstIncoming.senderName} — Incoming Screen`
       : 'Master Program Monitor';
+
+  const handleQuickShare = async () => {
+    setShareError(null);
+    setShareBusy(true);
+    try {
+      await onStartSharing(null);
+    } catch (err) {
+      setShareError(err instanceof Error ? err.message : 'Unable to start screen sharing');
+    } finally {
+      setShareBusy(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -135,50 +164,60 @@ export function ControlRoomView({
       )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        {/* Left: Dominant Program Monitor Bay */}
+        {/* Left: Dominant Program Monitor Bay + Incoming Screens */}
         <section className="space-y-4 lg:col-span-8" aria-label="Program Monitor Workspace">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h1 className="font-display text-lg font-semibold tracking-tight text-[#F2F3F0]">
                 Control Room
               </h1>
               <p className="text-xs text-[#929A9D]">
-                Master broadcast preview, receiver capacity, and real WebRTC getStats() telemetry.
+                Master bidirectional preview, incoming participant screens, and real WebRTC getStats() telemetry.
               </p>
             </div>
-            <div className="flex items-center gap-2">
-              {webrtcState.localStream && (
-                <button
-                  type="button"
-                  onClick={onStopSharing}
-                  className="inline-flex h-7 items-center gap-1.5 border border-[#EF4444]/60 bg-[#191D20] px-2.5 text-[11px] font-semibold text-[#EF4444] hover:bg-[#EF4444]/10"
-                >
-                  <Square className="h-3 w-3" aria-hidden="true" />
-                  <span>Stop Sharing</span>
-                </button>
-              )}
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={shareBusy || !canShareScreen}
+                onClick={handleQuickShare}
+                className="inline-flex h-8 items-center gap-1.5 bg-[#FF7849] px-3 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
+              >
+                <MonitorPlay className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>{shareBusy ? 'Starting...' : webrtcState.isSharingLocal ? 'Replace My Screen' : 'Share My Screen'}</span>
+              </button>
+              <button
+                type="button"
+                disabled={!webrtcState.isSharingLocal}
+                onClick={onStopSharing}
+                className="inline-flex h-8 items-center gap-1.5 border border-[#EF4444]/60 bg-[#191D20] px-3 text-xs font-semibold text-[#EF4444] hover:bg-[#EF4444]/10 disabled:border-[#252A2F] disabled:text-[#929A9D] disabled:opacity-50"
+              >
+                <Square className="h-3 w-3" aria-hidden="true" />
+                <span>Stop My Screen</span>
+              </button>
               <SignalBadge
-                label={
-                  webrtcState.localStream
-                    ? webrtcState.phase === 'connected'
-                      ? 'LOCAL + WEBRTC LIVE'
-                      : 'LOCAL CAPTURE ACTIVE'
-                    : webrtcState.remoteStream
-                      ? 'RECEIVING LIVE STREAM'
-                      : 'PROGRAM STANDBY'
-                }
-                tone={programStream ? 'active' : 'standby'}
+                label={`Connection Status: ${streamBadge.label}`}
+                tone={streamBadge.tone}
+                pulse={streamBadge.pulse}
               />
             </div>
           </div>
+
+          {(shareError || webrtcState.errorMessage) && (
+            <div
+              role="alert"
+              className="border border-[#EF4444]/60 bg-[#191D20] px-3 py-2.5 text-xs text-[#EF4444]"
+            >
+              {shareError ?? webrtcState.errorMessage}
+            </div>
+          )}
 
           <VideoSurface
             slotLabel="PGM-01"
             title={monitorTitle}
             stream={programStream}
-            muted={activeRoomRole !== 'receiver'}
+            muted={Boolean(webrtcState.localStream)}
             highlight={webrtcState.phase === 'connected'}
-            standbyReason="No local screen capture or inbound receiver feed is active. Pair devices in Receivers or start sharing in Cast Studio."
+            standbyReason="No local screen capture or incoming participant stream is active. Pair devices in Receivers or click Share My Screen."
             statusBadge={
               <SignalBadge
                 label={streamBadge.label}
@@ -212,11 +251,17 @@ export function ControlRoomView({
             <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-[0.08em] text-[#929A9D]">
               <span>Program Telemetry (getStats)</span>
               <span className="tabular-metrics">
-                Target {preferences.resolution.toUpperCase()} · {preferences.targetFps} FPS · ICE {webrtcState.iceConnectionState ?? 'idle'}
+                Target {preferences.resolution.toUpperCase()} · {preferences.targetFps} FPS · Peers {webrtcState.peerCount} · ICE {webrtcState.iceConnectionState ?? 'idle'}
               </span>
             </div>
             <TelemetryStrip telemetry={webrtcState.telemetry} />
           </div>
+
+          <IncomingScreensPanel
+            streams={webrtcState.incomingStreams}
+            compactTelemetry
+            emptyMessage="No incoming screens active. When the host or an approved friend shares their screen, their video stream and getStats() metrics appear here independently of your own screen share."
+          />
         </section>
 
         {/* Right: Master Control Rail */}
@@ -279,7 +324,7 @@ export function ControlRoomView({
                 </dd>
               </div>
               <div className="flex items-center justify-between gap-2">
-                <dt className="text-[#929A9D]">WebRTC State</dt>
+                <dt className="text-[#929A9D]">Connection Status</dt>
                 <dd>
                   <SignalBadge label={streamBadge.label} tone={streamBadge.tone} pulse={streamBadge.pulse} />
                 </dd>
@@ -319,7 +364,7 @@ export function ControlRoomView({
             </dl>
           </div>
 
-          {/* Sender Device Info */}
+          {/* Local Endpoint */}
           <div className="border border-[#252A2F] bg-[#191D20] p-4">
             <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
@@ -360,7 +405,7 @@ export function ControlRoomView({
           <div className="border border-[#252A2F] bg-[#191D20] p-4">
             <div className="flex items-center justify-between">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                Paired Receivers
+                Paired Participants
               </h2>
               <span className="font-mono text-xs font-semibold text-[#F2F3F0] tabular-metrics">
                 {capacityCount} / {MAX_INITIAL_RECEIVERS}

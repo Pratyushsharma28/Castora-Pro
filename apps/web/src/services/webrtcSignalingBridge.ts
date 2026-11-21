@@ -1,4 +1,4 @@
-import type { CastoraEnvelope, CastoraVideoCodec } from '../types/protocol';
+import type { CastoraEnvelope, CastoraPlatform, CastoraVideoCodec } from '../types/protocol';
 import type {
   CapturePreferences,
   NetworkPreferences,
@@ -13,12 +13,53 @@ import {
 import { createEmptyTelemetry } from './streamStatsService';
 import { CastoraWebRtcPeer } from './webrtcPeerService';
 
+export interface IncomingScreenEntry {
+  senderDeviceId: string;
+  senderName: string;
+  senderPlatform: CastoraPlatform;
+  sessionId: string;
+  streamId: string;
+  phase: WebRtcConnectionPhase;
+  iceConnectionState: RTCIceConnectionState | null;
+  statusDetail: string | null;
+  errorMessage: string | null;
+  stream: MediaStream | null;
+  streamMeta: {
+    width: number;
+    height: number;
+    fps: number;
+    codec: CastoraVideoCodec;
+  } | null;
+  telemetry: StreamTelemetrySnapshot;
+  startedAt: string;
+}
+
+export interface OutboundPeerEntry {
+  targetDeviceId: string;
+  targetName: string;
+  targetPlatform: CastoraPlatform;
+  sessionId: string;
+  streamId: string;
+  phase: WebRtcConnectionPhase;
+  iceConnectionState: RTCIceConnectionState | null;
+  statusDetail: string | null;
+  errorMessage: string | null;
+  telemetry: StreamTelemetrySnapshot;
+}
+
 export interface WebRtcSessionSnapshot {
   phase: WebRtcConnectionPhase;
   statusDetail: string | null;
   errorMessage: string | null;
   iceConnectionState: RTCIceConnectionState | null;
+  isSharingLocal: boolean;
   localStream: MediaStream | null;
+  localCaptureMeta: {
+    width: number | null;
+    height: number | null;
+    fps: number | null;
+    hasAudio: boolean;
+  } | null;
   remoteStream: MediaStream | null;
   activeSessionId: string | null;
   activeStreamId: string | null;
@@ -30,6 +71,15 @@ export interface WebRtcSessionSnapshot {
     codec: CastoraVideoCodec;
   } | null;
   telemetry: StreamTelemetrySnapshot;
+  outboundTelemetry: StreamTelemetrySnapshot;
+  inboundTelemetry: StreamTelemetrySnapshot;
+  incomingStreams: IncomingScreenEntry[];
+  outboundPeers: OutboundPeerEntry[];
+  peerCount: number;
+}
+
+export interface SignalingSender {
+  sendEnvelope: CastoraSignalingClient['sendEnvelope'];
 }
 
 export interface WebRtcBridgeCallbacks {
@@ -49,54 +99,330 @@ function createId(prefix: string): string {
   return `${prefix}-${rand}`;
 }
 
+function aggregatePhase(phases: WebRtcConnectionPhase[]): WebRtcConnectionPhase {
+  if (phases.includes('connected')) return 'connected';
+  if (phases.includes('reconnecting')) return 'reconnecting';
+  if (phases.includes('connecting')) return 'connecting';
+  if (phases.includes('failed')) return 'failed';
+  if (phases.includes('disconnected')) return 'disconnected';
+  return 'idle';
+}
+
 export class WebRtcSignalingBridge {
   private deviceId: string;
   private activeRoom: RoomSnapshot | null = null;
   private activeRoomRole: 'host' | 'receiver' | null = null;
   private preferences: CapturePreferences;
   private networkPrefs: NetworkPreferences;
-  private getSignalingClient: () => CastoraSignalingClient | null;
+  private getSignalingClient: () => SignalingSender | null;
   private callbacks: WebRtcBridgeCallbacks;
+  private captureFn: typeof startScreenCapture;
+  private rtcFactory?: (config: RTCConfiguration) => RTCPeerConnection;
 
   private captureSession: CapturedScreenSession | null = null;
-  private peer: CastoraWebRtcPeer | null = null;
-  private state: WebRtcSessionSnapshot;
+  private outboundStreamId: string | null = null;
+  private peers = new Map<string, CastoraWebRtcPeer>();
+  private incomingMap = new Map<string, IncomingScreenEntry>();
+  private outboundMap = new Map<string, OutboundPeerEntry>();
+  private statusDetail: string | null = null;
+  private errorMessage: string | null = null;
 
   constructor(params: {
     deviceId: string;
     preferences: CapturePreferences;
     networkPrefs: NetworkPreferences;
-    getSignalingClient: () => CastoraSignalingClient | null;
+    getSignalingClient: () => SignalingSender | null;
     callbacks: WebRtcBridgeCallbacks;
+    captureFn?: typeof startScreenCapture;
+    rtcFactory?: (config: RTCConfiguration) => RTCPeerConnection;
   }) {
     this.deviceId = params.deviceId;
     this.preferences = params.preferences;
     this.networkPrefs = params.networkPrefs;
     this.getSignalingClient = params.getSignalingClient;
     this.callbacks = params.callbacks;
+    this.captureFn = params.captureFn ?? startScreenCapture;
+    this.rtcFactory = params.rtcFactory;
+  }
 
-    this.state = {
-      phase: 'idle',
-      statusDetail: null,
-      errorMessage: null,
-      iceConnectionState: null,
-      localStream: null,
-      remoteStream: null,
-      activeSessionId: null,
-      activeStreamId: null,
-      targetPeerDeviceId: null,
-      remoteStreamMeta: null,
-      telemetry: createEmptyTelemetry(params.preferences.targetFps, 'idle'),
+  getPeerCount(): number {
+    return this.peers.size;
+  }
+
+  getPeerDeviceIds(): string[] {
+    return Array.from(this.peers.keys());
+  }
+
+  private resolveParticipantMeta(peerDeviceId: string): {
+    deviceName: string;
+    platform: CastoraPlatform;
+    sessionId: string;
+    connected: boolean;
+  } | null {
+    if (!this.activeRoom) return null;
+    if (peerDeviceId === this.activeRoom.hostDeviceId) {
+      return {
+        deviceName: this.activeRoom.hostDeviceName,
+        platform: this.activeRoom.hostPlatform,
+        sessionId:
+          this.activeRoom.pairedReceivers.find((r) => r.deviceId === this.deviceId)?.sessionId ??
+          createId('sess'),
+        connected: this.activeRoom.hostConnected,
+      };
+    }
+    const rx = this.activeRoom.pairedReceivers.find((r) => r.deviceId === peerDeviceId);
+    if (!rx) return null;
+    return {
+      deviceName: rx.deviceName,
+      platform: rx.platform,
+      sessionId: rx.sessionId,
+      connected: rx.connected,
     };
   }
 
-  private emit(partial: Partial<WebRtcSessionSnapshot>): void {
-    this.state = { ...this.state, ...partial };
-    this.callbacks.onStateChange(this.state);
+  private isSelfAuthorizedInRoom(): boolean {
+    if (!this.activeRoom) return false;
+    if (this.activeRoom.hostDeviceId === this.deviceId) return true;
+    return this.activeRoom.pairedReceivers.some((r) => r.deviceId === this.deviceId);
   }
 
   getSnapshot(): WebRtcSessionSnapshot {
-    return this.state;
+    const incomingStreams = Array.from(this.incomingMap.values());
+    const outboundPeers = Array.from(this.outboundMap.values());
+
+    const phases: WebRtcConnectionPhase[] = [
+      ...outboundPeers.map((o) => o.phase),
+      ...incomingStreams.map((i) => i.phase),
+    ];
+    const phase = aggregatePhase(phases);
+
+    const primaryOutbound = outboundPeers[0] ?? null;
+    const primaryInbound = incomingStreams.find((i) => i.stream !== null) ?? incomingStreams[0] ?? null;
+
+    const outboundTelemetry: StreamTelemetrySnapshot = primaryOutbound
+      ? primaryOutbound.telemetry
+      : {
+          ...createEmptyTelemetry(this.preferences.targetFps, this.captureSession ? phase : 'idle'),
+          captureFps: this.captureSession?.actualFrameRate ?? null,
+          resolution:
+            this.captureSession?.actualWidth && this.captureSession?.actualHeight
+              ? `${this.captureSession.actualWidth}×${this.captureSession.actualHeight}`
+              : null,
+        };
+
+    const inboundTelemetry: StreamTelemetrySnapshot = primaryInbound
+      ? primaryInbound.telemetry
+      : createEmptyTelemetry(this.preferences.targetFps, 'idle');
+
+    const telemetry = this.captureSession ? outboundTelemetry : inboundTelemetry;
+    const iceConnectionState =
+      primaryOutbound?.iceConnectionState ?? primaryInbound?.iceConnectionState ?? null;
+
+    return {
+      phase,
+      statusDetail: this.statusDetail,
+      errorMessage: this.errorMessage,
+      iceConnectionState,
+      isSharingLocal: Boolean(this.captureSession),
+      localStream: this.captureSession?.stream ?? null,
+      localCaptureMeta: this.captureSession
+        ? {
+            width: this.captureSession.actualWidth,
+            height: this.captureSession.actualHeight,
+            fps: this.captureSession.actualFrameRate,
+            hasAudio: this.captureSession.hasAudio,
+          }
+        : null,
+      remoteStream: primaryInbound?.stream ?? null,
+      activeSessionId: primaryOutbound?.sessionId ?? primaryInbound?.sessionId ?? null,
+      activeStreamId: this.outboundStreamId ?? primaryInbound?.streamId ?? null,
+      targetPeerDeviceId: primaryOutbound?.targetDeviceId ?? primaryInbound?.senderDeviceId ?? null,
+      remoteStreamMeta: primaryInbound?.streamMeta ?? null,
+      telemetry,
+      outboundTelemetry,
+      inboundTelemetry,
+      incomingStreams,
+      outboundPeers,
+      peerCount: this.peers.size,
+    };
+  }
+
+  private emit(): void {
+    this.callbacks.onStateChange(this.getSnapshot());
+  }
+
+  private getOrCreatePeer(peerDeviceId: string, sessionId: string): CastoraWebRtcPeer {
+    const existing = this.peers.get(peerDeviceId);
+    if (existing) {
+      return existing;
+    }
+
+    const peerMeta = this.resolveParticipantMeta(peerDeviceId);
+    const peerLabel = peerMeta?.deviceName ?? peerDeviceId;
+
+    const peer = new CastoraWebRtcPeer({
+      localDeviceId: this.deviceId,
+      peerDeviceId,
+      sessionId,
+      targetFps: this.preferences.targetFps,
+      networkPrefs: this.networkPrefs,
+      rtcFactory: this.rtcFactory,
+      callbacks: {
+        onOfferCreated: (offer) => {
+          const signaling = this.getSignalingClient();
+          const roomId = this.activeRoom?.roomId;
+          if (!signaling || !roomId) return;
+
+          signaling.sendEnvelope({
+            messageType: 'session_offer',
+            senderDeviceId: this.deviceId,
+            receiverDeviceId: peerDeviceId,
+            roomId,
+            payload: {
+              sessionId,
+              streamId: offer.streamId,
+              sdpType: 'offer',
+              sdp: offer.sdp,
+              mediaInfo: {
+                hasVideo: offer.hasVideo,
+                hasAudio: offer.hasAudio,
+                codecHint: offer.codecHint,
+              },
+            },
+          });
+
+          this.callbacks.onLogEvent(
+            'webrtc',
+            offer.iceRestart ? 'Sent WebRTC ICE restart offer' : 'Sent WebRTC SDP offer',
+            `Peer: ${peerLabel} (${peerDeviceId}) · Stream ${offer.streamId}`
+          );
+        },
+        onIceCandidate: (candidate, streamId) => {
+          const signaling = this.getSignalingClient();
+          const roomId = this.activeRoom?.roomId;
+          if (!signaling || !roomId) return;
+
+          signaling.sendEnvelope({
+            messageType: 'ice_candidate',
+            senderDeviceId: this.deviceId,
+            receiverDeviceId: peerDeviceId,
+            roomId,
+            payload: {
+              sessionId,
+              streamId,
+              sdpMid: candidate.sdpMid ?? null,
+              sdpMLineIndex: candidate.sdpMLineIndex ?? 0,
+              candidate: candidate.candidate ?? '',
+            },
+          });
+        },
+        onInboundStream: (stream) => {
+          const existingEntry = this.incomingMap.get(peerDeviceId);
+          if (stream) {
+            const meta = this.resolveParticipantMeta(peerDeviceId);
+            const entry: IncomingScreenEntry = existingEntry ?? {
+              senderDeviceId: peerDeviceId,
+              senderName: meta?.deviceName ?? peerDeviceId,
+              senderPlatform: meta?.platform ?? 'macos',
+              sessionId,
+              streamId: peer.getActiveInboundStreamId() ?? sessionId,
+              phase: 'connected',
+              iceConnectionState: null,
+              statusDetail: 'Receiving live remote screen.',
+              errorMessage: null,
+              stream,
+              streamMeta: null,
+              telemetry: createEmptyTelemetry(this.preferences.targetFps, 'connected'),
+              startedAt: new Date().toISOString(),
+            };
+            entry.stream = stream;
+            entry.phase = 'connected';
+            entry.errorMessage = null;
+            entry.statusDetail = `Receiving live screen from ${entry.senderName}.`;
+            this.incomingMap.set(peerDeviceId, entry);
+            this.statusDetail = `Receiving live screen from ${entry.senderName}.`;
+          } else if (existingEntry) {
+            existingEntry.stream = null;
+            if (!peer.getActiveInboundStreamId()) {
+              this.incomingMap.delete(peerDeviceId);
+            } else {
+              this.incomingMap.set(peerDeviceId, existingEntry);
+            }
+          }
+          this.emit();
+        },
+        onPhaseChange: (phase, detail) => {
+          const outEntry = this.outboundMap.get(peerDeviceId);
+          if (outEntry) {
+            outEntry.phase = phase;
+            outEntry.statusDetail = detail;
+            this.outboundMap.set(peerDeviceId, outEntry);
+          }
+          const inEntry = this.incomingMap.get(peerDeviceId);
+          if (inEntry) {
+            inEntry.phase = phase;
+            inEntry.statusDetail = detail;
+            this.incomingMap.set(peerDeviceId, inEntry);
+          }
+          this.statusDetail = detail;
+          this.emit();
+        },
+        onIceConnectionChange: (iceState) => {
+          const outEntry = this.outboundMap.get(peerDeviceId);
+          if (outEntry) {
+            outEntry.iceConnectionState = iceState;
+            this.outboundMap.set(peerDeviceId, outEntry);
+          }
+          const inEntry = this.incomingMap.get(peerDeviceId);
+          if (inEntry) {
+            inEntry.iceConnectionState = iceState;
+            this.incomingMap.set(peerDeviceId, inEntry);
+          }
+          this.emit();
+        },
+        onStats: (dualStats) => {
+          const outEntry = this.outboundMap.get(peerDeviceId);
+          if (outEntry) {
+            outEntry.telemetry = dualStats.outbound;
+            this.outboundMap.set(peerDeviceId, outEntry);
+          }
+          const inEntry = this.incomingMap.get(peerDeviceId);
+          if (inEntry) {
+            inEntry.telemetry = dualStats.inbound;
+            this.incomingMap.set(peerDeviceId, inEntry);
+          }
+          this.emit();
+        },
+        onError: (msg) => {
+          this.errorMessage = msg;
+          const outEntry = this.outboundMap.get(peerDeviceId);
+          if (outEntry) {
+            outEntry.errorMessage = msg;
+            this.outboundMap.set(peerDeviceId, outEntry);
+          }
+          const inEntry = this.incomingMap.get(peerDeviceId);
+          if (inEntry) {
+            inEntry.errorMessage = msg;
+            this.incomingMap.set(peerDeviceId, inEntry);
+          }
+          this.callbacks.onLogEvent('error', `WebRTC peer error (${peerLabel})`, msg);
+          this.emit();
+        },
+      },
+    });
+
+    this.peers.set(peerDeviceId, peer);
+    return peer;
+  }
+
+  private removePeerConnection(peerDeviceId: string, reason: string): void {
+    const peer = this.peers.get(peerDeviceId);
+    if (peer) {
+      this.peers.delete(peerDeviceId);
+      peer.close(reason);
+    }
+    this.outboundMap.delete(peerDeviceId);
+    this.incomingMap.delete(peerDeviceId);
   }
 
   updateContext(params: {
@@ -115,77 +441,134 @@ export class WebRtcSignalingBridge {
     this.activeRoom = params.activeRoom;
     this.activeRoomRole = params.activeRoomRole;
 
-    // Room closed/expired/left -> full teardown
     if (prevRoomId && !nextRoomId) {
-      this.teardownPeerOnly('Room closed or disconnected.', 'disconnected');
+      for (const peerId of Array.from(this.peers.keys())) {
+        this.removePeerConnection(peerId, 'Room closed or disconnected.');
+      }
       if (this.captureSession) {
         this.captureSession.stop();
         this.captureSession = null;
       }
-      this.emit({
-        phase: 'idle',
-        localStream: null,
-        remoteStream: null,
-        activeSessionId: null,
-        activeStreamId: null,
-        targetPeerDeviceId: null,
-        remoteStreamMeta: null,
-        iceConnectionState: null,
-        statusDetail: null,
-        telemetry: createEmptyTelemetry(this.preferences.targetFps, 'idle'),
-      });
+      this.outboundStreamId = null;
+      this.statusDetail = null;
+      this.errorMessage = null;
+      this.emit();
       return;
     }
 
-    // If current peer target disappeared from paired receivers or disconnected, close peer cleanly
-    if (this.peer && this.activeRoom && this.activeRoomRole === 'host') {
-      const target = this.activeRoom.pairedReceivers.find(
-        (r) => r.deviceId === this.peer?.peerDeviceId
-      );
-      if (!target || !target.connected) {
-        const peerId = this.peer.peerDeviceId;
-        this.teardownPeerOnly(`Target receiver ${peerId} disconnected.`, 'disconnected');
-        this.emit({
-          phase: this.captureSession ? 'idle' : 'disconnected',
-          statusDetail: `Receiver ${peerId} disconnected.`,
-          targetPeerDeviceId: null,
-        });
+    if (!this.activeRoom) return;
+
+    // Close only peers that left the room or dropped their signaling connection;
+    // keep all other peer streams and local capture completely undisturbed.
+    let changed = false;
+    for (const peerId of Array.from(this.peers.keys())) {
+      const meta = this.resolveParticipantMeta(peerId);
+      if (!meta || !meta.connected) {
+        this.removePeerConnection(peerId, `Peer ${peerId} disconnected or removed.`);
+        this.statusDetail = `Peer ${meta?.deviceName ?? peerId} disconnected.`;
+        changed = true;
       }
+    }
+
+    // Reconcile server-authoritative activeStreams if a remote stream ended remotely
+    if (Array.isArray(this.activeRoom.activeStreams)) {
+      const serverInboundPublishers = new Set(
+        this.activeRoom.activeStreams
+          .filter((s) => s.targetDeviceId === this.deviceId)
+          .map((s) => s.publisherDeviceId)
+      );
+      for (const [senderId, entry] of this.incomingMap.entries()) {
+        if (!serverInboundPublishers.has(senderId)) {
+          const peer = this.peers.get(senderId);
+          peer?.clearInboundStream(`${entry.senderName} stopped screen sharing.`);
+          this.incomingMap.delete(senderId);
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) {
+      this.emit();
     }
   }
 
-  async startScreenSharing(targetReceiverDeviceId: string | null): Promise<void> {
-    this.emit({ errorMessage: null });
+  private resolvePublishTargets(targetSelection: string | string[] | null): string[] {
+    if (!this.activeRoom || !this.isSelfAuthorizedInRoom()) {
+      return [];
+    }
+
+    const connectedPeers: string[] = [];
+    if (this.activeRoom.hostDeviceId !== this.deviceId && this.activeRoom.hostConnected) {
+      connectedPeers.push(this.activeRoom.hostDeviceId);
+    }
+    for (const rx of this.activeRoom.pairedReceivers) {
+      if (rx.deviceId !== this.deviceId && rx.connected) {
+        connectedPeers.push(rx.deviceId);
+      }
+    }
+
+    if (targetSelection === 'ALL') {
+      return connectedPeers;
+    }
+
+    if (Array.isArray(targetSelection)) {
+      return targetSelection.filter((id) => connectedPeers.includes(id));
+    }
+
+    if (typeof targetSelection === 'string' && targetSelection.trim().length > 0) {
+      return connectedPeers.includes(targetSelection) ? [targetSelection] : [];
+    }
+
+    // Default target:
+    // - Paired friend defaults to publishing to the room host
+    // - Host defaults to all connected paired receivers (1:1 or 1:N)
+    if (this.activeRoomRole === 'receiver') {
+      return connectedPeers.includes(this.activeRoom.hostDeviceId)
+        ? [this.activeRoom.hostDeviceId]
+        : connectedPeers.slice(0, 1);
+    }
+
+    return connectedPeers;
+  }
+
+  async startScreenSharing(targetSelection: string | string[] | null = null): Promise<void> {
+    this.errorMessage = null;
+
+    if (this.activeRoom && !this.isSelfAuthorizedInRoom()) {
+      const msg = 'Waiting for host pairing approval before sharing your screen.';
+      this.errorMessage = msg;
+      this.statusDetail = msg;
+      this.emit();
+      throw new Error(msg);
+    }
 
     let session: CapturedScreenSession;
     try {
-      session = await startScreenCapture({
+      session = await this.captureFn({
         preferences: this.preferences,
         onNativeEnded: () => {
           this.callbacks.onLogEvent(
             'webrtc',
             'Screen sharing ended via browser control',
-            'Stopped capture tracks and closed outbound WebRTC session.'
+            'Stopped local screen capture tracks and notified peers.'
           );
           this.stopSharing('capture_revoked');
         },
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to start screen capture';
-      this.emit({
-        phase: 'failed',
-        errorMessage: message,
-        statusDetail: message,
-      });
+      this.errorMessage = message;
+      this.statusDetail = message;
       this.callbacks.onLogEvent('error', 'Screen capture failed', message);
+      this.emit();
       throw err;
     }
 
-    // Stop any previous capture session cleanly after acquiring replacement track
     if (this.captureSession) {
       this.captureSession.stop();
     }
     this.captureSession = session;
+    this.outboundStreamId = createId('stream');
 
     const resLabel =
       session.actualWidth && session.actualHeight
@@ -198,41 +581,59 @@ export class WebRtcSignalingBridge {
       `Track active${resLabel ? ` (${resLabel})` : ''}${session.actualFrameRate ? ` @ ${Math.round(session.actualFrameRate)} FPS` : ''}.`
     );
 
-    this.emit({
-      localStream: session.stream,
-      errorMessage: null,
-      statusDetail: 'Local screen capture active.',
-      telemetry: {
-        ...createEmptyTelemetry(this.preferences.targetFps, this.state.phase),
-        captureFps: session.actualFrameRate,
-        resolution: resLabel,
-      },
-    });
-
-    if (targetReceiverDeviceId && this.activeRoom && this.activeRoomRole === 'host') {
-      await this.connectStreamToReceiver(targetReceiverDeviceId);
-    } else {
-      this.emit({
-        phase: 'idle',
-        statusDetail:
-          'Local preview active. Pair and approve a receiver in Receivers & Pairing to begin WebRTC transmission.',
-      });
+    const targets = this.resolvePublishTargets(targetSelection);
+    if (targets.length === 0) {
+      this.statusDetail = this.activeRoom
+        ? 'Local preview active. Waiting for an approved connected peer in this room.'
+        : 'Local preview active. Create or join a paired room to share your screen.';
+      this.emit();
+      return;
     }
+
+    // Stop outbound on any previous targets not in the new target list
+    for (const oldTargetId of Array.from(this.outboundMap.keys())) {
+      if (!targets.includes(oldTargetId)) {
+        await this.stopPublishingToPeer(oldTargetId, 'user_stopped');
+      }
+    }
+
+    const errors: string[] = [];
+    for (const peerId of targets) {
+      try {
+        await this.publishActiveCaptureToPeer(peerId);
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : `Failed connecting to ${peerId}`);
+      }
+    }
+
+    if (errors.length > 0 && errors.length === targets.length) {
+      const msg = errors[0];
+      this.errorMessage = msg;
+      this.statusDetail = msg;
+      this.emit();
+      throw new Error(msg);
+    }
+
+    this.emit();
   }
 
-  async connectStreamToReceiver(targetReceiverDeviceId: string): Promise<void> {
+  async connectStreamToReceiver(targetPeerDeviceId: string): Promise<void> {
     if (!this.captureSession) {
-      throw new Error('Start screen capture before connecting to a receiver.');
+      throw new Error('Start screen capture before connecting to a participant.');
     }
-    if (!this.activeRoom || this.activeRoomRole !== 'host') {
-      throw new Error('Create a host room and approve a receiver first.');
+    if (!this.activeRoom || !this.isSelfAuthorizedInRoom()) {
+      throw new Error('Create or join an approved room before transmitting your screen.');
     }
+    await this.publishActiveCaptureToPeer(targetPeerDeviceId);
+    this.emit();
+  }
 
-    const receiverMember = this.activeRoom.pairedReceivers.find(
-      (r) => r.deviceId === targetReceiverDeviceId
-    );
-    if (!receiverMember || !receiverMember.connected) {
-      throw new Error(`Receiver ${targetReceiverDeviceId} is not currently paired and connected.`);
+  private async publishActiveCaptureToPeer(targetPeerDeviceId: string): Promise<void> {
+    if (!this.captureSession || !this.activeRoom) return;
+
+    const meta = this.resolveParticipantMeta(targetPeerDeviceId);
+    if (!meta || !meta.connected) {
+      throw new Error(`Participant ${targetPeerDeviceId} is not connected in this room.`);
     }
 
     const signaling = this.getSignalingClient();
@@ -240,208 +641,137 @@ export class WebRtcSignalingBridge {
       throw new Error('Signaling WebSocket is not connected.');
     }
 
-    // Prevent duplicate peer connections
-    if (this.peer) {
-      this.teardownPeerOnly('Replacing outbound WebRTC session.', 'disconnected');
-    }
-
-    const sessionId = receiverMember.sessionId || createId('sess');
-    const streamId = createId('stream');
+    const streamId = this.outboundStreamId ?? createId('stream');
+    this.outboundStreamId = streamId;
+    const sessionId = meta.sessionId;
     const roomId = this.activeRoom.roomId;
 
-    const peer = new CastoraWebRtcPeer({
-      role: 'sender',
-      peerDeviceId: targetReceiverDeviceId,
+    const peer = this.getOrCreatePeer(targetPeerDeviceId, sessionId);
+
+    this.outboundMap.set(targetPeerDeviceId, {
+      targetDeviceId: targetPeerDeviceId,
+      targetName: meta.deviceName,
+      targetPlatform: meta.platform,
       sessionId,
       streamId,
-      targetFps: this.preferences.targetFps,
-      networkPrefs: this.networkPrefs,
-      callbacks: {
-        onIceCandidate: (candidate) => {
-          signaling.sendEnvelope({
-            messageType: 'ice_candidate',
-            senderDeviceId: this.deviceId,
-            receiverDeviceId: targetReceiverDeviceId,
-            roomId,
-            payload: {
-              sessionId,
-              streamId,
-              sdpMid: candidate.sdpMid ?? null,
-              sdpMLineIndex: candidate.sdpMLineIndex ?? 0,
-              candidate: candidate.candidate ?? '',
-            },
-          });
-        },
-        onRemoteStream: () => {
-          // Sender does not display remote stream
-        },
-        onPhaseChange: (phase, detail) => {
-          this.emit({ phase, statusDetail: detail });
-        },
-        onIceConnectionChange: (iceConnectionState) => {
-          this.emit({ iceConnectionState });
-        },
-        onStats: (stats) => {
-          this.emit({ telemetry: stats });
-        },
-        onIceRestartOffer: (sdp) => {
-          this.callbacks.onLogEvent(
-            'webrtc',
-            'Attempting WebRTC ICE restart',
-            `Sending refreshed SDP offer to ${receiverMember.deviceName}.`
-          );
-          signaling.sendEnvelope({
-            messageType: 'session_offer',
-            senderDeviceId: this.deviceId,
-            receiverDeviceId: targetReceiverDeviceId,
-            roomId,
-            payload: {
-              sessionId,
-              streamId,
-              sdpType: 'offer',
-              sdp,
-              mediaInfo: {
-                hasVideo: true,
-                hasAudio: this.captureSession?.hasAudio ?? false,
-                codecHint: this.preferences.codecPreference === 'H264' ? 'H264' : 'VP8',
-              },
-            },
-          });
-        },
-        onError: (msg) => {
-          this.emit({ errorMessage: msg });
-          this.callbacks.onLogEvent('error', 'WebRTC sender error', msg);
-        },
+      phase: 'connecting',
+      iceConnectionState: null,
+      statusDetail: `Connecting outbound stream to ${meta.deviceName}...`,
+      errorMessage: null,
+      telemetry: createEmptyTelemetry(this.preferences.targetFps, 'connecting'),
+    });
+    this.statusDetail = `Sharing screen to ${meta.deviceName}...`;
+    this.emit();
+
+    const width =
+      this.captureSession.actualWidth ?? (this.preferences.resolution === '720p' ? 1280 : 1920);
+    const height =
+      this.captureSession.actualHeight ?? (this.preferences.resolution === '720p' ? 720 : 1080);
+    const fps = Math.max(
+      1,
+      Math.min(120, Math.round(this.captureSession.actualFrameRate ?? this.preferences.targetFps))
+    );
+    const announcedCodec: CastoraVideoCodec =
+      this.preferences.codecPreference === 'H264' ? 'H264' : 'VP8';
+
+    // Register stream_start on signaling server before/alongside SDP offer
+    signaling.sendEnvelope({
+      messageType: 'stream_start',
+      senderDeviceId: this.deviceId,
+      receiverDeviceId: targetPeerDeviceId,
+      roomId,
+      payload: {
+        sessionId,
+        streamId,
+        width,
+        height,
+        fps,
+        codec: announcedCodec,
       },
     });
 
-    this.peer = peer;
-    this.emit({
-      phase: 'connecting',
-      errorMessage: null,
-      activeSessionId: sessionId,
-      activeStreamId: streamId,
-      targetPeerDeviceId: targetReceiverDeviceId,
-      statusDetail: `Connecting WebRTC session to ${receiverMember.deviceName}...`,
+    await peer.publishLocalStream({
+      localStream: this.captureSession.stream,
+      streamId,
+      preferences: this.preferences,
     });
-
-    try {
-      const offer = await peer.createSenderOffer({
-        localStream: this.captureSession.stream,
-        preferences: this.preferences,
-      });
-
-      const width =
-        this.captureSession.actualWidth ?? (this.preferences.resolution === '720p' ? 1280 : 1920);
-      const height =
-        this.captureSession.actualHeight ?? (this.preferences.resolution === '720p' ? 720 : 1080);
-      const fps = Math.max(
-        1,
-        Math.min(120, Math.round(this.captureSession.actualFrameRate ?? this.preferences.targetFps))
-      );
-
-      signaling.sendEnvelope({
-        messageType: 'stream_start',
-        senderDeviceId: this.deviceId,
-        receiverDeviceId: targetReceiverDeviceId,
-        roomId,
-        payload: {
-          sessionId,
-          streamId,
-          width,
-          height,
-          fps,
-          codec: offer.codecHint,
-        },
-      });
-
-      signaling.sendEnvelope({
-        messageType: 'session_offer',
-        senderDeviceId: this.deviceId,
-        receiverDeviceId: targetReceiverDeviceId,
-        roomId,
-        payload: {
-          sessionId,
-          streamId,
-          sdpType: 'offer',
-          sdp: offer.sdp,
-          mediaInfo: {
-            hasVideo: offer.hasVideo,
-            hasAudio: offer.hasAudio,
-            codecHint: offer.codecHint,
-          },
-        },
-      });
-
-      this.callbacks.onLogEvent(
-        'webrtc',
-        'Sent WebRTC SDP offer',
-        `Target: ${receiverMember.deviceName} (${targetReceiverDeviceId}) · ${width}×${height} @ ${fps} FPS · Codec ${offer.codecHint}`
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to create WebRTC offer';
-      this.teardownPeerOnly(msg, 'failed');
-      this.emit({ phase: 'failed', errorMessage: msg, statusDetail: msg });
-      throw err;
-    }
   }
 
-  stopSharing(reason: 'user_stopped' | 'capture_revoked' = 'user_stopped'): void {
+  private async stopPublishingToPeer(
+    targetPeerDeviceId: string,
+    reason: 'user_stopped' | 'capture_revoked'
+  ): Promise<void> {
+    const outEntry = this.outboundMap.get(targetPeerDeviceId);
     const signaling = this.getSignalingClient();
     const roomId = this.activeRoom?.roomId ?? null;
 
-    if (
-      signaling &&
-      roomId &&
-      this.activeRoomRole === 'host' &&
-      this.state.targetPeerDeviceId &&
-      this.state.activeSessionId &&
-      this.state.activeStreamId
-    ) {
+    if (outEntry && signaling && roomId) {
       signaling.sendEnvelope({
         messageType: 'stream_stop',
         senderDeviceId: this.deviceId,
-        receiverDeviceId: this.state.targetPeerDeviceId,
+        receiverDeviceId: targetPeerDeviceId,
         roomId,
         payload: {
-          sessionId: this.state.activeSessionId,
-          streamId: this.state.activeStreamId,
+          sessionId: outEntry.sessionId,
+          streamId: outEntry.streamId,
           reason,
         },
       });
     }
 
-    this.teardownPeerOnly('Screen sharing stopped by host.', 'disconnected');
+    this.outboundMap.delete(targetPeerDeviceId);
+    const peer = this.peers.get(targetPeerDeviceId);
+    if (peer) {
+      await peer.stopLocalStream();
+      // Only remove the peer connection if neither outbound nor inbound streams remain active.
+      // Wait: keeping the warm peer connection until room leave/disconnect makes re-sharing instant
+      // and preserves any active reverse stream completely!
+    }
+  }
+
+  stopSharing(reason: 'user_stopped' | 'capture_revoked' = 'user_stopped'): void {
+    const activeTargetIds = Array.from(this.outboundMap.keys());
+    for (const peerId of activeTargetIds) {
+      void this.stopPublishingToPeer(peerId, reason);
+    }
 
     if (this.captureSession) {
       this.captureSession.stop();
       this.captureSession = null;
     }
-
-    this.emit({
-      phase: 'idle',
-      localStream: null,
-      activeSessionId: null,
-      activeStreamId: null,
-      targetPeerDeviceId: null,
-      iceConnectionState: null,
-      errorMessage: null,
-      statusDetail:
-        reason === 'capture_revoked'
-          ? 'Screen sharing stopped via browser control.'
-          : 'Screen sharing stopped.',
-      telemetry: createEmptyTelemetry(this.preferences.targetFps, 'idle'),
-    });
+    this.outboundStreamId = null;
+    this.errorMessage = null;
+    this.statusDetail =
+      this.incomingMap.size > 0
+        ? 'Stopped your outbound screen share. Incoming streams remain active.'
+        : reason === 'capture_revoked'
+          ? 'Screen sharing ended via browser controls.'
+          : 'Screen sharing stopped.';
 
     this.callbacks.onLogEvent(
       'webrtc',
-      'Stopped screen sharing',
-      `Stopped local media tracks and closed WebRTC peer connection (${reason}).`
+      'Stopped local screen share',
+      this.incomingMap.size > 0
+        ? `Stopped outbound tracks (${reason}) while keeping ${this.incomingMap.size} incoming stream(s) active.`
+        : `Stopped outbound tracks (${reason}).`
     );
+
+    this.emit();
   }
 
   async handleIncomingEnvelope(envelope: CastoraEnvelope): Promise<void> {
     if (!this.activeRoom || envelope.roomId !== this.activeRoom.roomId) {
+      return;
+    }
+    if (envelope.senderDeviceId === this.deviceId) {
+      return;
+    }
+    if (!this.isSelfAuthorizedInRoom()) {
+      return;
+    }
+
+    const senderMeta = this.resolveParticipantMeta(envelope.senderDeviceId);
+    if (!senderMeta) {
       return;
     }
 
@@ -449,9 +779,6 @@ export class WebRtcSignalingBridge {
     if (!signaling) return;
 
     if (envelope.messageType === 'stream_start') {
-      if (this.activeRoomRole !== 'receiver' || envelope.senderDeviceId !== this.activeRoom.hostDeviceId) {
-        return;
-      }
       const p = envelope.payload as {
         width: number;
         height: number;
@@ -460,166 +787,123 @@ export class WebRtcSignalingBridge {
         sessionId: string;
         streamId: string;
       };
-      this.emit({
-        phase: 'connecting',
+
+      const peer = this.getOrCreatePeer(envelope.senderDeviceId, p.sessionId);
+      peer.markInboundStreamExpected(p.streamId, p.fps);
+
+      const existing = this.incomingMap.get(envelope.senderDeviceId);
+      this.incomingMap.set(envelope.senderDeviceId, {
+        senderDeviceId: envelope.senderDeviceId,
+        senderName: senderMeta.deviceName,
+        senderPlatform: senderMeta.platform,
+        sessionId: p.sessionId,
+        streamId: p.streamId,
+        phase: existing?.stream ? 'connected' : 'connecting',
+        iceConnectionState: existing?.iceConnectionState ?? null,
+        statusDetail: `${senderMeta.deviceName} started ${p.width}×${p.height} @ ${p.fps} FPS (${p.codec}).`,
         errorMessage: null,
-        activeSessionId: p.sessionId,
-        activeStreamId: p.streamId,
-        targetPeerDeviceId: envelope.senderDeviceId,
-        remoteStreamMeta: {
+        stream: existing?.stream ?? null,
+        streamMeta: {
           width: p.width,
           height: p.height,
           fps: p.fps,
           codec: p.codec,
         },
-        statusDetail: `Host started ${p.width}×${p.height} @ ${p.fps} FPS (${p.codec}). Negotiating WebRTC...`,
+        telemetry: existing?.telemetry ?? createEmptyTelemetry(p.fps, 'connecting'),
+        startedAt: existing?.startedAt ?? new Date().toISOString(),
       });
+      this.statusDetail = `Receiving stream announcement from ${senderMeta.deviceName}...`;
       this.callbacks.onLogEvent(
         'webrtc',
         'Incoming stream announcement',
-        `Host started ${p.width}×${p.height} @ ${p.fps} FPS (${p.codec}).`
+        `${senderMeta.deviceName} started ${p.width}×${p.height} @ ${p.fps} FPS (${p.codec}).`
       );
+      this.emit();
       return;
     }
 
     if (envelope.messageType === 'session_offer') {
-      if (this.activeRoomRole !== 'receiver' || envelope.senderDeviceId !== this.activeRoom.hostDeviceId) {
-        return;
-      }
       const p = envelope.payload as {
         sessionId: string;
         streamId: string;
         sdp: string;
+        mediaInfo?: { hasVideo?: boolean; hasAudio?: boolean };
       };
 
-      const isIceRestart =
-        this.peer &&
-        this.peer.peerDeviceId === envelope.senderDeviceId &&
-        this.peer.sessionId === p.sessionId &&
-        this.peer.streamId === p.streamId;
-
-      if (!isIceRestart) {
-        if (this.peer) {
-          this.teardownPeerOnly('Replacing receiver peer for new offer.', 'disconnected');
-        }
-        this.peer = new CastoraWebRtcPeer({
-          role: 'receiver',
-          peerDeviceId: envelope.senderDeviceId,
-          sessionId: p.sessionId,
-          streamId: p.streamId,
-          targetFps: this.state.remoteStreamMeta?.fps ?? 60,
-          networkPrefs: this.networkPrefs,
-          callbacks: {
-            onIceCandidate: (candidate) => {
-              signaling.sendEnvelope({
-                messageType: 'ice_candidate',
-                senderDeviceId: this.deviceId,
-                receiverDeviceId: envelope.senderDeviceId,
-                roomId: envelope.roomId,
-                payload: {
-                  sessionId: p.sessionId,
-                  streamId: p.streamId,
-                  sdpMid: candidate.sdpMid ?? null,
-                  sdpMLineIndex: candidate.sdpMLineIndex ?? 0,
-                  candidate: candidate.candidate ?? '',
-                },
-              });
-            },
-            onRemoteStream: (stream) => {
-              this.emit({ remoteStream: stream });
-            },
-            onPhaseChange: (phase, detail) => {
-              this.emit({ phase, statusDetail: detail });
-            },
-            onIceConnectionChange: (iceConnectionState) => {
-              this.emit({ iceConnectionState });
-            },
-            onStats: (stats) => {
-              this.emit({ telemetry: stats });
-            },
-            onError: (msg) => {
-              this.emit({ errorMessage: msg });
-              this.callbacks.onLogEvent('error', 'WebRTC receiver error', msg);
-            },
-          },
-        });
-      }
-
-      this.emit({
-        phase: 'connecting',
-        errorMessage: null,
-        activeSessionId: p.sessionId,
-        activeStreamId: p.streamId,
-        targetPeerDeviceId: envelope.senderDeviceId,
-      });
-
+      const peer = this.getOrCreatePeer(envelope.senderDeviceId, p.sessionId);
       try {
-        const answerSdp = await this.peer!.acceptOfferAndCreateAnswer(p.sdp);
-        signaling.sendEnvelope({
-          messageType: 'session_answer',
-          senderDeviceId: this.deviceId,
-          receiverDeviceId: envelope.senderDeviceId,
-          roomId: envelope.roomId,
-          payload: {
-            sessionId: p.sessionId,
-            streamId: p.streamId,
-            sdpType: 'answer',
-            sdp: answerSdp,
-          },
-        });
-        this.callbacks.onLogEvent(
-          'webrtc',
-          isIceRestart ? 'Processed ICE restart offer' : 'Sent WebRTC SDP answer',
-          `Returned SDP answer to host ${envelope.senderDeviceId}.`
+        const expectedInboundStreamId =
+          p.mediaInfo?.hasVideo === false ? undefined : p.streamId;
+        const answerSdp = await peer.acceptOfferAndCreateAnswer(
+          p.sdp,
+          expectedInboundStreamId
         );
+        if (answerSdp) {
+          signaling.sendEnvelope({
+            messageType: 'session_answer',
+            senderDeviceId: this.deviceId,
+            receiverDeviceId: envelope.senderDeviceId,
+            roomId: envelope.roomId,
+            payload: {
+              sessionId: p.sessionId,
+              streamId: p.streamId,
+              sdpType: 'answer',
+              sdp: answerSdp,
+            },
+          });
+          this.callbacks.onLogEvent(
+            'webrtc',
+            'Sent WebRTC SDP answer',
+            `Returned SDP answer to ${senderMeta.deviceName} (${envelope.senderDeviceId}).`
+          );
+        } else {
+          this.callbacks.onLogEvent(
+            'webrtc',
+            'Resolved SDP offer glare (impolite)',
+            `Ignored colliding offer from ${senderMeta.deviceName}; awaiting peer answer.`
+          );
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Failed to negotiate SDP offer';
-        this.emit({ phase: 'failed', errorMessage: msg, statusDetail: msg });
+        this.errorMessage = msg;
+        this.statusDetail = msg;
         this.callbacks.onLogEvent('error', 'SDP offer handling failed', msg);
+        this.emit();
       }
       return;
     }
 
     if (envelope.messageType === 'session_answer') {
-      if (this.activeRoomRole !== 'host' || !this.peer) {
-        return;
-      }
+      const peer = this.peers.get(envelope.senderDeviceId);
+      if (!peer) return;
       const p = envelope.payload as { sessionId: string; streamId: string; sdp: string };
-      if (
-        envelope.senderDeviceId !== this.peer.peerDeviceId ||
-        p.sessionId !== this.peer.sessionId
-      ) {
-        return;
-      }
       try {
-        await this.peer.acceptAnswer(p.sdp);
+        await peer.acceptAnswer(p.sdp);
         this.callbacks.onLogEvent(
           'webrtc',
           'Applied WebRTC SDP answer',
-          `Completed SDP handshake with receiver ${envelope.senderDeviceId}.`
+          `Completed SDP handshake with ${senderMeta.deviceName} (${envelope.senderDeviceId}).`
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Failed to apply SDP answer';
-        this.emit({ phase: 'failed', errorMessage: msg, statusDetail: msg });
+        this.errorMessage = msg;
+        this.statusDetail = msg;
         this.callbacks.onLogEvent('error', 'SDP answer error', msg);
+        this.emit();
       }
       return;
     }
 
     if (envelope.messageType === 'ice_candidate') {
-      if (!this.peer || envelope.senderDeviceId !== this.peer.peerDeviceId) {
-        return;
-      }
+      const peer = this.peers.get(envelope.senderDeviceId);
+      if (!peer) return;
       const p = envelope.payload as {
         sessionId: string;
         sdpMid: string | null;
         sdpMLineIndex: number;
         candidate: string;
       };
-      if (p.sessionId !== this.peer.sessionId) {
-        return;
-      }
-      await this.peer.addIceCandidate({
+      await peer.addIceCandidate({
         candidate: p.candidate,
         sdpMid: p.sdpMid,
         sdpMLineIndex: p.sdpMLineIndex,
@@ -628,46 +912,32 @@ export class WebRtcSignalingBridge {
     }
 
     if (envelope.messageType === 'stream_stop') {
-      if (this.activeRoomRole !== 'receiver' || envelope.senderDeviceId !== this.activeRoom.hostDeviceId) {
-        return;
-      }
       const p = envelope.payload as { reason?: string };
       const reasonText =
         p.reason === 'capture_revoked'
-          ? 'Host ended screen sharing via browser controls.'
-          : 'Host stopped screen sharing.';
-      this.teardownPeerOnly(reasonText, 'disconnected');
-      this.emit({
-        phase: 'disconnected',
-        remoteStream: null,
-        activeSessionId: null,
-        activeStreamId: null,
-        remoteStreamMeta: null,
-        iceConnectionState: null,
-        statusDetail: reasonText,
-        telemetry: createEmptyTelemetry(this.preferences.targetFps, 'disconnected'),
-      });
-      this.callbacks.onLogEvent('webrtc', 'Stream ended by host', reasonText);
-    }
-  }
+          ? `${senderMeta.deviceName} ended screen sharing via browser controls.`
+          : p.reason === 'network_lost'
+            ? `${senderMeta.deviceName}'s stream ended due to network disconnection.`
+            : `${senderMeta.deviceName} stopped screen sharing.`;
 
-  private teardownPeerOnly(reason: string, finalPhase: WebRtcConnectionPhase): void {
-    if (this.peer) {
-      const closing = this.peer;
-      this.peer = null;
-      closing.close(reason);
+      this.incomingMap.delete(envelope.senderDeviceId);
+      const peer = this.peers.get(envelope.senderDeviceId);
+      peer?.clearInboundStream(reasonText);
+
+      this.statusDetail = reasonText;
+      this.callbacks.onLogEvent('webrtc', 'Remote stream stopped', reasonText);
+      this.emit();
     }
-    this.emit({
-      phase: finalPhase,
-      iceConnectionState: null,
-    });
   }
 
   dispose(): void {
-    this.teardownPeerOnly('Session disposed', 'disconnected');
+    for (const peerId of Array.from(this.peers.keys())) {
+      this.removePeerConnection(peerId, 'Session disposed');
+    }
     if (this.captureSession) {
       this.captureSession.stop();
       this.captureSession = null;
     }
+    this.outboundStreamId = null;
   }
 }

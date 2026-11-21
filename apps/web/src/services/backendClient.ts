@@ -52,6 +52,20 @@ export interface PairedReceiverInfo {
   sessionId: string;
 }
 
+export interface ActiveRoomStreamInfo {
+  streamId: string;
+  sessionId: string;
+  publisherDeviceId: string;
+  publisherName: string;
+  publisherPlatform: CastoraPlatform;
+  targetDeviceId: string;
+  width: number;
+  height: number;
+  fps: number;
+  codec: string;
+  startedAt: string;
+}
+
 export interface RoomSnapshot {
   roomId: string;
   status: 'active' | 'closed' | 'expired';
@@ -67,6 +81,7 @@ export interface RoomSnapshot {
   pendingCount: number;
   pendingRequests: PendingRequestInfo[];
   pairedReceivers: PairedReceiverInfo[];
+  activeStreams?: ActiveRoomStreamInfo[];
 }
 
 export interface CreateRoomResponse {

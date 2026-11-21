@@ -10,6 +10,7 @@ import { SlidingWindowRateLimiter } from './apps/server/security.ts';
 import {
   attachSignalingGateway,
   broadcastRoomState,
+  emitTerminatedStreams,
   sendJson,
 } from './apps/server/signalingGateway.ts';
 import type {
@@ -450,6 +451,8 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       return;
     }
 
+    emitTerminatedStreams(roomId, removed.terminatedStreams, 'receiver_closed');
+
     if (removed.removedSocket) {
       sendJson(
         removed.removedSocket,
@@ -503,6 +506,7 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       return;
     }
 
+    emitTerminatedStreams(roomId, left.terminatedStreams, 'receiver_closed');
     broadcastRoomState(roomManager, left.room);
     res.status(200).json({ left: true, roomId });
   });

@@ -50,6 +50,34 @@ export interface PairedReceiverMember {
   sessionId: string;
 }
 
+export interface ActiveRoomStream {
+  streamId: string;
+  sessionId: string;
+  publisherDeviceId: string;
+  publisherName: string;
+  publisherPlatform: CastoraPlatform;
+  targetDeviceId: string;
+  width: number;
+  height: number;
+  fps: number;
+  codec: CastoraVideoCodec;
+  startedAt: number;
+}
+
+export interface PublicActiveStream {
+  streamId: string;
+  sessionId: string;
+  publisherDeviceId: string;
+  publisherName: string;
+  publisherPlatform: CastoraPlatform;
+  targetDeviceId: string;
+  width: number;
+  height: number;
+  fps: number;
+  codec: CastoraVideoCodec;
+  startedAt: string;
+}
+
 export interface CastoraRoom {
   roomId: string;
   hostDeviceId: string;
@@ -63,6 +91,7 @@ export interface CastoraRoom {
   maxReceivers: number;
   pendingRequests: Map<string, PendingPairRequest>;
   pairedReceivers: Map<string, PairedReceiverMember>;
+  activeStreams: Map<string, ActiveRoomStream>;
 }
 
 export interface PublicPendingRequest {
@@ -100,6 +129,7 @@ export interface PublicRoomSnapshot {
   pendingCount: number;
   pendingRequests: PublicPendingRequest[];
   pairedReceivers: PublicPairedReceiver[];
+  activeStreams: PublicActiveStream[];
 }
 
 export interface BackendHealthStatus {
