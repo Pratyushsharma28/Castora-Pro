@@ -281,7 +281,6 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
           capabilities: DeviceCapabilities;
         };
 
-        meta.boundDeviceId = envelope.senderDeviceId;
         const result = roomManager.registerDevice({
           socket: ws,
           remoteAddress: meta.remoteAddress,
@@ -294,6 +293,23 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
           roomId: envelope.roomId,
           token: meta.token,
         });
+
+        if (result.rejected || !result.device) {
+          sendJson(
+            ws,
+            createErrorEnvelope({
+              receiverDeviceId: envelope.senderDeviceId,
+              roomId: envelope.roomId,
+              code: 'APPROVAL_DECLINED',
+              message: result.message ?? 'Device identity is already bound to an active session',
+              recoverable: false,
+              relatedMessageId: envelope.messageId,
+            })
+          );
+          return;
+        }
+
+        meta.boundDeviceId = envelope.senderDeviceId;
 
         sendJson(
           ws,
@@ -641,38 +657,16 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
       }
 
       case 'session_offer':
-      case 'session_answer':
-      case 'ice_candidate': {
-        sendJson(
-          ws,
-          createErrorEnvelope({
-            receiverDeviceId: envelope.senderDeviceId,
-            roomId: envelope.roomId,
-            code: 'WEBRTC_NEGOTIATION_FAILED',
-            message: 'WebRTC SDP/ICE negotiation activates in Stage 4',
-            recoverable: true,
-            relatedMessageId: envelope.messageId,
-          })
-        );
-        return;
-      }
-
-      default: {
-        if (
-          !envelope.roomId ||
-          !roomManager.verifyRoomPeerAccess(
-            envelope.roomId,
-            envelope.senderDeviceId,
-            envelope.receiverDeviceId
-          )
-        ) {
+      case 'session_answer': {
+        const sdpPayload = envelope.payload as { sdp?: string };
+        if (typeof sdpPayload.sdp !== 'string' || !sdpPayload.sdp.startsWith('v=0') || !sdpPayload.sdp.includes('m=')) {
           sendJson(
             ws,
             createErrorEnvelope({
               receiverDeviceId: envelope.senderDeviceId,
               roomId: envelope.roomId,
-              code: 'INVALID_ROOM_ID',
-              message: 'Sender and receiver must belong to an active paired room',
+              code: 'INVALID_MESSAGE',
+              message: 'Malformed SDP description: must contain valid v=0 header and m= media section',
               recoverable: true,
               relatedMessageId: envelope.messageId,
             })
@@ -680,20 +674,124 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
           return;
         }
 
-        if (envelope.receiverDeviceId) {
-          const target = roomManager.getDeviceById(envelope.receiverDeviceId);
-          if (target && target.socket.readyState === WebSocket.OPEN) {
-            sendJson(target.socket, envelope);
-          }
-        } else {
-          const sockets = roomManager.getRoomMemberSockets(
-            envelope.roomId,
-            envelope.senderDeviceId
+        const auth = roomManager.authorizePeerSignaling({
+          socket: ws,
+          roomId: envelope.roomId,
+          senderDeviceId: envelope.senderDeviceId,
+          targetDeviceId: envelope.receiverDeviceId,
+          token: meta.token,
+        });
+        if (!auth.ok) {
+          sendJson(
+            ws,
+            createErrorEnvelope({
+              receiverDeviceId: envelope.senderDeviceId,
+              roomId: envelope.roomId,
+              code: auth.code,
+              message: auth.message,
+              recoverable: true,
+              relatedMessageId: envelope.messageId,
+            })
           );
-          for (const peerSocket of sockets) {
-            sendJson(peerSocket, envelope);
-          }
+          return;
         }
+        sendJson(auth.targetSocket, envelope);
+        return;
+      }
+
+      case 'ice_candidate': {
+        const icePayload = envelope.payload as { candidate?: string };
+        if (typeof icePayload.candidate !== 'string' || icePayload.candidate.trim().length === 0) {
+          sendJson(
+            ws,
+            createErrorEnvelope({
+              receiverDeviceId: envelope.senderDeviceId,
+              roomId: envelope.roomId,
+              code: 'INVALID_MESSAGE',
+              message: 'ICE candidate string must be non-empty',
+              recoverable: true,
+              relatedMessageId: envelope.messageId,
+            })
+          );
+          return;
+        }
+
+        const auth = roomManager.authorizePeerSignaling({
+          socket: ws,
+          roomId: envelope.roomId,
+          senderDeviceId: envelope.senderDeviceId,
+          targetDeviceId: envelope.receiverDeviceId,
+          token: meta.token,
+        });
+        if (!auth.ok) {
+          sendJson(
+            ws,
+            createErrorEnvelope({
+              receiverDeviceId: envelope.senderDeviceId,
+              roomId: envelope.roomId,
+              code: auth.code,
+              message: auth.message,
+              recoverable: true,
+              relatedMessageId: envelope.messageId,
+            })
+          );
+          return;
+        }
+        sendJson(auth.targetSocket, envelope);
+        return;
+      }
+
+      case 'stream_start':
+      case 'stream_stop':
+      case 'stream_status': {
+        const auth = roomManager.authorizePeerSignaling({
+          socket: ws,
+          roomId: envelope.roomId,
+          senderDeviceId: envelope.senderDeviceId,
+          targetDeviceId: envelope.receiverDeviceId,
+          token: meta.token,
+        });
+        if (!auth.ok) {
+          sendJson(
+            ws,
+            createErrorEnvelope({
+              receiverDeviceId: envelope.senderDeviceId,
+              roomId: envelope.roomId,
+              code: auth.code,
+              message: auth.message,
+              recoverable: true,
+              relatedMessageId: envelope.messageId,
+            })
+          );
+          return;
+        }
+        sendJson(auth.targetSocket, envelope);
+        return;
+      }
+
+      default: {
+        const auth = roomManager.authorizePeerSignaling({
+          socket: ws,
+          roomId: envelope.roomId,
+          senderDeviceId: envelope.senderDeviceId,
+          targetDeviceId: envelope.receiverDeviceId,
+          token: meta.token,
+        });
+        if (!auth.ok) {
+          sendJson(
+            ws,
+            createErrorEnvelope({
+              receiverDeviceId: envelope.senderDeviceId,
+              roomId: envelope.roomId,
+              code: auth.code,
+              message: auth.message,
+              recoverable: true,
+              relatedMessageId: envelope.messageId,
+            })
+          );
+          return;
+        }
+        sendJson(auth.targetSocket, envelope);
       }
     }
   }

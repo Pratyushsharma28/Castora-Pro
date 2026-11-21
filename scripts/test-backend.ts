@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import WebSocket from 'ws';
+import {
+  ScreenCaptureError,
+  startScreenCapture,
+} from '../apps/web/src/services/screenCaptureService.ts';
 import { startCastoraServer } from '../server.ts';
 
 type JsonRecord = Record<string, unknown>;
@@ -163,7 +167,7 @@ async function main() {
     host: '127.0.0.1',
     enableViteMiddleware: false,
     roomTtlMs: 30_000,
-    rateLimitMaxAttempts: 20,
+    rateLimitMaxAttempts: 40,
     rateLimitWindowMs: 10_000,
   });
 
@@ -715,9 +719,531 @@ async function main() {
     await sweepHostWs.close();
     console.log('  [PASS] 11. Room expiration verified (HTTP 410 + live WS expired push)');
 
-    // Rate limiting check
+    console.log('\nAll 14 Stage 3 backend & multi-client pairing scenarios passed!');
+
+    // =========================================================================
+    // STAGE 4A VERIFICATION: WebRTC Signalling, Security, Peer Cleanup & Capture
+    // =========================================================================
+    console.log('\nStarting Stage 4A WebRTC signalling & screen capture tests...');
+
+    // Create Room A with Host A + approved Receiver A1 + pending Receiver A2
+    const wHostId = 'mac-a-sender';
+    const wRx1Id = 'mac-b-receiver';
+    const wRx2PendingId = 'mac-c-pending';
+
+    const roomARes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: wHostId,
+        hostDeviceName: 'Mac A Sender',
+        hostPlatform: 'macos',
+      }),
+    });
+    assert.equal(roomARes.status, 201);
+    const roomAData = (await roomARes.json()) as {
+      room: { roomId: string };
+      hostToken: string;
+    };
+    const roomA = roomAData.room.roomId;
+
+    const wHostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: wHostId,
+      deviceName: 'Mac A Sender',
+      platform: 'macos',
+      role: 'sender',
+      roomId: roomA,
+      token: roomAData.hostToken,
+    });
+    await wHostWs.waitForMessage((m) => m.messageType === 'room_state');
+
+    const wRx1Join = (await (
+      await fetch(`${baseUrl}/api/rooms/${roomA}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiverDeviceId: wRx1Id,
+          deviceName: 'Mac B Receiver',
+          platform: 'macos',
+        }),
+      })
+    ).json()) as { memberToken: string; sessionId: string };
+
+    const wRx1Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: wRx1Id,
+      deviceName: 'Mac B Receiver',
+      platform: 'macos',
+      role: 'receiver',
+      roomId: roomA,
+      token: wRx1Join.memberToken,
+    });
+    await wRx1Ws.waitForMessage((m) => m.messageType === 'room_state');
+
+    const approveW = await fetch(
+      `${baseUrl}/api/rooms/${roomA}/pair-requests/${wRx1Id}/approve`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${roomAData.hostToken}` },
+      }
+    );
+    assert.equal(approveW.status, 200);
+    await wRx1Ws.waitForMessage((m) => m.messageType === 'pair_response');
+
+    // Pending (unapproved) receiver in Room A
+    const wRx2Join = (await (
+      await fetch(`${baseUrl}/api/rooms/${roomA}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiverDeviceId: wRx2PendingId,
+          deviceName: 'Mac C Pending',
+          platform: 'macos',
+        }),
+      })
+    ).json()) as { memberToken: string };
+    const wRx2PendingWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: wRx2PendingId,
+      deviceName: 'Mac C Pending',
+      platform: 'macos',
+      role: 'receiver',
+      roomId: roomA,
+      token: wRx2Join.memberToken,
+    });
+
+    // Room B for cross-room isolation verification
+    const roomBHostId = 'mac-roomb-host';
+    const roomBData = (await (
+      await fetch(`${baseUrl}/api/rooms`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hostDeviceId: roomBHostId,
+          hostDeviceName: 'Unrelated Room B Host',
+          hostPlatform: 'macos',
+        }),
+      })
+    ).json()) as { room: { roomId: string }; hostToken: string };
+    const roomB = roomBData.room.roomId;
+    const roomBHostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: roomBHostId,
+      deviceName: 'Unrelated Room B Host',
+      platform: 'macos',
+      role: 'sender',
+      roomId: roomB,
+      token: roomBData.hostToken,
+    });
+
+    const sampleOfferSdp =
+      'v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n';
+    const sampleAnswerSdp =
+      'v=0\r\no=- 9123456789012345678 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n';
+    const wStreamId = 'stream-stage4a-01';
+
+    // 4A.1 SDP offer routing
+    const rx1StartPromise = wRx1Ws.waitForMessage((m) => m.messageType === 'stream_start');
+    const rx1OfferPromise = wRx1Ws.waitForMessage((m) => m.messageType === 'session_offer');
+    wHostWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'stream_start',
+      messageId: 's4a-stream-start-01',
+      senderDeviceId: wHostId,
+      receiverDeviceId: wRx1Id,
+      roomId: roomA,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        codec: 'H264',
+      },
+    });
+    wHostWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'session_offer',
+      messageId: 's4a-offer-01',
+      senderDeviceId: wHostId,
+      receiverDeviceId: wRx1Id,
+      roomId: roomA,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        sdpType: 'offer',
+        sdp: sampleOfferSdp,
+        mediaInfo: { hasVideo: true, hasAudio: false, codecHint: 'H264' },
+      },
+    });
+    await rx1StartPromise;
+    const deliveredOffer = await rx1OfferPromise;
+    assert.equal(deliveredOffer.senderDeviceId, wHostId);
+    assert.equal((deliveredOffer.payload as { sdp: string }).sdp, sampleOfferSdp);
+    console.log('  [PASS] 4A.1. SDP offer routing delivered exclusively to paired receiver');
+
+    // 4A.2 SDP answer routing
+    const hostAnswerPromise = wHostWs.waitForMessage((m) => m.messageType === 'session_answer');
+    wRx1Ws.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'session_answer',
+      messageId: 's4a-answer-01',
+      senderDeviceId: wRx1Id,
+      receiverDeviceId: wHostId,
+      roomId: roomA,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        sdpType: 'answer',
+        sdp: sampleAnswerSdp,
+      },
+    });
+    const deliveredAnswer = await hostAnswerPromise;
+    assert.equal(deliveredAnswer.senderDeviceId, wRx1Id);
+    assert.equal((deliveredAnswer.payload as { sdp: string }).sdp, sampleAnswerSdp);
+    console.log('  [PASS] 4A.2. SDP answer routing delivered cleanly to host');
+
+    // 4A.3 ICE candidate routing (bidirectional)
+    const rx1IcePromise = wRx1Ws.waitForMessage((m) => m.messageType === 'ice_candidate');
+    wHostWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'ice_candidate',
+      messageId: 's4a-ice-host-01',
+      senderDeviceId: wHostId,
+      receiverDeviceId: wRx1Id,
+      roomId: roomA,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        sdpMid: '0',
+        sdpMLineIndex: 0,
+        candidate: 'candidate:1 1 UDP 2122252543 192.168.1.10 50000 typ host',
+      },
+    });
+    await rx1IcePromise;
+
+    const hostIcePromise = wHostWs.waitForMessage((m) => m.messageType === 'ice_candidate');
+    wRx1Ws.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'ice_candidate',
+      messageId: 's4a-ice-rx-01',
+      senderDeviceId: wRx1Id,
+      receiverDeviceId: wHostId,
+      roomId: roomA,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        sdpMid: '0',
+        sdpMLineIndex: 0,
+        candidate: 'candidate:2 1 UDP 2122252543 192.168.1.20 50001 typ host',
+      },
+    });
+    await hostIcePromise;
+    console.log('  [PASS] 4A.3. Bidirectional ICE candidate routing verified');
+
+    // 4A.4 Unauthorized signalling rejection (pending unapproved receiver & hijack attempt)
+    const pendingErrPromise = wRx2PendingWs.waitForMessage((m) => m.messageType === 'error');
+    wRx2PendingWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'session_offer',
+      messageId: 's4a-unauth-pending',
+      senderDeviceId: wRx2PendingId,
+      receiverDeviceId: wHostId,
+      roomId: roomA,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        sdpType: 'offer',
+        sdp: sampleOfferSdp,
+      },
+    });
+    const pendingErr = await pendingErrPromise;
+    assert.equal((pendingErr.payload as { code: string }).code, 'APPROVAL_DECLINED');
+
+    // Hijack attempt claiming active host deviceId without valid token
+    const hijackClient = new TestWsClient(wsUrl);
+    await hijackClient.waitForOpen();
+    const hijackErrPromise = hijackClient.waitForMessage((m) => m.messageType === 'error');
+    hijackClient.sendJson(
+      buildAnnounceEnvelope({
+        deviceId: wHostId,
+        deviceName: 'Attacker Clone',
+        platform: 'macos',
+        role: 'sender',
+        roomId: roomA,
+      })
+    );
+    const hijackErr = await hijackErrPromise;
+    assert.equal((hijackErr.payload as { code: string }).code, 'APPROVAL_DECLINED');
+    await hijackClient.close();
+    console.log('  [PASS] 4A.4. Unauthorized signaling & device hijack attempts rejected');
+
+    // 4A.5 Cross-room signalling rejection
+    const crossRoomErrPromise1 = roomBHostWs.waitForMessage((m) => m.messageType === 'error');
+    roomBHostWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'session_offer',
+      messageId: 's4a-cross-room-01',
+      senderDeviceId: roomBHostId,
+      receiverDeviceId: wRx1Id,
+      roomId: roomB,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        sdpType: 'offer',
+        sdp: sampleOfferSdp,
+      },
+    });
+    const crossRoomErr1 = await crossRoomErrPromise1;
+    assert.equal((crossRoomErr1.payload as { code: string }).code, 'INVALID_ROOM_ID');
+
+    const crossRoomErrPromise2 = roomBHostWs.waitForMessage((m) => m.messageType === 'error');
+    roomBHostWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'ice_candidate',
+      messageId: 's4a-cross-room-02',
+      senderDeviceId: roomBHostId,
+      receiverDeviceId: wRx1Id,
+      roomId: roomA,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        sdpMid: '0',
+        sdpMLineIndex: 0,
+        candidate: 'candidate:1 1 UDP 2122252543 10.0.0.2 51111 typ host',
+      },
+    });
+    const crossRoomErr2 = await crossRoomErrPromise2;
+    assert.equal((crossRoomErr2.payload as { code: string }).code, 'APPROVAL_DECLINED');
+    console.log('  [PASS] 4A.5. Cross-room SDP and ICE signaling blocked');
+
+    // 4A.7 Invalid SDP message rejection
+    const badSdpErrPromise = wHostWs.waitForMessage((m) => m.messageType === 'error');
+    wHostWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'session_offer',
+      messageId: 's4a-bad-sdp-01',
+      senderDeviceId: wHostId,
+      receiverDeviceId: wRx1Id,
+      roomId: roomA,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        sdpType: 'offer',
+        sdp: 'not-valid-sdp-content',
+      },
+    });
+    const badSdpErr = await badSdpErrPromise;
+    assert.equal((badSdpErr.payload as { code: string }).code, 'INVALID_MESSAGE');
+
+    const missingMediaSdpErrPromise = wHostWs.waitForMessage((m) => m.messageType === 'error');
+    wHostWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'session_offer',
+      messageId: 's4a-bad-sdp-02',
+      senderDeviceId: wHostId,
+      receiverDeviceId: wRx1Id,
+      roomId: roomA,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        sdpType: 'offer',
+        sdp: 'v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\n',
+      },
+    });
+    const missingMediaErr = await missingMediaSdpErrPromise;
+    assert.equal((missingMediaErr.payload as { code: string }).code, 'INVALID_MESSAGE');
+    console.log('  [PASS] 4A.7. Invalid/malformed SDP messages rejected');
+
+    // 4A.8 Invalid ICE candidate rejection
+    const badIceErrPromise = wHostWs.waitForMessage((m) => m.messageType === 'error');
+    wHostWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'ice_candidate',
+      messageId: 's4a-bad-ice-01',
+      senderDeviceId: wHostId,
+      receiverDeviceId: wRx1Id,
+      roomId: roomA,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        sdpMid: '0',
+        sdpMLineIndex: 0,
+        candidate: '',
+      },
+    });
+    const badIceErr = await badIceErrPromise;
+    assert.equal((badIceErr.payload as { code: string }).code, 'INVALID_MESSAGE');
+    console.log('  [PASS] 4A.8. Invalid/empty ICE candidates rejected');
+
+    // 4A.9 Peer cleanup: stream_stop notification + room closure
+    const rxStopPromise = wRx1Ws.waitForMessage((m) => m.messageType === 'stream_stop');
+    wHostWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'stream_stop',
+      messageId: 's4a-stop-01',
+      senderDeviceId: wHostId,
+      receiverDeviceId: wRx1Id,
+      roomId: roomA,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        reason: 'user_stopped',
+      },
+    });
+    const stopMsg = await rxStopPromise;
+    assert.equal((stopMsg.payload as { reason: string }).reason, 'user_stopped');
+
+    // 4A.6 Disconnected peer handling
+    await wRx1Ws.close();
+    const disconnectedPeerErrPromise = wHostWs.waitForMessage((m) => m.messageType === 'error');
+    wHostWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'session_offer',
+      messageId: 's4a-offline-rx-01',
+      senderDeviceId: wHostId,
+      receiverDeviceId: wRx1Id,
+      roomId: roomA,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: wRx1Join.sessionId,
+        streamId: wStreamId,
+        sdpType: 'offer',
+        sdp: sampleOfferSdp,
+      },
+    });
+    const disconnectedPeerErr = await disconnectedPeerErrPromise;
+    assert.equal((disconnectedPeerErr.payload as { code: string }).code, 'WEBRTC_NEGOTIATION_FAILED');
+    console.log('  [PASS] 4A.6 & 4A.9. Disconnected peer error handling & stream_stop peer cleanup verified');
+
+    // Clean up Stage 4A rooms & sockets
+    await fetch(`${baseUrl}/api/rooms/${roomA}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${roomAData.hostToken}` },
+    });
+    await fetch(`${baseUrl}/api/rooms/${roomB}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${roomBData.hostToken}` },
+    });
+    await wHostWs.close();
+    await wRx2PendingWs.close();
+    await roomBHostWs.close();
+
+    // 4A.10 Screen capture permission & error handling (unit tests on screenCaptureService)
+    await assert.rejects(
+      () =>
+        startScreenCapture({
+          preferences: {
+            resolution: '1080p',
+            targetFps: 60,
+            codecPreference: 'H264',
+            includeAudio: false,
+          },
+          onNativeEnded: () => {},
+          env: { isSecureContext: false, mediaDevices: undefined },
+        }),
+      (err: unknown) =>
+        err instanceof ScreenCaptureError && err.code === 'SECURE_CONTEXT_REQUIRED'
+    );
+
+    await assert.rejects(
+      () =>
+        startScreenCapture({
+          preferences: {
+            resolution: '1080p',
+            targetFps: 60,
+            codecPreference: 'H264',
+            includeAudio: false,
+          },
+          onNativeEnded: () => {},
+          env: { isSecureContext: true, mediaDevices: undefined },
+        }),
+      (err: unknown) => err instanceof ScreenCaptureError && err.code === 'API_UNAVAILABLE'
+    );
+
+    await assert.rejects(
+      () =>
+        startScreenCapture({
+          preferences: {
+            resolution: '1080p',
+            targetFps: 60,
+            codecPreference: 'H264',
+            includeAudio: false,
+          },
+          onNativeEnded: () => {},
+          env: {
+            isSecureContext: true,
+            mediaDevices: {
+              getDisplayMedia: async () => {
+                const denied = new Error('Permission denied by user');
+                denied.name = 'NotAllowedError';
+                throw denied;
+              },
+            },
+          },
+        }),
+      (err: unknown) => err instanceof ScreenCaptureError && err.code === 'PERMISSION_DENIED'
+    );
+
+    let stoppedTrackCount = 0;
+    let nativeEndTriggered = 0;
+    const listeners = new Map<string, () => void>();
+    const fakeTrack = {
+      kind: 'video',
+      contentHint: '',
+      getSettings: () => ({ width: 1920, height: 1080, frameRate: 60 }),
+      addEventListener: (evt: string, cb: () => void) => listeners.set(evt, cb),
+      removeEventListener: (evt: string) => listeners.delete(evt),
+      stop: () => {
+        stoppedTrackCount += 1;
+      },
+    } as unknown as MediaStreamTrack;
+    const fakeStream = {
+      getVideoTracks: () => [fakeTrack],
+      getAudioTracks: () => [],
+      getTracks: () => [fakeTrack],
+    } as unknown as MediaStream;
+
+    const captured = await startScreenCapture({
+      preferences: {
+        resolution: '1080p',
+        targetFps: 60,
+        codecPreference: 'H264',
+        includeAudio: false,
+      },
+      onNativeEnded: () => {
+        nativeEndTriggered += 1;
+      },
+      env: {
+        isSecureContext: true,
+        mediaDevices: {
+          getDisplayMedia: async () => fakeStream,
+        },
+      },
+    });
+    assert.equal(captured.actualWidth, 1920);
+    assert.equal(captured.actualHeight, 1080);
+    captured.stop();
+    assert.equal(stoppedTrackCount, 1);
+    assert.equal(nativeEndTriggered, 0, 'Programmatic stop must detach ended listener cleanly');
+    console.log('  [PASS] 4A.10. Screen capture permission denial, secure-context guard & track cleanup verified');
+
+    // Rate limiting check (exceed 40 window attempts on lookup)
     let hit429 = false;
-    for (let i = 0; i < 25; i += 1) {
+    for (let i = 0; i < 45; i += 1) {
       const res = await fetch(`${baseUrl}/api/rooms/ZZZZ99`);
       if (res.status === 429) {
         hit429 = true;
@@ -727,13 +1253,13 @@ async function main() {
     assert.equal(hit429, true, 'Rate limiter must return HTTP 429 after exceeding window limit');
     console.log('  [PASS] Extra. Room lookup rate limiting verified (HTTP 429)');
 
-    console.log('\nAll 14 Stage 3 backend & multi-client pairing scenarios passed!');
+    console.log('\nAll Stage 3 (14) + Stage 4A (10) backend, signaling, and capture tests passed!');
   } finally {
     await instance.close();
   }
 }
 
 main().catch((err) => {
-  console.error('Stage 3 backend verification failed:', err);
+  console.error('Stage 3 / 4A backend verification failed:', err);
   process.exit(1);
 });

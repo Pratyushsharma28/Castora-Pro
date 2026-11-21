@@ -426,7 +426,7 @@
         "sessionId": { "$ref": "#/$defs/sessionId" },
         "streamId": { "$ref": "#/$defs/streamId" },
         "sdpType": { "type": "string", "const": "offer" },
-        "sdp": { "type": "string", "minLength": 10 },
+        "sdp": { "type": "string", "minLength": 10, "maxLength": 32768, "pattern": "^v=0" },
         "mediaInfo": {
           "type": "object",
           "additionalProperties": false,
@@ -447,7 +447,7 @@
         "sessionId": { "$ref": "#/$defs/sessionId" },
         "streamId": { "$ref": "#/$defs/streamId" },
         "sdpType": { "type": "string", "const": "answer" },
-        "sdp": { "type": "string", "minLength": 10 }
+        "sdp": { "type": "string", "minLength": 10, "maxLength": 32768, "pattern": "^v=0" }
       }
     },
     "iceCandidatePayload": {
@@ -459,7 +459,7 @@
         "streamId": { "$ref": "#/$defs/streamId" },
         "sdpMid": { "type": ["string", "null"] },
         "sdpMLineIndex": { "type": "integer", "minimum": 0 },
-        "candidate": { "type": "string", "minLength": 1 }
+        "candidate": { "type": "string", "minLength": 1, "maxLength": 2048 }
       }
     },
     "streamStartPayload": {

@@ -83,6 +83,17 @@ export type LeaveRoomResult =
     }
   | { ok: false; code: RoomOperationErrorCode; message: string };
 
+export type PeerSignalingAuthResult =
+  | {
+      ok: true;
+      targetSocket: WebSocket;
+    }
+  | {
+      ok: false;
+      code: 'INVALID_ROOM_ID' | 'APPROVAL_DECLINED' | 'WEBRTC_NEGOTIATION_FAILED';
+      message: string;
+    };
+
 export function toRoomStatePayload(snapshot: PublicRoomSnapshot): Record<string, unknown> {
   return {
     status: snapshot.status,
@@ -238,15 +249,14 @@ export class RoomManager {
     roomId: string | null;
     token?: string;
   }): {
-    device: RegisteredDevice;
+    rejected?: boolean;
+    message?: string;
+    device?: RegisteredDevice;
     authenticatedRoom: PublicRoomSnapshot | null;
     authenticatedRole: 'host' | 'pending' | 'paired' | null;
   } {
     const now = Date.now();
     const existing = this.devices.get(params.deviceId);
-    if (existing && existing.socket !== params.socket) {
-      this.socketToDeviceId.delete(existing.socket);
-    }
 
     let verifiedRoomId: string | null = null;
     let authenticatedRole: 'host' | 'pending' | 'paired' | null = null;
@@ -279,6 +289,25 @@ export class RoomManager {
           }
         }
       }
+    }
+
+    if (
+      existing &&
+      existing.socket !== params.socket &&
+      this.isSocketOpen(existing.socket) &&
+      existing.roomId &&
+      !verifiedRoomId
+    ) {
+      return {
+        rejected: true,
+        message: 'Device ID is currently bound to an authenticated room session',
+        authenticatedRoom: null,
+        authenticatedRole: null,
+      };
+    }
+
+    if (existing && existing.socket !== params.socket) {
+      this.socketToDeviceId.delete(existing.socket);
     }
 
     const record: RegisteredDevice = {
@@ -772,6 +801,99 @@ export class RoomManager {
       if (!isTargetInRoom) return false;
     }
     return true;
+  }
+
+  authorizePeerSignaling(params: {
+    socket: WebSocket;
+    roomId: string | null;
+    senderDeviceId: string;
+    targetDeviceId: string | null;
+    token?: string;
+  }): PeerSignalingAuthResult {
+    if (!params.roomId || !params.targetDeviceId) {
+      return {
+        ok: false,
+        code: 'INVALID_ROOM_ID',
+        message: 'Signaling message requires non-null roomId and receiverDeviceId',
+      };
+    }
+
+    const lookup = this.getActiveRoomOrError(params.roomId);
+    if (!lookup.ok) {
+      return {
+        ok: false,
+        code: 'INVALID_ROOM_ID',
+        message: lookup.message,
+      };
+    }
+    const room = lookup.room;
+
+    const senderDev = this.devices.get(params.senderDeviceId);
+    if (!senderDev || senderDev.socket !== params.socket || senderDev.roomId !== room.roomId) {
+      return {
+        ok: false,
+        code: 'APPROVAL_DECLINED',
+        message: 'Unauthorized: socket is not authenticated in this room',
+      };
+    }
+
+    if (!params.token) {
+      return {
+        ok: false,
+        code: 'APPROVAL_DECLINED',
+        message: 'Unauthorized: missing room session token',
+      };
+    }
+
+    let senderAuthorized = false;
+    if (params.senderDeviceId === room.hostDeviceId) {
+      senderAuthorized = verifyToken(params.token, room.hostTokenHash);
+    } else {
+      const pairedMember = room.pairedReceivers.get(params.senderDeviceId);
+      if (pairedMember) {
+        senderAuthorized = verifyToken(params.token, pairedMember.tokenHash);
+      }
+    }
+
+    if (!senderAuthorized) {
+      return {
+        ok: false,
+        code: 'APPROVAL_DECLINED',
+        message: 'Unauthorized: approved paired membership or host token required for WebRTC signaling',
+      };
+    }
+
+    if (params.targetDeviceId === params.senderDeviceId) {
+      return {
+        ok: false,
+        code: 'WEBRTC_NEGOTIATION_FAILED',
+        message: 'Target receiver cannot be the same as sender',
+      };
+    }
+
+    const targetIsHost = params.targetDeviceId === room.hostDeviceId;
+    const targetIsPaired = room.pairedReceivers.has(params.targetDeviceId);
+    if (!targetIsHost && !targetIsPaired) {
+      return {
+        ok: false,
+        code: 'INVALID_ROOM_ID',
+        message: 'Target peer does not belong to this paired room',
+      };
+    }
+
+    const targetDev = this.devices.get(params.targetDeviceId);
+    if (!targetDev || targetDev.roomId !== room.roomId || !this.isSocketOpen(targetDev.socket)) {
+      return {
+        ok: false,
+        code: 'WEBRTC_NEGOTIATION_FAILED',
+        message: `Target peer ${params.targetDeviceId} is currently disconnected`,
+      };
+    }
+
+    return {
+      ok: true,
+      targetSocket: targetDev.socket,
+    };
   }
 
   handleDisconnect(socket: WebSocket): {

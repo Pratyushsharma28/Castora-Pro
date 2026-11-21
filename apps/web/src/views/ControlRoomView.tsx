@@ -1,17 +1,18 @@
-import { ArrowRight, Cast, RefreshCw, ShieldAlert, Smartphone } from 'lucide-react';
+import { ArrowRight, Cast, RefreshCw, ShieldAlert, Smartphone, Square } from 'lucide-react';
 import type {
   BackendHealthResponse,
   PairingLifecycleStatus,
   RoomSnapshot,
   SignalingSocketState,
 } from '../services/backendClient';
+import type { WebRtcSessionSnapshot } from '../services/webrtcSignalingBridge';
 import type {
   BrowserCapabilityReport,
   CapturePreferences,
   ConnectedReceiverSlot,
   SessionSummaryRecord,
-  StreamTelemetrySnapshot,
   StudioDestination,
+  WebRtcConnectionPhase,
 } from '../types/studio';
 import { SignalBadge, type SignalTone } from '../components/common/SignalBadge';
 import { TelemetryStrip } from '../components/common/TelemetryStrip';
@@ -23,14 +24,15 @@ interface ControlRoomViewProps {
   capabilities: BrowserCapabilityReport;
   preferences: CapturePreferences;
   receivers: ConnectedReceiverSlot[];
-  localStream: MediaStream | null;
-  programTelemetry: StreamTelemetrySnapshot;
+  webrtcState: WebRtcSessionSnapshot;
   recentSessions: SessionSummaryRecord[];
   backendHealth: BackendHealthResponse | null;
   backendError: string | null;
   signalingState: SignalingSocketState;
   activeRoom: RoomSnapshot | null;
+  activeRoomRole: 'host' | 'receiver' | null;
   pairingStatus: PairingLifecycleStatus;
+  onStopSharing: () => void;
   onReconnectBackend: () => void;
   onNavigate: (destination: StudioDestination) => void;
 }
@@ -54,26 +56,55 @@ function pairingTone(status: PairingLifecycleStatus): SignalTone {
   }
 }
 
+function phaseBadge(phase: WebRtcConnectionPhase): { label: string; tone: SignalTone; pulse?: boolean } {
+  switch (phase) {
+    case 'connected':
+      return { label: 'STREAM LIVE', tone: 'active' };
+    case 'connecting':
+      return { label: 'CONNECTING', tone: 'signal', pulse: true };
+    case 'reconnecting':
+      return { label: 'RECONNECTING', tone: 'warn', pulse: true };
+    case 'failed':
+      return { label: 'STREAM ERROR', tone: 'fault' };
+    case 'disconnected':
+      return { label: 'DISCONNECTED', tone: 'warn' };
+    default:
+      return { label: 'IDLE', tone: 'standby' };
+  }
+}
+
 export function ControlRoomView({
   deviceId,
   deviceName,
   capabilities,
   preferences,
   receivers,
-  localStream,
-  programTelemetry,
+  webrtcState,
   recentSessions,
   backendHealth,
   backendError,
   signalingState,
   activeRoom,
+  activeRoomRole,
   pairingStatus,
+  onStopSharing,
   onReconnectBackend,
   onNavigate,
 }: ControlRoomViewProps) {
   const pairedReceivers = activeRoom?.pairedReceivers ?? [];
   const connectedPairedCount = pairedReceivers.filter((r) => r.connected).length;
-  const capacityCount = activeRoom ? connectedPairedCount : receivers.filter((r) => r.connectionState === 'connected').length;
+  const capacityCount = activeRoom
+    ? connectedPairedCount
+    : receivers.filter((r) => r.connectionState === 'connected').length;
+
+  const programStream = webrtcState.localStream ?? webrtcState.remoteStream;
+  const streamBadge = phaseBadge(webrtcState.phase);
+
+  const monitorTitle = webrtcState.localStream
+    ? `${deviceName} — Outbound Screen Capture`
+    : webrtcState.remoteStream
+      ? `${activeRoom?.hostDeviceName ?? 'Host'} — Inbound Remote Screen`
+      : 'Master Program Monitor';
 
   return (
     <div className="space-y-6">
@@ -88,7 +119,7 @@ export function ControlRoomView({
               <span className="font-semibold text-[#F59E0B]">Non-secure HTTP origin detected</span>
               <span className="text-[#929A9D]">
                 {' '}
-                ({capabilities.origin || 'unknown origin'}). Mac and Android Chrome require HTTPS for reliable screen capture and WebRTC over LAN.
+                ({capabilities.origin || 'unknown origin'}). Mac browsers require HTTPS or localhost for reliable screen capture and WebRTC.
               </span>
             </div>
           </div>
@@ -112,25 +143,47 @@ export function ControlRoomView({
                 Control Room
               </h1>
               <p className="text-xs text-[#929A9D]">
-                Master broadcast preview, receiver capacity, and measured runtime telemetry.
+                Master broadcast preview, receiver capacity, and real WebRTC getStats() telemetry.
               </p>
             </div>
-            <SignalBadge
-              label={localStream ? 'LOCAL CAPTURE LIVE' : 'PROGRAM STANDBY'}
-              tone={localStream ? 'active' : 'standby'}
-            />
+            <div className="flex items-center gap-2">
+              {webrtcState.localStream && (
+                <button
+                  type="button"
+                  onClick={onStopSharing}
+                  className="inline-flex h-7 items-center gap-1.5 border border-[#EF4444]/60 bg-[#191D20] px-2.5 text-[11px] font-semibold text-[#EF4444] hover:bg-[#EF4444]/10"
+                >
+                  <Square className="h-3 w-3" aria-hidden="true" />
+                  <span>Stop Sharing</span>
+                </button>
+              )}
+              <SignalBadge
+                label={
+                  webrtcState.localStream
+                    ? webrtcState.phase === 'connected'
+                      ? 'LOCAL + WEBRTC LIVE'
+                      : 'LOCAL CAPTURE ACTIVE'
+                    : webrtcState.remoteStream
+                      ? 'RECEIVING LIVE STREAM'
+                      : 'PROGRAM STANDBY'
+                }
+                tone={programStream ? 'active' : 'standby'}
+              />
+            </div>
           </div>
 
           <VideoSurface
             slotLabel="PGM-01"
-            title={localStream ? `${deviceName} — Local Program` : 'Master Program Monitor'}
-            stream={localStream}
-            muted
-            standbyReason="No local screen capture or inbound receiver feed is active. Pair devices in Receivers or configure capture targets in Cast Studio."
+            title={monitorTitle}
+            stream={programStream}
+            muted={activeRoomRole !== 'receiver'}
+            highlight={webrtcState.phase === 'connected'}
+            standbyReason="No local screen capture or inbound receiver feed is active. Pair devices in Receivers or start sharing in Cast Studio."
             statusBadge={
               <SignalBadge
-                label={localStream ? 'STREAMING' : 'IDLE'}
-                tone={localStream ? 'active' : 'standby'}
+                label={streamBadge.label}
+                tone={streamBadge.tone}
+                pulse={streamBadge.pulse}
               />
             }
             actions={
@@ -157,12 +210,12 @@ export function ControlRoomView({
 
           <div>
             <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-[0.08em] text-[#929A9D]">
-              <span>Program Telemetry</span>
+              <span>Program Telemetry (getStats)</span>
               <span className="tabular-metrics">
-                Target {preferences.resolution.toUpperCase()} · {preferences.targetFps} FPS · {preferences.codecPreference}
+                Target {preferences.resolution.toUpperCase()} · {preferences.targetFps} FPS · ICE {webrtcState.iceConnectionState ?? 'idle'}
               </span>
             </div>
-            <TelemetryStrip telemetry={programTelemetry} />
+            <TelemetryStrip telemetry={webrtcState.telemetry} />
           </div>
         </section>
 
@@ -223,6 +276,12 @@ export function ControlRoomView({
                 <dt className="text-[#929A9D]">Pairing State</dt>
                 <dd>
                   <SignalBadge label={pairingStatus} tone={pairingTone(pairingStatus)} />
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[#929A9D]">WebRTC State</dt>
+                <dd>
+                  <SignalBadge label={streamBadge.label} tone={streamBadge.tone} pulse={streamBadge.pulse} />
                 </dd>
               </div>
               <div className="flex items-center justify-between gap-2">
@@ -360,13 +419,13 @@ export function ControlRoomView({
 
             {recentSessions.length === 0 ? (
               <p className="mt-3 text-xs leading-relaxed text-[#929A9D]">
-                No completed media sessions in this runtime yet. Real WebRTC sessions and measured FPS summaries will appear here once Stage 4 transport is active.
+                No completed WebRTC media sessions in this runtime yet. Summaries appear after ending a live cast.
               </p>
             ) : (
               <ul className="mt-3 divide-y divide-[#252A2F] text-xs">
                 {recentSessions.map((session) => (
                   <li key={session.sessionId} className="flex items-center justify-between py-2">
-                    <span className="text-[#F2F3F0]">{session.peerName}</span>
+                    <span className="truncate text-[#F2F3F0]">{session.peerName}</span>
                     <span className="font-mono text-[#929A9D] tabular-metrics">
                       {session.resolution} · {session.durationLabel}
                     </span>

@@ -1,17 +1,17 @@
-import { useState } from 'react';
-import { AlertTriangle, MonitorPlay, Square, Volume2, VolumeX } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { AlertTriangle, MonitorPlay, Radio, Square, Volume2, VolumeX } from 'lucide-react';
 import type { PairingLifecycleStatus, RoomSnapshot } from '../services/backendClient';
+import type { WebRtcSessionSnapshot } from '../services/webrtcSignalingBridge';
 import type {
   BrowserCapabilityReport,
   CapturePreferences,
   CodecPreference,
-  ConnectedReceiverSlot,
   FrameRateTarget,
   ResolutionPresetId,
-  StreamTelemetrySnapshot,
   StudioDestination,
+  WebRtcConnectionPhase,
 } from '../types/studio';
-import { SignalBadge } from '../components/common/SignalBadge';
+import { SignalBadge, type SignalTone } from '../components/common/SignalBadge';
 import { TelemetryStrip } from '../components/common/TelemetryStrip';
 import { VideoSurface } from '../components/common/VideoSurface';
 
@@ -19,11 +19,13 @@ interface CastViewProps {
   capabilities: BrowserCapabilityReport;
   preferences: CapturePreferences;
   onUpdatePreferences: (next: CapturePreferences) => void;
-  localStream: MediaStream | null;
-  receivers: ConnectedReceiverSlot[];
   activeRoom: RoomSnapshot | null;
+  activeRoomRole: 'host' | 'receiver' | null;
   pairingStatus: PairingLifecycleStatus;
-  programTelemetry: StreamTelemetrySnapshot;
+  webrtcState: WebRtcSessionSnapshot;
+  onStartSharing: (targetReceiverId: string | null) => Promise<void>;
+  onConnectReceiver: (targetReceiverId: string) => Promise<void>;
+  onStopSharing: () => void;
   onNavigate: (destination: StudioDestination) => void;
   onLogEvent: (category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error', title: string, detail: string) => void;
 }
@@ -44,50 +46,87 @@ const CODEC_OPTIONS: { value: CodecPreference; label: string }[] = [
   { value: 'AUTO', label: 'Auto Negotiate' },
 ];
 
+function webrtcPhaseBadge(phase: WebRtcConnectionPhase): { label: string; tone: SignalTone; pulse?: boolean } {
+  switch (phase) {
+    case 'connected':
+      return { label: 'CONNECTED', tone: 'active' };
+    case 'connecting':
+      return { label: 'CONNECTING', tone: 'signal', pulse: true };
+    case 'reconnecting':
+      return { label: 'RECONNECTING', tone: 'warn', pulse: true };
+    case 'failed':
+      return { label: 'ERROR', tone: 'fault' };
+    case 'disconnected':
+      return { label: 'DISCONNECTED', tone: 'warn' };
+    default:
+      return { label: 'STANDBY', tone: 'standby' };
+  }
+}
+
 export function CastView({
   capabilities,
   preferences,
   onUpdatePreferences,
-  localStream,
-  receivers,
   activeRoom,
+  activeRoomRole,
   pairingStatus,
-  programTelemetry,
+  webrtcState,
+  onStartSharing,
+  onConnectReceiver,
+  onStopSharing,
   onNavigate,
   onLogEvent,
 }: CastViewProps) {
-  const [stageNotice, setStageNotice] = useState<string | null>(null);
+  const [selectedReceiverId, setSelectedReceiverId] = useState<string | null>(null);
+  const [busy, setBusy] = useState<boolean>(false);
+  const [localError, setLocalError] = useState<string | null>(null);
 
   const canCapture = capabilities.isSecureContext && capabilities.supportsDisplayMedia;
-  const pairedReceivers = activeRoom?.pairedReceivers ?? [];
-  const connectedCount = pairedReceivers.filter((r) => r.connected).length;
+  const pairedReceivers = activeRoomRole === 'host' ? (activeRoom?.pairedReceivers ?? []) : [];
+  const connectedReceivers = pairedReceivers.filter((r) => r.connected);
+  const connectedCount = connectedReceivers.length;
 
-  const handleRequestStartCapture = () => {
-    if (!capabilities.isSecureContext) {
-      const msg =
-        'Screen capture blocked: current origin is non-secure HTTP. Trust local HTTPS certificate first (see Settings).';
-      setStageNotice(msg);
-      onLogEvent('capability', 'Capture blocked (insecure origin)', msg);
+  useEffect(() => {
+    if (connectedReceivers.length === 0) {
+      setSelectedReceiverId(null);
       return;
     }
-    if (!capabilities.supportsDisplayMedia) {
-      const msg =
-        'navigator.mediaDevices.getDisplayMedia() is not exposed by this browser. Mobile Android browsers typically operate as receivers.';
-      setStageNotice(msg);
-      onLogEvent('capability', 'Display capture unsupported', msg);
-      return;
+    const stillValid = connectedReceivers.some((r) => r.deviceId === selectedReceiverId);
+    if (!stillValid) {
+      setSelectedReceiverId(connectedReceivers[0].deviceId);
     }
-    const msg =
-      activeRoom && pairedReceivers.length > 0
-        ? `Room ${activeRoom.roomId} has ${connectedCount} connected paired receiver(s) ready. Live screen capture & WebRTC SDP/ICE streaming activate in Stage 4.`
-        : 'Stage 3 pairing active. Create a room and approve receivers in the Receivers tab; live getDisplayMedia() + WebRTC streaming activate in Stage 4.';
-    setStageNotice(msg);
-    onLogEvent(
-      'ui',
-      'Cast Studio capture readiness checked',
-      `Configured ${preferences.resolution} @ ${preferences.targetFps} FPS target (${preferences.codecPreference}). Room=${activeRoom?.roomId ?? 'none'}, Pairing=${pairingStatus}.`
-    );
+  }, [connectedReceivers, selectedReceiverId]);
+
+  const handleRequestStartSharing = async () => {
+    setLocalError(null);
+    setBusy(true);
+    try {
+      await onStartSharing(selectedReceiverId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to start screen sharing';
+      setLocalError(msg);
+    } finally {
+      setBusy(false);
+    }
   };
+
+  const handleConnectSelected = async () => {
+    if (!selectedReceiverId) return;
+    setLocalError(null);
+    setBusy(true);
+    try {
+      await onConnectReceiver(selectedReceiverId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to connect WebRTC peer';
+      setLocalError(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const badge = webrtcPhaseBadge(webrtcState.phase);
+  const errorToDisplay = localError ?? webrtcState.errorMessage;
+  const activeTarget = connectedReceivers.find((r) => r.deviceId === webrtcState.targetPeerDeviceId);
 
   return (
     <div className="space-y-6">
@@ -97,13 +136,16 @@ export function CastView({
             Cast Studio
           </h1>
           <p className="text-xs text-[#929A9D]">
-            Configure sender capture targets, inspect browser encode readiness, and monitor paired outbound receivers.
+            Capture a display, window, or tab via getDisplayMedia() and stream real-time WebRTC video to an approved receiver.
           </p>
         </div>
-        <SignalBadge
-          label={canCapture ? 'DISPLAY CAPTURE AVAILABLE' : 'CAPTURE RESTRICTED'}
-          tone={canCapture ? 'active' : 'warn'}
-        />
+        <div className="flex items-center gap-2">
+          <SignalBadge label={badge.label} tone={badge.tone} pulse={badge.pulse} />
+          <SignalBadge
+            label={canCapture ? 'DISPLAY CAPTURE READY' : 'CAPTURE RESTRICTED'}
+            tone={canCapture ? 'active' : 'warn'}
+          />
+        </div>
       </div>
 
       {!canCapture && (
@@ -119,21 +161,36 @@ export function CastView({
                 : 'getDisplayMedia is unavailable in this browser.'}
             </span>{' '}
             <span className="text-[#929A9D]">
-              Mac desktop Chrome/Edge/Safari on HTTPS supports screen capture; Android Chrome should use the Receivers tab to view streams.
+              Mac desktop Chrome, Edge, or Safari over HTTPS/localhost supports screen sharing.
             </span>
           </div>
         </div>
       )}
 
+      {activeRoomRole === 'receiver' && (
+        <div className="flex items-center justify-between gap-3 border border-[#252A2F] bg-[#191D20] px-4 py-3 text-xs text-[#929A9D]">
+          <span>
+            This browser is currently joined to room <strong className="font-mono text-[#F2F3F0]">{activeRoom?.roomId}</strong> as a receiver. Switch to Receivers &amp; Pairing to view inbound video.
+          </span>
+          <button
+            type="button"
+            onClick={() => onNavigate('receivers')}
+            className="shrink-0 border border-[#252A2F] bg-[#131619] px-3 py-1.5 font-medium text-[#F2F3F0] hover:border-[#FF7849]"
+          >
+            Open Receiver Player
+          </button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        {/* Left: Capture Configuration & Receiver Selection */}
+        {/* Left: Capture Configuration & Receiver Target */}
         <section className="space-y-4 lg:col-span-5" aria-label="Capture Parameters">
           <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-5">
             <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
                 Capture Constraints
               </h2>
-              <span className="font-mono text-[11px] text-[#929A9D]">Sender Policy</span>
+              <span className="font-mono text-[11px] text-[#929A9D]">Stage 4A · 1:1 WebRTC</span>
             </div>
 
             {/* Resolution */}
@@ -180,7 +237,7 @@ export function CastView({
                       type="button"
                       onClick={() => {
                         onUpdatePreferences({ ...preferences, targetFps: opt.value });
-                        onLogEvent('ui', 'Sender FPS target updated', `Target set to ${opt.value} FPS (measured FPS reported live).`);
+                        onLogEvent('ui', 'Sender FPS target updated', `Target set to ${opt.value} FPS.`);
                       }}
                       className={`min-h-[44px] border px-3 py-2 text-left text-xs font-medium tabular-metrics transition-colors ${
                         selected
@@ -194,7 +251,7 @@ export function CastView({
                 })}
               </div>
               <p className="text-[11px] leading-relaxed text-[#929A9D]">
-                Actual capture and encoded FPS depend on browser ScreenCaptureKit pacing, GPU encoder load, and receiver count (tested 1 → 2 → 3 → 6).
+                Starts at 1080p / 60 FPS target where supported. Actual FPS and resolution are measured live from RTCPeerConnection.getStats().
               </p>
             </fieldset>
 
@@ -265,30 +322,62 @@ export function CastView({
               </div>
             </div>
 
-            {/* Capture Action */}
-            <div className="border-t border-[#252A2F] pt-4 flex flex-wrap items-center gap-2.5">
-              <button
-                type="button"
-                onClick={handleRequestStartCapture}
-                className="inline-flex min-h-[44px] flex-1 items-center justify-center gap-2 bg-[#FF7849] px-4 text-xs font-semibold text-[#101214] hover:opacity-90"
-              >
-                <MonitorPlay className="h-4 w-4" aria-hidden="true" />
-                <span>{localStream ? 'Replace Capture Source' : 'Start Screen Capture'}</span>
-              </button>
-              <button
-                type="button"
-                disabled={!localStream}
-                onClick={() => setStageNotice('No active capture stream to stop.')}
-                className="inline-flex min-h-[44px] items-center justify-center gap-1.5 border border-[#252A2F] bg-[#131619] px-4 text-xs font-medium text-[#929A9D] disabled:opacity-50"
-              >
-                <Square className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Stop</span>
-              </button>
+            {/* Capture Action Buttons */}
+            <div className="border-t border-[#252A2F] pt-4 space-y-2.5">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <button
+                  type="button"
+                  disabled={busy || !canCapture || activeRoomRole === 'receiver'}
+                  onClick={handleRequestStartSharing}
+                  className="inline-flex min-h-[44px] flex-1 items-center justify-center gap-2 bg-[#FF7849] px-4 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
+                >
+                  <MonitorPlay className="h-4 w-4" aria-hidden="true" />
+                  <span>
+                    {busy
+                      ? 'Requesting Screen...'
+                      : webrtcState.localStream
+                        ? 'Replace Shared Screen'
+                        : 'Start Sharing'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  disabled={!webrtcState.localStream}
+                  onClick={onStopSharing}
+                  className="inline-flex min-h-[44px] items-center justify-center gap-1.5 border border-[#EF4444]/60 bg-[#131619] px-4 text-xs font-semibold text-[#EF4444] hover:bg-[#EF4444]/10 disabled:border-[#252A2F] disabled:text-[#929A9D] disabled:opacity-50"
+                >
+                  <Square className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Stop Sharing</span>
+                </button>
+              </div>
+
+              {webrtcState.localStream &&
+                selectedReceiverId &&
+                webrtcState.targetPeerDeviceId !== selectedReceiverId && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={handleConnectSelected}
+                    className="inline-flex min-h-[40px] w-full items-center justify-center gap-2 border border-[#8BD7B0]/60 bg-[#131619] px-4 text-xs font-semibold text-[#8BD7B0] hover:bg-[#8BD7B0]/10 disabled:opacity-50"
+                  >
+                    <Radio className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Transmit Active Screen to Selected Receiver</span>
+                  </button>
+                )}
             </div>
 
-            {stageNotice && (
+            {errorToDisplay && (
+              <div
+                role="alert"
+                className="border border-[#EF4444]/60 bg-[#131619] px-3 py-2.5 text-xs leading-relaxed text-[#EF4444]"
+              >
+                {errorToDisplay}
+              </div>
+            )}
+
+            {!errorToDisplay && webrtcState.statusDetail && (
               <div className="border border-[#252A2F] bg-[#131619] px-3 py-2.5 text-xs leading-relaxed text-[#F2F3F0]">
-                {stageNotice}
+                {webrtcState.statusDetail}
               </div>
             )}
           </div>
@@ -297,7 +386,7 @@ export function CastView({
           <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-3">
             <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                Paired Target Receivers
+                Approved Target Receiver
               </h2>
               <div className="flex items-center gap-3">
                 <span className="font-mono text-xs text-[#929A9D] tabular-metrics">
@@ -313,9 +402,9 @@ export function CastView({
               </div>
             </div>
 
-            {!activeRoom ? (
+            {!activeRoom || activeRoomRole !== 'host' ? (
               <p className="text-xs leading-relaxed text-[#929A9D]">
-                No active room. Create a room and approve receivers in Receivers &amp; Pairing to populate real paired targets here.
+                No active host room. Create a room and approve Mac B in Receivers &amp; Pairing ({pairingStatus}).
               </p>
             ) : pairedReceivers.length === 0 ? (
               <p className="text-xs leading-relaxed text-[#929A9D]">
@@ -323,20 +412,48 @@ export function CastView({
               </p>
             ) : (
               <ul className="divide-y divide-[#252A2F] text-xs">
-                {pairedReceivers.map((rx) => (
-                  <li key={rx.deviceId} className="flex items-center justify-between py-2 gap-2">
-                    <div className="min-w-0">
-                      <div className="truncate font-medium text-[#F2F3F0]">{rx.deviceName}</div>
-                      <div className="font-mono text-[11px] text-[#929A9D] tabular-metrics">
-                        SLOT {String(rx.assignedSlotIndex + 1).padStart(2, '0')} · {rx.platform}
-                      </div>
-                    </div>
-                    <SignalBadge
-                      label={rx.connected ? 'Paired' : 'Disconnected'}
-                      tone={rx.connected ? 'active' : 'warn'}
-                    />
-                  </li>
-                ))}
+                {pairedReceivers.map((rx) => {
+                  const isSelected = selectedReceiverId === rx.deviceId;
+                  const isActiveTarget = webrtcState.targetPeerDeviceId === rx.deviceId;
+                  return (
+                    <li key={rx.deviceId} className="flex items-center justify-between py-2.5 gap-2">
+                      <button
+                        type="button"
+                        disabled={!rx.connected}
+                        onClick={() => setSelectedReceiverId(rx.deviceId)}
+                        className="min-w-0 flex-1 text-left disabled:opacity-50"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`h-2 w-2 shrink-0 rounded-full ${
+                              isSelected ? 'bg-[#FF7849]' : 'bg-[#252A2F]'
+                            }`}
+                          />
+                          <span className="truncate font-medium text-[#F2F3F0]">{rx.deviceName}</span>
+                        </div>
+                        <div className="mt-0.5 pl-4 font-mono text-[11px] text-[#929A9D] tabular-metrics">
+                          SLOT {String(rx.assignedSlotIndex + 1).padStart(2, '0')} · {rx.platform}
+                        </div>
+                      </button>
+                      <SignalBadge
+                        label={
+                          isActiveTarget
+                            ? badge.label
+                            : rx.connected
+                              ? 'Paired'
+                              : 'Disconnected'
+                        }
+                        tone={
+                          isActiveTarget
+                            ? badge.tone
+                            : rx.connected
+                              ? 'active'
+                              : 'warn'
+                        }
+                      />
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
@@ -346,31 +463,47 @@ export function CastView({
         <section className="space-y-4 lg:col-span-7" aria-label="Local Capture Preview and Workload">
           <VideoSurface
             slotLabel="CAP-01"
-            title="Local Screen Capture Preview"
-            stream={localStream}
+            title={
+              webrtcState.localStream
+                ? activeTarget
+                  ? `Local Screen Preview → ${activeTarget.deviceName}`
+                  : 'Local Screen Capture Preview'
+                : 'Local Screen Capture Preview'
+            }
+            stream={webrtcState.localStream}
             muted
-            standbyReason="Capture pipeline is in standby. Real frames from getDisplayMedia() will render here with measured Capture FPS vs Encoded FPS in Stage 4."
+            highlight={webrtcState.phase === 'connected'}
+            standbyReason="Click Start Sharing and choose a display, window, or tab in the browser picker to begin real screen capture and WebRTC transmission."
             statusBadge={
               <SignalBadge
-                label={localStream ? 'CAPTURING' : 'STANDBY'}
-                tone={localStream ? 'active' : 'standby'}
+                label={
+                  webrtcState.phase === 'connected'
+                    ? 'LIVE WEBRTC'
+                    : webrtcState.localStream
+                      ? 'LOCAL PREVIEW'
+                      : 'STANDBY'
+                }
+                tone={
+                  webrtcState.phase === 'connected'
+                    ? 'active'
+                    : webrtcState.localStream
+                      ? 'signal'
+                      : 'standby'
+                }
               />
             }
           />
 
           <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-3">
-            <div className="flex items-center justify-between border-b border-[#252A2F] pb-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#252A2F] pb-2">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                Encoder & Outbound Workload
+                Live WebRTC Encoder Telemetry (getStats)
               </h2>
               <span className="font-mono text-xs text-[#929A9D] tabular-metrics">
-                {receivers.length} active outbound stream{receivers.length === 1 ? '' : 's'}
+                ICE: {webrtcState.iceConnectionState ?? 'idle'}
               </span>
             </div>
-            <TelemetryStrip telemetry={programTelemetry} />
-            <p className="text-[11px] leading-relaxed text-[#929A9D]">
-              Stage 3 pairing verifies up to 6 authorized receivers per room; Stage 4 enables progressive stream fan-out (1 → 2 → 3 → 6) with live encoder measurement.
-            </p>
+            <TelemetryStrip telemetry={webrtcState.telemetry} />
           </div>
         </section>
       </div>

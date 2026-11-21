@@ -14,6 +14,8 @@ interface MultiViewViewProps {
   onChangeLayout: (layout: MultiViewLayout) => void;
   slots: ConnectedReceiverSlot[];
   capabilities: BrowserCapabilityReport;
+  onToggleMute?: (slotIndex: number) => void;
+  onDisconnectSlot?: (receiverDeviceId: string) => void;
   onLogEvent: (category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error', title: string, detail: string) => void;
 }
 
@@ -44,6 +46,8 @@ export function MultiViewView({
   onChangeLayout,
   slots,
   capabilities,
+  onToggleMute,
+  onDisconnectSlot,
   onLogEvent,
 }: MultiViewViewProps) {
   const [spotlightIndex, setSpotlightIndex] = useState<number>(0);
@@ -152,11 +156,12 @@ export function MultiViewView({
                   Focus
                 </button>
               )}
-              <button
+                <button
                 type="button"
-                disabled={!isActive}
+                disabled={!isActive || !onToggleMute}
+                onClick={() => onToggleMute?.(slot.slotIndex)}
                 title={isActive ? (slot.muted ? 'Unmute tile' : 'Mute tile') : 'Available when stream is active'}
-                className="inline-flex h-7 w-7 items-center justify-center border border-[#252A2F] bg-[#191D20] text-[#929A9D] disabled:opacity-40"
+                className="inline-flex h-7 w-7 items-center justify-center border border-[#252A2F] bg-[#191D20] text-[#929A9D] hover:border-[#FF7849] hover:text-[#F2F3F0] disabled:opacity-40"
                 aria-label={`Toggle mute for ${slotCode}`}
               >
                 {slot.muted ? (
@@ -167,9 +172,10 @@ export function MultiViewView({
               </button>
               <button
                 type="button"
-                disabled={!isActive}
+                disabled={!isActive || !onDisconnectSlot}
+                onClick={() => onDisconnectSlot?.(slot.receiverDeviceId)}
                 title={isActive ? 'Disconnect receiver' : 'Available when stream is active'}
-                className="inline-flex h-7 w-7 items-center justify-center border border-[#252A2F] bg-[#191D20] text-[#929A9D] disabled:opacity-40"
+                className="inline-flex h-7 w-7 items-center justify-center border border-[#252A2F] bg-[#191D20] text-[#929A9D] hover:border-[#EF4444] hover:text-[#EF4444] disabled:opacity-40"
                 aria-label={`Disconnect ${slotCode}`}
               >
                 <Power className="h-3.5 w-3.5" aria-hidden="true" />

@@ -176,7 +176,7 @@ export function SettingsView({
                   htmlFor="castora-stun-urls"
                   className="block text-[11px] uppercase tracking-[0.08em] text-[#929A9D]"
                 >
-                  STUN Server URL (Optional for LAN)
+                  STUN Server URLs (Comma-separated, Configurable)
                 </label>
                 <input
                   id="castora-stun-urls"
@@ -195,7 +195,7 @@ export function SettingsView({
                   htmlFor="castora-turn-url"
                   className="block text-[11px] uppercase tracking-[0.08em] text-[#929A9D]"
                 >
-                  TURN Server URL (Cross-Subnet Fallback)
+                  TURN Server URL (Optional Cross-Network Relay)
                 </label>
                 <input
                   id="castora-turn-url"
@@ -246,7 +246,7 @@ export function SettingsView({
                 </div>
               </div>
               <p className="text-[11px] leading-relaxed text-[#929A9D]">
-                TURN credentials remain in runtime memory only and are never written to localStorage.
+                STUN handles initial connectivity discovery on same-LAN and standard NATs. Networks using client isolation, strict corporate firewalls, or symmetric NAT require a TURN relay. Credentials remain in memory only and are never persisted to localStorage.
               </p>
             </div>
           </div>

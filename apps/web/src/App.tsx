@@ -22,6 +22,11 @@ import {
   probeBrowserCapabilities,
   saveDeviceName,
 } from './services/browserCapabilities';
+import { createEmptyTelemetry } from './services/streamStatsService';
+import {
+  WebRtcSignalingBridge,
+  type WebRtcSessionSnapshot,
+} from './services/webrtcSignalingBridge';
 import type { CastoraVideoCodec, DeviceCapabilities } from './types/protocol';
 import type {
   ActivityEvent,
@@ -31,7 +36,6 @@ import type {
   MultiViewLayout,
   NetworkPreferences,
   SessionSummaryRecord,
-  StreamTelemetrySnapshot,
   StudioDestination,
 } from './types/studio';
 import { ActivityView } from './views/ActivityView';
@@ -136,7 +140,7 @@ export function App() {
 
   const [networkPrefs, setNetworkPrefs] = useState<NetworkPreferences>({
     preferLanDirectP2P: true,
-    stunUrls: '',
+    stunUrls: 'stun:stun.l.google.com:19302',
     turnUrl: '',
     turnUsername: '',
     turnCredential: '',
@@ -155,10 +159,24 @@ export function App() {
   const activeRoomIdRef = useRef<string | null>(null);
   const activeRoomRoleRef = useRef<'host' | 'receiver' | null>(null);
   const signalingClientRef = useRef<CastoraSignalingClient | null>(null);
+  const bridgeRef = useRef<WebRtcSignalingBridge | null>(null);
+  const sessionStartedAtRef = useRef<number | null>(null);
 
-  const [receivers] = useState<ConnectedReceiverSlot[]>([]);
-  const [recentSessions] = useState<SessionSummaryRecord[]>([]);
-  const [localStream] = useState<MediaStream | null>(null);
+  const [webrtcState, setWebrtcState] = useState<WebRtcSessionSnapshot>(() => ({
+    phase: 'idle',
+    statusDetail: null,
+    errorMessage: null,
+    iceConnectionState: null,
+    localStream: null,
+    remoteStream: null,
+    activeSessionId: null,
+    activeStreamId: null,
+    targetPeerDeviceId: null,
+    remoteStreamMeta: null,
+    telemetry: createEmptyTelemetry(60, 'idle'),
+  }));
+  const [mutedSlots, setMutedSlots] = useState<Record<number, boolean>>({});
+  const [recentSessions, setRecentSessions] = useState<SessionSummaryRecord[]>([]);
 
   const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>(() => {
     const bootCaps = probeBrowserCapabilities();
@@ -198,6 +216,34 @@ export function App() {
     },
     []
   );
+
+  if (!bridgeRef.current) {
+    bridgeRef.current = new WebRtcSignalingBridge({
+      deviceId,
+      preferences,
+      networkPrefs,
+      getSignalingClient: () => signalingClientRef.current,
+      callbacks: {
+        onStateChange: (snapshot) => {
+          setWebrtcState(snapshot);
+          if (snapshot.phase === 'connected' && sessionStartedAtRef.current === null) {
+            sessionStartedAtRef.current = Date.now();
+          }
+        },
+        onLogEvent: logEvent,
+      },
+    });
+  }
+
+  useEffect(() => {
+    bridgeRef.current?.updateContext({
+      deviceId,
+      activeRoom,
+      activeRoomRole,
+      preferences,
+      networkPrefs,
+    });
+  }, [deviceId, activeRoom, activeRoomRole, preferences, networkPrefs]);
 
   const refreshHealth = useCallback(async () => {
     try {
@@ -387,6 +433,17 @@ export function App() {
                 setPairingDetail('Host disconnected. Waiting for host reconnection or room expiry.');
               }
               void refreshHealth();
+              return;
+            }
+
+            if (
+              envelope.messageType === 'stream_start' ||
+              envelope.messageType === 'session_offer' ||
+              envelope.messageType === 'session_answer' ||
+              envelope.messageType === 'ice_candidate' ||
+              envelope.messageType === 'stream_stop'
+            ) {
+              void bridgeRef.current?.handleIncomingEnvelope(envelope);
             }
           },
         },
@@ -412,6 +469,7 @@ export function App() {
 
     return () => {
       window.clearInterval(healthTimer);
+      bridgeRef.current?.dispose();
       signalingClientRef.current?.disconnect(false);
     };
     // Initial boot connection on mount; explicit reconnects use handleReconnectBackend
@@ -596,19 +654,79 @@ export function App() {
     );
   };
 
-  const programTelemetry: StreamTelemetrySnapshot = {
-    captureFps: null,
-    encodedFps: null,
-    decodedFps: null,
-    targetFps: preferences.targetFps,
-    resolution: null,
-    bitrateKbps: null,
-    rttMs: null,
-    packetLossPct: null,
-    jitterMs: null,
-    droppedFrames: null,
-    connectionState: 'idle',
-  };
+  const handleStartSharing = useCallback(async (targetReceiverId: string | null) => {
+    if (!bridgeRef.current) return;
+    await bridgeRef.current.startScreenSharing(targetReceiverId);
+  }, []);
+
+  const handleConnectReceiver = useCallback(async (targetReceiverId: string) => {
+    if (!bridgeRef.current) return;
+    await bridgeRef.current.connectStreamToReceiver(targetReceiverId);
+  }, []);
+
+  const handleStopSharing = useCallback(() => {
+    if (!bridgeRef.current) return;
+    const snap = bridgeRef.current.getSnapshot();
+    if (snap.activeSessionId && sessionStartedAtRef.current !== null) {
+      const elapsedSec = Math.max(1, Math.round((Date.now() - sessionStartedAtRef.current) / 1000));
+      const peerName =
+        activeRoom?.pairedReceivers.find((r) => r.deviceId === snap.targetPeerDeviceId)?.deviceName ??
+        snap.targetPeerDeviceId ??
+        'Receiver';
+      setRecentSessions((prev) => [
+        {
+          sessionId: snap.activeSessionId!,
+          direction: activeRoomRole === 'receiver' ? 'inbound' : 'outbound',
+          peerName,
+          resolution: snap.telemetry.resolution ?? preferences.resolution.toUpperCase(),
+          durationLabel: `${elapsedSec}s`,
+          outcome: 'completed',
+        },
+        ...prev.slice(0, 9),
+      ]);
+    }
+    sessionStartedAtRef.current = null;
+    bridgeRef.current.stopSharing('user_stopped');
+  }, [activeRoom, activeRoomRole, preferences.resolution]);
+
+  const receivers: ConnectedReceiverSlot[] = (() => {
+    if (!activeRoom) return [];
+    if (activeRoomRole === 'receiver') {
+      const mySlot = activeRoom.pairedReceivers.find((r) => r.deviceId === deviceId);
+      const slotIndex = mySlot?.assignedSlotIndex ?? 0;
+      const muted = mutedSlots[slotIndex] ?? true;
+      return [
+        {
+          slotIndex,
+          receiverDeviceId: activeRoom.hostDeviceId,
+          deviceName: `${activeRoom.hostDeviceName} (Inbound)`,
+          platform: activeRoom.hostPlatform,
+          connectionState: webrtcState.phase,
+          stream: webrtcState.remoteStream,
+          hasAudioTrack: Boolean(webrtcState.remoteStream?.getAudioTracks().length),
+          muted,
+          telemetry: webrtcState.telemetry,
+        },
+      ];
+    }
+    return activeRoom.pairedReceivers.map((rx) => {
+      const isTarget = rx.deviceId === webrtcState.targetPeerDeviceId;
+      const muted = mutedSlots[rx.assignedSlotIndex] ?? true;
+      return {
+        slotIndex: rx.assignedSlotIndex,
+        receiverDeviceId: rx.deviceId,
+        deviceName: rx.deviceName,
+        platform: rx.platform,
+        connectionState: isTarget ? webrtcState.phase : rx.connected ? 'idle' : 'disconnected',
+        stream: isTarget ? webrtcState.localStream : null,
+        hasAudioTrack: Boolean(webrtcState.localStream?.getAudioTracks().length),
+        muted,
+        telemetry: isTarget
+          ? webrtcState.telemetry
+          : createEmptyTelemetry(preferences.targetFps, rx.connected ? 'idle' : 'disconnected'),
+      };
+    });
+  })();
 
   return (
     <div className="min-h-screen bg-[#101214] text-[#F2F3F0] flex flex-col">
@@ -628,14 +746,15 @@ export function App() {
             capabilities={capabilities}
             preferences={preferences}
             receivers={receivers}
-            localStream={localStream}
-            programTelemetry={programTelemetry}
+            webrtcState={webrtcState}
             recentSessions={recentSessions}
             backendHealth={backendHealth}
             backendError={backendError}
             signalingState={signalingState}
             activeRoom={activeRoom}
+            activeRoomRole={activeRoomRole}
             pairingStatus={pairingStatus}
+            onStopSharing={handleStopSharing}
             onReconnectBackend={handleReconnectBackend}
             onNavigate={setDestination}
           />
@@ -646,11 +765,13 @@ export function App() {
             capabilities={capabilities}
             preferences={preferences}
             onUpdatePreferences={setPreferences}
-            localStream={localStream}
-            receivers={receivers}
             activeRoom={activeRoom}
+            activeRoomRole={activeRoomRole}
             pairingStatus={pairingStatus}
-            programTelemetry={programTelemetry}
+            webrtcState={webrtcState}
+            onStartSharing={handleStartSharing}
+            onConnectReceiver={handleConnectReceiver}
+            onStopSharing={handleStopSharing}
             onNavigate={setDestination}
             onLogEvent={logEvent}
           />
@@ -662,12 +783,13 @@ export function App() {
             deviceName={deviceName}
             capabilities={capabilities}
             initialRoomCode={initialRoute.roomCode}
-            activePhase="idle"
+            activePhase={webrtcState.phase}
             signalingState={signalingState}
             activeRoom={activeRoom}
             activeRoomRole={activeRoomRole}
             pairingStatus={pairingStatus}
             pairingDetail={pairingDetail}
+            webrtcState={webrtcState}
             onCreateRoom={handleCreateRoom}
             onSubmitPairRequest={handleSubmitPairRequest}
             onApproveReceiver={handleApproveReceiver}
@@ -675,6 +797,7 @@ export function App() {
             onRemoveReceiver={handleRemoveReceiver}
             onLeaveRoom={handleLeaveRoom}
             onCloseRoom={handleCloseRoom}
+            onNavigate={setDestination}
             onLogEvent={logEvent}
           />
         )}
@@ -685,6 +808,19 @@ export function App() {
             onChangeLayout={setMultiViewLayout}
             slots={receivers}
             capabilities={capabilities}
+            onToggleMute={(slotIndex) =>
+              setMutedSlots((prev) => ({ ...prev, [slotIndex]: !(prev[slotIndex] ?? true) }))
+            }
+            onDisconnectSlot={(peerId) => {
+              if (activeRoomRole === 'host') {
+                if (webrtcState.targetPeerDeviceId === peerId) {
+                  handleStopSharing();
+                }
+                void handleRemoveReceiver(peerId);
+              } else {
+                void handleLeaveRoom();
+              }
+            }}
             onLogEvent={logEvent}
           />
         )}

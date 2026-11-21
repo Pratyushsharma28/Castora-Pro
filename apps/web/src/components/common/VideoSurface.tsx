@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react';
-import { MonitorOff } from 'lucide-react';
+import { Maximize2, MonitorOff } from 'lucide-react';
 
 interface VideoSurfaceProps {
   slotLabel: string;
@@ -11,6 +11,7 @@ interface VideoSurfaceProps {
   actions?: ReactNode;
   footerMeta?: ReactNode;
   highlight?: boolean;
+  allowFullscreen?: boolean;
 }
 
 export function VideoSurface({
@@ -23,6 +24,7 @@ export function VideoSurface({
   actions,
   footerMeta,
   highlight = false,
+  allowFullscreen = true,
 }: VideoSurfaceProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -32,6 +34,9 @@ export function VideoSurface({
     if (!el) return;
     if (stream) {
       el.srcObject = stream;
+      void el.play().catch(() => {
+        // Autoplay policy may hold unmuted playback until user gesture
+      });
     } else {
       el.srcObject = null;
     }
@@ -41,6 +46,20 @@ export function VideoSurface({
       }
     };
   }, [stream]);
+
+  const handleFullscreen = async () => {
+    const target = containerRef.current ?? videoRef.current;
+    if (!target || typeof target.requestFullscreen !== 'function') return;
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await target.requestFullscreen();
+      }
+    } catch {
+      // Ignore fullscreen rejection if browser blocks outside direct gesture
+    }
+  };
 
   return (
     <div
@@ -56,7 +75,20 @@ export function VideoSurface({
           </span>
           <span className="truncate text-xs font-medium text-[#F2F3F0]">{title}</span>
         </div>
-        {statusBadge && <div className="shrink-0">{statusBadge}</div>}
+        <div className="flex items-center gap-2 shrink-0">
+          {statusBadge}
+          {stream && allowFullscreen && (
+            <button
+              type="button"
+              onClick={handleFullscreen}
+              title="Toggle fullscreen video"
+              aria-label={`Fullscreen ${slotLabel}`}
+              className="inline-flex h-6 w-6 items-center justify-center border border-[#252A2F] bg-[#131619] text-[#929A9D] hover:border-[#FF7849] hover:text-[#F2F3F0]"
+            >
+              <Maximize2 className="h-3 w-3" aria-hidden="true" />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="relative aspect-video w-full bg-[#131619] overflow-hidden">
