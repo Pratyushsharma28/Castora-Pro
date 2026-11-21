@@ -98,9 +98,26 @@ function toProtocolCapabilities(
   if (caps.detectedVideoCodecs.includes('AV1')) mappedCodecs.push('AV1');
   if (mappedCodecs.length === 0) mappedCodecs.push('H264');
 
+  const maxWidth =
+    prefs.resolution === '720p'
+      ? 1280
+      : prefs.resolution === '1080p'
+        ? 1920
+        : prefs.resolution === '1440p'
+          ? 2560
+          : 3840;
+  const maxHeight =
+    prefs.resolution === '720p'
+      ? 720
+      : prefs.resolution === '1080p'
+        ? 1080
+        : prefs.resolution === '1440p'
+          ? 1440
+          : 2160;
+
   return {
-    maxWidth: prefs.resolution === '720p' ? 1280 : 1920,
-    maxHeight: prefs.resolution === '720p' ? 720 : 1080,
+    maxWidth,
+    maxHeight,
     maxFps: prefs.targetFps,
     codecs: mappedCodecs,
     supportsAudio: prefs.includeAudio,
@@ -157,7 +174,10 @@ export function App() {
     targetFps: 60,
     codecPreference: 'H264',
     includeAudio: false,
+    maxBitrateKbps: 10_000,
+    adaptiveBitrate: true,
   });
+  const [qualityNotice, setQualityNotice] = useState<string | null>(null);
 
   const [networkPrefs, setNetworkPrefs] = useState<NetworkPreferences>({
     preferLanDirectP2P: true,
@@ -684,8 +704,30 @@ export function App() {
 
   const handleStartSharing = useCallback(async (targetSelection: string | string[] | null = null) => {
     if (!bridgeRef.current) return;
+    setQualityNotice(null);
     await bridgeRef.current.startScreenSharing(targetSelection);
   }, []);
+
+  const handleUpdatePreferences = useCallback(async (nextPrefs: CapturePreferences) => {
+    setQualityNotice(null);
+    if (!bridgeRef.current) {
+      setPreferences(nextPrefs);
+      return;
+    }
+    const result = await bridgeRef.current.applyCapturePreferencesUpdate(nextPrefs);
+    setPreferences(result.appliedPreferences);
+    if (result.notice) {
+      setQualityNotice(result.notice);
+    }
+  }, []);
+
+  const handleSetPeerQualityOverride = useCallback(
+    async (peerDeviceId: string, override: Partial<CapturePreferences> | null) => {
+      if (!bridgeRef.current) return;
+      await bridgeRef.current.setPeerQualityOverride(peerDeviceId, override);
+    },
+    []
+  );
 
   const handleConnectReceiver = useCallback(async (targetReceiverId: string) => {
     if (!bridgeRef.current) return;
@@ -874,7 +916,13 @@ export function App() {
             deviceId={deviceId}
             deviceName={deviceName}
             preferences={preferences}
-            onUpdatePreferences={setPreferences}
+            onUpdatePreferences={(next) => {
+              void handleUpdatePreferences(next);
+            }}
+            onSetPeerQualityOverride={(peerId, override) => {
+              void handleSetPeerQualityOverride(peerId, override);
+            }}
+            qualityNotice={qualityNotice}
             activeRoom={activeRoom}
             activeRoomRole={activeRoomRole}
             pairingStatus={pairingStatus}
@@ -912,7 +960,9 @@ export function App() {
             deviceName={deviceName}
             onSaveDeviceName={handleSaveDeviceName}
             preferences={preferences}
-            onUpdatePreferences={setPreferences}
+            onUpdatePreferences={(next) => {
+              void handleUpdatePreferences(next);
+            }}
             networkPrefs={networkPrefs}
             onUpdateNetworkPrefs={setNetworkPrefs}
             capabilities={capabilities}

@@ -10,6 +10,12 @@ import {
   createEmptyTelemetry,
   type BidirectionalTelemetrySample,
 } from './streamStatsService';
+import {
+  AdaptiveBitrateController,
+  orderVideoCodecsForPreference,
+  resolveQualityTarget,
+  type AdaptiveBitrateDecision,
+} from './videoQualityService';
 
 export function buildRtcConfiguration(networkPrefs: NetworkPreferences): RTCConfiguration {
   const iceServers: RTCIceServer[] = [];
@@ -75,6 +81,9 @@ export class CastoraWebRtcPeer {
   private outboundStream: MediaStream | null = null;
   private outboundStreamId: string | null = null;
   private outboundCodecHint: CastoraVideoCodec = 'VP8';
+  private outboundPreferences: CapturePreferences | null = null;
+  private activeOutboundPeersCount = 1;
+  private abrController: AdaptiveBitrateController | null = null;
   private localVideoTrack: MediaStreamTrack | null = null;
   private videoSender: RTCRtpSender | null = null;
   private audioSender: RTCRtpSender | null = null;
@@ -322,22 +331,52 @@ export class CastoraWebRtcPeer {
     }, 2500) as unknown as number;
   }
 
+  async sampleAndAdaptStats(nowMs?: number): Promise<BidirectionalTelemetrySample> {
+    const empty: BidirectionalTelemetrySample = {
+      outbound: createEmptyTelemetry(this.outboundTargetFps, this.currentPhase),
+      inbound: createEmptyTelemetry(this.inboundTargetFps, this.currentPhase),
+    };
+    if (this.disposed || !this.pc) return empty;
+
+    const snapshot = await this.statsCollector.sampleBidirectional({
+      pc: this.pc,
+      outboundTargetFps: this.outboundTargetFps,
+      inboundTargetFps: this.inboundTargetFps,
+      connectionState: this.currentPhase,
+      localVideoTrack: this.localVideoTrack,
+      hasInboundVideo: Boolean(this.inboundStreamId || this.hasInboundStream()),
+    });
+
+    if (this.hasOutboundStream() && this.abrController) {
+      const decision = this.abrController.evaluate(snapshot.outbound, {
+        activeOutboundPeers: this.activeOutboundPeersCount,
+        nowMs,
+      });
+      if (decision.changed) {
+        await this.applySenderEncodingDecision(decision);
+      }
+
+      const abrState = this.abrController.getCurrentState();
+      snapshot.outbound.configuredMaxBitrateKbps = abrState.configuredMaxBitrateKbps;
+      snapshot.outbound.targetBitrateKbps = abrState.targetBitrateKbps;
+      snapshot.outbound.scaleResolutionDownBy = abrState.scaleResolutionDownBy;
+      snapshot.outbound.adaptationStatus = abrState.adaptationStatus;
+      if (!snapshot.outbound.codecMimeType) {
+        snapshot.outbound.codecMimeType = this.outboundCodecHint;
+      }
+    }
+
+    if (!this.disposed) {
+      this.callbacks.onStats(snapshot);
+    }
+    return snapshot;
+  }
+
   private startStatsPolling(): void {
     this.stopStatsPolling();
     if (typeof window === 'undefined') return;
-    this.statsTimer = window.setInterval(async () => {
-      if (this.disposed || !this.pc) return;
-      const snapshot = await this.statsCollector.sampleBidirectional({
-        pc: this.pc,
-        outboundTargetFps: this.outboundTargetFps,
-        inboundTargetFps: this.inboundTargetFps,
-        connectionState: this.currentPhase,
-        localVideoTrack: this.localVideoTrack,
-        hasInboundVideo: Boolean(this.inboundStreamId || this.hasInboundStream()),
-      });
-      if (!this.disposed) {
-        this.callbacks.onStats(snapshot);
-      }
+    this.statsTimer = window.setInterval(() => {
+      void this.sampleAndAdaptStats();
     }, 1000);
   }
 
@@ -353,25 +392,60 @@ export class CastoraWebRtcPeer {
     return this.pc.getTransceivers().find((t) => t.sender === sender) ?? null;
   }
 
-  private applyCodecAndEncodingHints(preferences: CapturePreferences): CastoraVideoCodec {
-    let codecHint: CastoraVideoCodec = 'VP8';
+  private getLocalVideoActualDims(): { width: number | null; height: number | null } {
+    const settings = this.localVideoTrack?.getSettings?.();
+    return {
+      width: typeof settings?.width === 'number' ? settings.width : null,
+      height: typeof settings?.height === 'number' ? settings.height : null,
+    };
+  }
+
+  private async applySenderEncodingDecision(decision: AdaptiveBitrateDecision): Promise<void> {
+    if (!this.videoSender || typeof this.videoSender.getParameters !== 'function') {
+      return;
+    }
+    try {
+      const senderParams = this.videoSender.getParameters();
+      if (!senderParams.encodings || senderParams.encodings.length === 0) {
+        senderParams.encodings = [{}];
+      }
+      senderParams.encodings[0].maxBitrate = Math.round(decision.targetBitrateKbps * 1000);
+      senderParams.encodings[0].maxFramerate = decision.maxFramerate;
+      senderParams.encodings[0].scaleResolutionDownBy = decision.scaleResolutionDownBy;
+      senderParams.degradationPreference = decision.degradationPreference;
+      await this.videoSender.setParameters(senderParams);
+    } catch {
+      // Optional encoding parameters may be rejected on restricted browser implementations
+    }
+  }
+
+  private applyCodecAndEncodingHints(
+    preferences: CapturePreferences,
+    activeOutboundPeers = 1
+  ): CastoraVideoCodec {
+    let codecHint: CastoraVideoCodec =
+      preferences.codecPreference === 'H264'
+        ? 'H264'
+        : preferences.codecPreference === 'VP9'
+          ? 'VP9'
+          : preferences.codecPreference === 'AV1'
+            ? 'AV1'
+            : 'VP8';
     const videoTransceiver = this.findTransceiverForSender(this.videoSender);
     if (!videoTransceiver) return codecHint;
 
     if (
-      preferences.codecPreference === 'H264' &&
       typeof RTCRtpSender !== 'undefined' &&
       typeof RTCRtpSender.getCapabilities === 'function' &&
       typeof videoTransceiver.setCodecPreferences === 'function'
     ) {
       const caps = RTCRtpSender.getCapabilities('video');
       if (caps?.codecs?.length) {
-        const h264 = caps.codecs.filter((c) => c.mimeType.toLowerCase() === 'video/h264');
-        const others = caps.codecs.filter((c) => c.mimeType.toLowerCase() !== 'video/h264');
-        if (h264.length > 0) {
+        const ranked = orderVideoCodecsForPreference(caps.codecs, preferences.codecPreference);
+        if (ranked.orderedCodecs.length > 0) {
           try {
-            videoTransceiver.setCodecPreferences([...h264, ...others]);
-            codecHint = 'H264';
+            videoTransceiver.setCodecPreferences(ranked.orderedCodecs);
+            codecHint = ranked.codecHint;
           } catch {
             // Browser codec policy restriction
           }
@@ -379,29 +453,75 @@ export class CastoraWebRtcPeer {
       }
     }
 
-    if (this.videoSender && typeof this.videoSender.getParameters === 'function') {
-      try {
-        const senderParams = this.videoSender.getParameters();
-        if (!senderParams.encodings || senderParams.encodings.length === 0) {
-          senderParams.encodings = [{}];
+    const actualDims = this.getLocalVideoActualDims();
+    this.outboundPreferences = preferences;
+    this.activeOutboundPeersCount = Math.max(1, activeOutboundPeers);
+    this.abrController = new AdaptiveBitrateController(preferences, actualDims);
+    const initialDecision = this.abrController.updatePreferences(
+      preferences,
+      this.activeOutboundPeersCount,
+      actualDims
+    );
+    void this.applySenderEncodingDecision(initialDecision);
+
+    return codecHint;
+  }
+
+  async updateEncodingPreferences(
+    preferences: CapturePreferences,
+    activeOutboundPeers = 1
+  ): Promise<void> {
+    if (this.disposed || !this.pc) return;
+    this.outboundPreferences = preferences;
+    this.outboundTargetFps = preferences.targetFps;
+    this.activeOutboundPeersCount = Math.max(1, activeOutboundPeers);
+
+    if (!this.hasOutboundStream()) return;
+
+    const actualDims = this.getLocalVideoActualDims();
+    if (!this.abrController) {
+      this.abrController = new AdaptiveBitrateController(preferences, actualDims);
+    }
+    const decision = this.abrController.updatePreferences(
+      preferences,
+      this.activeOutboundPeersCount,
+      actualDims
+    );
+
+    const videoTransceiver = this.findTransceiverForSender(this.videoSender);
+    if (
+      videoTransceiver &&
+      typeof RTCRtpSender !== 'undefined' &&
+      typeof RTCRtpSender.getCapabilities === 'function' &&
+      typeof videoTransceiver.setCodecPreferences === 'function'
+    ) {
+      const caps = RTCRtpSender.getCapabilities('video');
+      if (caps?.codecs?.length) {
+        const ranked = orderVideoCodecsForPreference(caps.codecs, preferences.codecPreference);
+        if (ranked.orderedCodecs.length > 0) {
+          try {
+            videoTransceiver.setCodecPreferences(ranked.orderedCodecs);
+            this.outboundCodecHint = ranked.codecHint;
+          } catch {
+            // Ignore codec change rejection on live transceiver
+          }
         }
-        senderParams.encodings[0].maxFramerate = preferences.targetFps;
-        senderParams.encodings[0].maxBitrate =
-          preferences.resolution === '720p' ? 4_500_000 : 8_000_000;
-        senderParams.degradationPreference = 'maintain-framerate';
-        void this.videoSender.setParameters(senderParams).catch(() => {});
-      } catch {
-        // Optional encoding parameters
       }
     }
 
-    return codecHint;
+    await this.applySenderEncodingDecision(decision);
+  }
+
+  getResolvedQualityTarget(): ReturnType<typeof resolveQualityTarget> | null {
+    if (!this.outboundPreferences) return null;
+    return resolveQualityTarget(this.outboundPreferences, this.getLocalVideoActualDims());
   }
 
   async publishLocalStream(params: {
     localStream: MediaStream;
     streamId: string;
     preferences: CapturePreferences;
+    activeOutboundPeers?: number;
   }): Promise<{ codecHint: CastoraVideoCodec; hasVideo: boolean; hasAudio: boolean }> {
     let resultCodec: CastoraVideoCodec = 'VP8';
     let hasVideo = false;
@@ -462,7 +582,10 @@ export class CastoraWebRtcPeer {
         }
       }
 
-      resultCodec = this.applyCodecAndEncodingHints(params.preferences);
+      resultCodec = this.applyCodecAndEncodingHints(
+        params.preferences,
+        params.activeOutboundPeers ?? 1
+      );
       this.outboundCodecHint = resultCodec;
 
       if (this.currentPhase === 'idle' || this.currentPhase === 'disconnected') {
@@ -486,6 +609,7 @@ export class CastoraWebRtcPeer {
       this.outboundStream = null;
       this.outboundStreamId = null;
       this.localVideoTrack = null;
+      this.abrController = null;
       this.statsCollector.resetOutbound();
 
       let modifiedTransceiver = false;

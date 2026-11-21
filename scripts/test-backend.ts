@@ -5,9 +5,17 @@ import WebSocket from 'ws';
 import type { RoomSnapshot } from '../apps/web/src/services/backendClient.ts';
 import {
   ScreenCaptureError,
+  buildDisplayMediaConstraints,
   startScreenCapture,
 } from '../apps/web/src/services/screenCaptureService.ts';
+import {
+  VIDEO_QUALITY_PRESETS,
+  computeConcurrencyScaledBitrateKbps,
+  orderVideoCodecsForPreference,
+  resolveQualityTarget,
+} from '../apps/web/src/services/videoQualityService.ts';
 import { WebRtcSignalingBridge } from '../apps/web/src/services/webrtcSignalingBridge.ts';
+import type { CapturePreferences } from '../apps/web/src/types/studio.ts';
 import type { CastoraEnvelope } from '../apps/web/src/types/protocol.ts';
 import { startCastoraServer } from '../server.ts';
 
@@ -1251,32 +1259,67 @@ async function main() {
 
     // Lightweight stateful fake RTCPeerConnection implementing Unified Plan SDP state machine,
     // rollback for Perfect Negotiation, transceivers/senders, ICE candidates, and remote ontrack delivery.
+    type FakeTrack = {
+      id: string;
+      kind: 'video' | 'audio';
+      readyState: string;
+      muted: boolean;
+      contentHint: string;
+      _listeners: Map<string, Set<() => void>>;
+      getSettings: () => { width: number; height: number; frameRate: number };
+      applyConstraints?: (constraints: MediaTrackConstraints) => Promise<void>;
+      addEventListener: (evt: string, cb: () => void) => void;
+      removeEventListener: (evt: string, cb: () => void) => void;
+      dispatchEventName: (evt: string) => void;
+      stop: () => void;
+    };
+
     class FakeMediaStream {
       readonly id: string;
-      private tracks: Array<{
-        id: string;
-        kind: string;
-        readyState: string;
-        muted: boolean;
-        contentHint: string;
-        _listeners: Map<string, Set<() => void>>;
-        getSettings: () => { width: number; height: number; frameRate: number };
-        addEventListener: (evt: string, cb: () => void) => void;
-        removeEventListener: (evt: string, cb: () => void) => void;
-        dispatchEventName: (evt: string) => void;
-        stop: () => void;
-      }>;
-      constructor(id: string, trackLabel = 'screen') {
+      private tracks: FakeTrack[];
+      constructor(
+        id: string,
+        trackLabel = 'screen',
+        opts: {
+          width?: number;
+          height?: number;
+          frameRate?: number;
+          includeAudio?: boolean;
+          rejectConstraints?: boolean;
+        } = {}
+      ) {
         this.id = id;
+        let width = opts.width ?? 1920;
+        let height = opts.height ?? 1080;
+        let frameRate = opts.frameRate ?? 60;
         const listeners = new Map<string, Set<() => void>>();
-        const track = {
+        const track: FakeTrack = {
           id: `${trackLabel}-${id}`,
           kind: 'video',
           readyState: 'live',
           muted: false,
           contentHint: 'motion',
           _listeners: listeners,
-          getSettings: () => ({ width: 1920, height: 1080, frameRate: 60 }),
+          getSettings: () => ({ width, height, frameRate }),
+          applyConstraints: async (constraints: MediaTrackConstraints) => {
+            if (opts.rejectConstraints) {
+              const err = new Error('Requested resolution exceeds display surface');
+              err.name = 'OverconstrainedError';
+              throw err;
+            }
+            const w = constraints.width;
+            const h = constraints.height;
+            const f = constraints.frameRate;
+            if (w && typeof w === 'object' && 'ideal' in w && typeof w.ideal === 'number') {
+              width = w.ideal;
+            }
+            if (h && typeof h === 'object' && 'ideal' in h && typeof h.ideal === 'number') {
+              height = h.ideal;
+            }
+            if (f && typeof f === 'object' && 'ideal' in f && typeof f.ideal === 'number') {
+              frameRate = f.ideal;
+            }
+          },
           addEventListener: (evt: string, cb: () => void) => {
             if (!listeners.has(evt)) listeners.set(evt, new Set());
             listeners.get(evt)!.add(cb);
@@ -1293,22 +1336,59 @@ async function main() {
           },
         };
         this.tracks = [track];
+        if (opts.includeAudio) {
+          const audioListeners = new Map<string, Set<() => void>>();
+          const audioTrack: FakeTrack = {
+            id: `${trackLabel}-audio-${id}`,
+            kind: 'audio',
+            readyState: 'live',
+            muted: false,
+            contentHint: '',
+            _listeners: audioListeners,
+            getSettings: () => ({ width: 0, height: 0, frameRate: 0 }),
+            addEventListener: (evt: string, cb: () => void) => {
+              if (!audioListeners.has(evt)) audioListeners.set(evt, new Set());
+              audioListeners.get(evt)!.add(cb);
+            },
+            removeEventListener: (evt: string, cb: () => void) => {
+              audioListeners.get(evt)?.delete(cb);
+            },
+            dispatchEventName: (evt: string) => {
+              for (const cb of audioListeners.get(evt) ?? []) cb();
+            },
+            stop: () => {
+              audioTrack.readyState = 'ended';
+            },
+          };
+          this.tracks.push(audioTrack);
+        }
       }
       getVideoTracks() {
         return this.tracks.filter((t) => t.kind === 'video');
       }
       getAudioTracks() {
-        return [];
+        return this.tracks.filter((t) => t.kind === 'audio');
       }
       getTracks() {
         return [...this.tracks];
       }
-      addTrack(track: (typeof this.tracks)[number]) {
+      addTrack(track: FakeTrack) {
         this.tracks.push(track);
       }
     }
 
+    type FakeSenderParameters = {
+      encodings: Array<{
+        maxBitrate?: number;
+        maxFramerate?: number;
+        scaleResolutionDownBy?: number;
+      }>;
+      degradationPreference?: RTCDegradationPreference;
+    };
+
     class FakeRtcPeerConnection {
+      static instances: FakeRtcPeerConnection[] = [];
+
       signalingState: RTCSignalingState = 'stable';
       iceConnectionState: RTCIceConnectionState = 'connected';
       connectionState: RTCPeerConnectionState = 'connected';
@@ -1319,28 +1399,75 @@ async function main() {
       oniceconnectionstatechange: (() => void) | null = null;
       onconnectionstatechange: (() => void) | null = null;
 
+      mockStatsMap: Map<string, Record<string, unknown>> = new Map();
+      lastCodecPreferences: RTCRtpCodec[] | null = null;
+      videoSetParametersCalls = 0;
+      audioSetParametersCalls = 0;
+
       private transceivers: Array<{
         direction: RTCRtpTransceiverDirection;
+        setCodecPreferences: (codecs: RTCRtpCodec[]) => void;
         sender: {
-          track: unknown;
-          replaceTrack: (t: unknown) => Promise<void>;
-          getParameters: () => { encodings: unknown[]; degradationPreference?: string };
-          setParameters: () => Promise<void>;
+          track: { kind?: string } | null;
+          replaceTrack: (t: { kind?: string } | null) => Promise<void>;
+          getParameters: () => FakeSenderParameters;
+          setParameters: (params: FakeSenderParameters) => Promise<void>;
         };
       }> = [];
       private deliveredRemoteStream: FakeMediaStream | null = null;
 
-      addTrack(track: unknown) {
+      constructor() {
+        FakeRtcPeerConnection.instances.push(this);
+      }
+
+      addTrack(track: { kind?: string }) {
+        let senderParams: FakeSenderParameters = { encodings: [{}] };
+        const trackKind = track?.kind ?? 'video';
         const sender = {
-          track,
-          replaceTrack: async (next: unknown) => {
+          track: track as { kind?: string } | null,
+          replaceTrack: async (next: { kind?: string } | null) => {
             sender.track = next;
           },
-          getParameters: () => ({ encodings: [{}] }),
-          setParameters: async () => {},
+          getParameters: () => ({
+            encodings: senderParams.encodings.map((e) => ({ ...e })),
+            degradationPreference: senderParams.degradationPreference,
+          }),
+          setParameters: async (params: FakeSenderParameters) => {
+            senderParams = {
+              encodings: params.encodings.map((e) => ({ ...e })),
+              degradationPreference: params.degradationPreference,
+            };
+            if (trackKind === 'audio' || sender.track?.kind === 'audio') {
+              this.audioSetParametersCalls += 1;
+            } else {
+              this.videoSetParametersCalls += 1;
+            }
+          },
         };
-        this.transceivers.push({ direction: 'sendonly', sender });
+        this.transceivers.push({
+          direction: 'sendonly',
+          setCodecPreferences: (codecs: RTCRtpCodec[]) => {
+            this.lastCodecPreferences = codecs;
+          },
+          sender,
+        });
         return sender;
+      }
+
+      getVideoSender(): {
+        track: { kind?: string } | null;
+        getParameters: () => FakeSenderParameters;
+      } | null {
+        const found = this.transceivers.find((t) => t.sender.track?.kind === 'video');
+        return found ? found.sender : null;
+      }
+
+      getAudioSender(): {
+        track: { kind?: string } | null;
+        getParameters: () => FakeSenderParameters;
+      } | null {
+        const found = this.transceivers.find((t) => t.sender.track?.kind === 'audio');
+        return found ? found.sender : null;
       }
 
       removeTrack(sender: unknown) {
@@ -1440,7 +1567,7 @@ async function main() {
       }
 
       async getStats() {
-        return new Map();
+        return this.mockStatsMap;
       }
 
       close() {
@@ -2013,6 +2140,496 @@ async function main() {
     await bFriend2Ws.close();
     await bPendingWs.close();
 
+    // =========================================================================
+    // Stage 4C: Beyond-1080p60 WebRTC Video Quality, Bitrate, Multi-Publisher & ABR
+    // =========================================================================
+    console.log('\nStarting Stage 4C WebRTC video quality, bitrate, multi-publisher & ABR tests...');
+
+    // 4C.1: Backward compatibility of 1080p60 default + 1440p60 / 4K60 presets + codec ranking
+    const default1080Prefs: CapturePreferences = {
+      resolution: '1080p',
+      targetFps: 60,
+      codecPreference: 'H264',
+      includeAudio: false,
+      maxBitrateKbps: 10_000,
+      adaptiveBitrate: true,
+    };
+    const c1080 = buildDisplayMediaConstraints(default1080Prefs);
+    assert.deepEqual(c1080.video, {
+      frameRate: { ideal: 60, max: 60 },
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+    });
+    assert.equal(resolveQualityTarget(default1080Prefs).configuredMaxBitrateKbps, 10_000);
+    assert.equal(VIDEO_QUALITY_PRESETS['1080p'].defaultBitrateKbps60, 10_000);
+    assert.equal(VIDEO_QUALITY_PRESETS['1440p'].defaultBitrateKbps60, 20_000);
+    assert.equal(VIDEO_QUALITY_PRESETS['4k'].defaultBitrateKbps60, 40_000);
+
+    const prefs1440: CapturePreferences = {
+      resolution: '1440p',
+      targetFps: 60,
+      codecPreference: 'H264',
+      includeAudio: false,
+      maxBitrateKbps: 20_000,
+      adaptiveBitrate: true,
+    };
+    const c1440 = buildDisplayMediaConstraints(prefs1440);
+    assert.deepEqual(c1440.video, {
+      frameRate: { ideal: 60, max: 60 },
+      width: { ideal: 2560 },
+      height: { ideal: 1440 },
+    });
+
+    const prefs4k: CapturePreferences = {
+      resolution: '4k',
+      targetFps: 60,
+      codecPreference: 'VP9',
+      includeAudio: true,
+      maxBitrateKbps: 40_000,
+      adaptiveBitrate: true,
+    };
+    const c4k = buildDisplayMediaConstraints(prefs4k);
+    assert.deepEqual(c4k.video, {
+      frameRate: { ideal: 60, max: 60 },
+      width: { ideal: 3840 },
+      height: { ideal: 2160 },
+    });
+    assert.equal(c4k.audio, true);
+
+    const sampleCaps = [
+      { mimeType: 'video/VP8', clockRate: 90000 },
+      { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' },
+      { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032' },
+      { mimeType: 'video/VP9', clockRate: 90000 },
+      { mimeType: 'video/AV1', clockRate: 90000 },
+      { mimeType: 'video/rtx', clockRate: 90000 },
+    ] as RTCRtpCodec[];
+    const rankedH264 = orderVideoCodecsForPreference(sampleCaps, 'H264');
+    assert.equal(rankedH264.codecHint, 'H264');
+    assert.equal(rankedH264.orderedCodecs[0].mimeType, 'video/H264');
+    assert.equal(rankedH264.orderedCodecs[0].sdpFmtpLine?.includes('640032'), true, 'High H264 profile prioritized first');
+    const rankedVp9 = orderVideoCodecsForPreference(sampleCaps, 'VP9');
+    assert.equal(rankedVp9.codecHint, 'VP9');
+    assert.equal(rankedVp9.orderedCodecs[0].mimeType, 'video/VP9');
+    const rankedAv1 = orderVideoCodecsForPreference(sampleCaps, 'AV1');
+    assert.equal(rankedAv1.codecHint, 'AV1');
+    assert.equal(rankedAv1.orderedCodecs[0].mimeType, 'video/AV1');
+    console.log('  [PASS] 4C.1. 1080p60 backward compatibility, 1440p/4K presets & hardware codec preference ranking verified');
+
+    // Create clean Stage 4C room for single-device, 2-publisher, 3-publisher, independent quality & ABR tests
+    const cHostId = 'dev-4c-host';
+    const cFriend1Id = 'dev-4c-friend1';
+    const cFriend2Id = 'dev-4c-friend2';
+
+    const room4cRes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: cHostId,
+        hostDeviceName: 'Studio Mac (4K)',
+        hostPlatform: 'macos',
+      }),
+    });
+    assert.equal(room4cRes.status, 201);
+    const room4cCreated = (await room4cRes.json()) as {
+      room: RoomSnapshot;
+      hostToken: string;
+    };
+    const room4cId = room4cCreated.room.roomId;
+
+    const cHostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: cHostId,
+      deviceName: 'Studio Mac (4K)',
+      platform: 'macos',
+      role: 'both',
+      roomId: room4cId,
+      token: room4cCreated.hostToken,
+    });
+    await cHostWs.waitForMessage((m) => m.messageType === 'room_state');
+
+    const cFriend1Join = (await (
+      await fetch(`${baseUrl}/api/rooms/${room4cId}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiverDeviceId: cFriend1Id,
+          deviceName: 'MacBook Pro (1440p)',
+          platform: 'macos',
+        }),
+      })
+    ).json()) as { memberToken: string };
+    const cFriend1Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: cFriend1Id,
+      deviceName: 'MacBook Pro (1440p)',
+      platform: 'macos',
+      role: 'both',
+      roomId: room4cId,
+      token: cFriend1Join.memberToken,
+    });
+    await (
+      await fetch(`${baseUrl}/api/rooms/${room4cId}/pair-requests/${cFriend1Id}/approve`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${room4cCreated.hostToken}` },
+      })
+    ).json();
+
+    const cFriend2Join = (await (
+      await fetch(`${baseUrl}/api/rooms/${room4cId}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiverDeviceId: cFriend2Id,
+          deviceName: 'MacBook Air (1080p)',
+          platform: 'macos',
+        }),
+      })
+    ).json()) as { memberToken: string };
+    const cFriend2Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: cFriend2Id,
+      deviceName: 'MacBook Air (1080p)',
+      platform: 'macos',
+      role: 'both',
+      roomId: room4cId,
+      token: cFriend2Join.memberToken,
+    });
+    await (
+      await fetch(`${baseUrl}/api/rooms/${room4cId}/pair-requests/${cFriend2Id}/approve`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${room4cCreated.hostToken}` },
+      })
+    ).json();
+
+    let latest4cRoom = ((await (await fetch(`${baseUrl}/api/rooms/${room4cId}`)).json()) as { room: RoomSnapshot }).room;
+
+    const cHostPeers: FakeRtcPeerConnection[] = [];
+    const makeDynamicCapture = (
+      label: string,
+      surfaceOpts: { width: number; height: number; frameRate: number; includeAudio?: boolean; rejectConstraints?: boolean }
+    ) => {
+      return async ({ onNativeEnded }: { preferences: CapturePreferences; onNativeEnded: () => void }) => {
+        const stream = new FakeMediaStream(`cap4c-${label}-${Date.now()}`, label, surfaceOpts) as unknown as MediaStream;
+        const videoTrack = stream.getVideoTracks()[0];
+        void onNativeEnded;
+        return {
+          stream,
+          videoTrack,
+          actualWidth: surfaceOpts.width,
+          actualHeight: surfaceOpts.height,
+          actualFrameRate: surfaceOpts.frameRate,
+          hasAudio: Boolean(surfaceOpts.includeAudio),
+          stop: () => {
+            for (const t of stream.getTracks()) t.stop();
+          },
+        };
+      };
+    };
+
+    // Map FakeRtcPeerConnection instances created per peer on Host
+    const hostPrefs = { ...prefs4k };
+    const friend1Prefs = { ...prefs1440 };
+    const friend2Prefs = { ...default1080Prefs };
+
+    const cHostPeerByTarget = new Map<string, FakeRtcPeerConnection>();
+
+    const cHostBridge = new WebRtcSignalingBridge({
+      deviceId: cHostId,
+      preferences: hostPrefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(cHostWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: async (arg) =>
+        makeDynamicCapture('host4k', {
+          width: 3840,
+          height: 2160,
+          frameRate: 60,
+          includeAudio: true,
+        })(arg),
+      rtcFactory: () => {
+        const fake = new FakeRtcPeerConnection();
+        cHostPeers.push(fake);
+        return fake as unknown as RTCPeerConnection;
+      },
+    });
+    const cFriend1Bridge = new WebRtcSignalingBridge({
+      deviceId: cFriend1Id,
+      preferences: friend1Prefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(cFriend1Ws),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('f1-1440', { width: 2560, height: 1440, frameRate: 60 }),
+      rtcFactory: () => new FakeRtcPeerConnection() as unknown as RTCPeerConnection,
+    });
+    const cFriend2Bridge = new WebRtcSignalingBridge({
+      deviceId: cFriend2Id,
+      preferences: friend2Prefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(cFriend2Ws),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('f2-1080', { width: 1920, height: 1080, frameRate: 60 }),
+      rtcFactory: () => new FakeRtcPeerConnection() as unknown as RTCPeerConnection,
+    });
+
+    const wire4c = (
+      wsClient: TestWsClient,
+      bridge: WebRtcSignalingBridge,
+      role: 'host' | 'receiver',
+      devId: string,
+      getPrefs: () => CapturePreferences
+    ) => {
+      wsClient.ws.on('message', (raw, isBinary) => {
+        if (isBinary) return;
+        const msg = JSON.parse(raw.toString('utf8')) as CastoraEnvelope;
+        if (msg.messageType === 'room_state' && msg.roomId === room4cId) {
+          latest4cRoom = { ...latest4cRoom, ...(msg.payload as Partial<RoomSnapshot>) };
+          bridge.updateContext({
+            deviceId: devId,
+            activeRoom: latest4cRoom,
+            activeRoomRole: role,
+            preferences: getPrefs(),
+            networkPrefs: netPrefs4b,
+          });
+        } else if (
+          msg.messageType === 'stream_start' ||
+          msg.messageType === 'session_offer' ||
+          msg.messageType === 'session_answer' ||
+          msg.messageType === 'ice_candidate' ||
+          msg.messageType === 'stream_stop'
+        ) {
+          void bridge.handleIncomingEnvelope(msg);
+        }
+      });
+    };
+
+    cHostBridge.updateContext({ deviceId: cHostId, activeRoom: latest4cRoom, activeRoomRole: 'host', preferences: hostPrefs, networkPrefs: netPrefs4b });
+    cFriend1Bridge.updateContext({ deviceId: cFriend1Id, activeRoom: latest4cRoom, activeRoomRole: 'receiver', preferences: friend1Prefs, networkPrefs: netPrefs4b });
+    cFriend2Bridge.updateContext({ deviceId: cFriend2Id, activeRoom: latest4cRoom, activeRoomRole: 'receiver', preferences: friend2Prefs, networkPrefs: netPrefs4b });
+    wire4c(cHostWs, cHostBridge, 'host', cHostId, () => hostPrefs);
+    wire4c(cFriend1Ws, cFriend1Bridge, 'receiver', cFriend1Id, () => friend1Prefs);
+    wire4c(cFriend2Ws, cFriend2Bridge, 'receiver', cFriend2Id, () => friend2Prefs);
+
+    // 4C.2: Honest resolution check (request 4K on 1080p display surface -> must report 1920x1080, not 4K!)
+    const f2With4kRequestPrefs: CapturePreferences = {
+      ...prefs4k,
+      includeAudio: false,
+    };
+    const f2HonestLogs: string[] = [];
+    const f2HonestBridge = new WebRtcSignalingBridge({
+      deviceId: cFriend2Id,
+      preferences: f2With4kRequestPrefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(cFriend2Ws),
+      callbacks: {
+        onStateChange: () => {},
+        onLogEvent: (_cat, title, detail) => {
+          f2HonestLogs.push(`${title}: ${detail}`);
+        },
+      },
+      // Display surface only outputs 1920x1080 even though 4k was requested
+      captureFn: makeDynamicCapture('honest-1080', { width: 1920, height: 1080, frameRate: 60 }),
+      rtcFactory: () => new FakeRtcPeerConnection() as unknown as RTCPeerConnection,
+    });
+    f2HonestBridge.updateContext({
+      deviceId: cFriend2Id,
+      activeRoom: latest4cRoom,
+      activeRoomRole: 'receiver',
+      preferences: f2With4kRequestPrefs,
+      networkPrefs: netPrefs4b,
+    });
+    await f2HonestBridge.startScreenSharing(cHostId);
+    await waitUntil(
+      () => cHostBridge.getSnapshot().incomingStreams.some((s) => s.senderDeviceId === cFriend2Id && s.stream !== null),
+      'Honest resolution check stream delivered'
+    );
+    const f2HonestEntry = cHostBridge.getSnapshot().incomingStreams.find((s) => s.senderDeviceId === cFriend2Id)!;
+    assert.equal(f2HonestEntry.streamMeta?.width, 1920, 'Must NOT claim 4K when actual captured track is 1080p');
+    assert.equal(f2HonestEntry.streamMeta?.height, 1080);
+    assert.equal(f2HonestBridge.getSnapshot().localCaptureMeta?.width, 1920);
+    assert.equal(f2HonestBridge.getSnapshot().telemetry.resolution, '1920×1080');
+    assert.equal(
+      f2HonestLogs.some((line) => line.includes('Actual capture resolution reported') && line.includes('1920×1080')),
+      true
+    );
+    f2HonestBridge.stopSharing('user_stopped');
+    f2HonestBridge.dispose();
+    await waitUntil(() => cHostBridge.getSnapshot().incomingStreams.length === 0, 'Cleared honest-check stream');
+
+    // Reset Host peers array after honest check
+    cHostBridge.updateContext({ deviceId: cHostId, activeRoom: latest4cRoom, activeRoomRole: 'host', preferences: hostPrefs, networkPrefs: netPrefs4b });
+
+    // Single-device 4K60 streaming + Overconstrained fallback check
+    await cHostBridge.startScreenSharing(cFriend1Id);
+    await waitUntil(
+      () => cFriend1Bridge.getSnapshot().incomingStreams.some((s) => s.senderDeviceId === cHostId && s.stream !== null),
+      'Friend 1 receives single-device 4K60 stream with audio'
+    );
+    const singleFakePc = cHostPeers[cHostPeers.length - 1];
+    const singleVideoParams = singleFakePc.getVideoSender()!.getParameters();
+    assert.equal(singleVideoParams.encodings[0].maxBitrate, 40_000_000, 'Single-device 4K60 applies 40 Mbps');
+    assert.equal(singleVideoParams.encodings[0].maxFramerate, 60);
+    assert.equal(singleVideoParams.encodings[0].scaleResolutionDownBy, 1);
+    assert.equal(singleVideoParams.degradationPreference, 'maintain-resolution');
+    assert.equal(singleFakePc.audioSetParametersCalls, 0, 'Audio sender untouched so A/V sync stays locked');
+
+    cHostBridge.stopSharing('user_stopped');
+    await waitUntil(() => cFriend1Bridge.getSnapshot().incomingStreams.length === 0, 'Cleared single-device 4K stream');
+
+    // Simulate unsupported constraint update -> verify previous 4K60 preferences preserved safely
+    const failingCaptureSessionBridge = new WebRtcSignalingBridge({
+      deviceId: 'local-fallback-test',
+      preferences: hostPrefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => null,
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('rejecting', { width: 2560, height: 1440, frameRate: 60, rejectConstraints: true }),
+      rtcFactory: () => new FakeRtcPeerConnection() as unknown as RTCPeerConnection,
+    });
+    await failingCaptureSessionBridge.startScreenSharing(null);
+    const fallbackResult = await failingCaptureSessionBridge.applyCapturePreferencesUpdate({
+      ...prefs4k,
+      resolution: '4k',
+      targetFps: 30,
+    });
+    assert.equal(fallbackResult.applied, false);
+    assert.equal(fallbackResult.fallbackUsed, true);
+    assert.equal(fallbackResult.appliedPreferences.targetFps, 60, 'Fallback kept previous working 60 FPS');
+    failingCaptureSessionBridge.stopSharing('user_stopped');
+    failingCaptureSessionBridge.dispose();
+    console.log('  [PASS] 4C.2. Single-device 4K60 setParameters, honest 1080p reporting & Overconstrained fallback verified');
+
+    // 4C.3: 2 & 3 simultaneous publishers, concurrency scaling & independent per-peer quality overrides
+    cHostPeers.length = 0;
+    await cHostBridge.startScreenSharing(null); // Broadcasts 4K60 to both Friend 1 and Friend 2 (2 outbound peers -> 85% headroom = 34 Mbps)
+    await cFriend1Bridge.startScreenSharing(null); // Friend 1 broadcasts 1440p60 (20 Mbps * 0.85 = 17 Mbps)
+    await waitUntil(
+      () =>
+        cFriend1Bridge.getSnapshot().incomingStreams.some((s) => s.senderDeviceId === cHostId && s.stream !== null) &&
+        cFriend2Bridge.getSnapshot().incomingStreams.some((s) => s.senderDeviceId === cHostId && s.stream !== null) &&
+        cHostBridge.getSnapshot().incomingStreams.some((s) => s.senderDeviceId === cFriend1Id && s.stream !== null),
+      'Two simultaneous publishers active cleanly'
+    );
+
+    // Now add 3rd simultaneous publisher (Friend 2 at 1080p60)
+    await cFriend2Bridge.startScreenSharing(null);
+    await waitUntil(
+      () =>
+        cHostBridge.getSnapshot().incomingStreams.filter((s) => s.stream !== null).length === 2 &&
+        cFriend1Bridge.getSnapshot().incomingStreams.filter((s) => s.stream !== null).length === 2 &&
+        cFriend2Bridge.getSnapshot().incomingStreams.filter((s) => s.stream !== null).length === 2,
+      'All three simultaneous publishers active at different presets (4K, 1440p, 1080p)'
+    );
+
+    // Map each target peer on cHostBridge to its FakeRtcPeerConnection
+    for (const targetId of [cFriend1Id, cFriend2Id]) {
+      const peerObj = cHostBridge.getPeerInstance(targetId)!;
+      const fakeConn = (peerObj as unknown as { pc: FakeRtcPeerConnection }).pc;
+      cHostPeerByTarget.set(targetId, fakeConn);
+    }
+
+    const fakeToF1 = cHostPeerByTarget.get(cFriend1Id)!;
+    const fakeToF2 = cHostPeerByTarget.get(cFriend2Id)!;
+
+    assert.equal(
+      computeConcurrencyScaledBitrateKbps(40_000, 2, 8_000),
+      34_000,
+      '2-target concurrency scaling preserves 85% ceiling (34 Mbps)'
+    );
+    assert.equal(fakeToF1.getVideoSender()!.getParameters().encodings[0].maxBitrate, 34_000_000);
+    assert.equal(fakeToF2.getVideoSender()!.getParameters().encodings[0].maxBitrate, 34_000_000);
+
+    // Apply independent quality override for Friend 1 ONLY (12 Mbps) without affecting Friend 2 (34 Mbps) or audio
+    await cHostBridge.setPeerQualityOverride(cFriend1Id, { maxBitrateKbps: 12_000 });
+    assert.equal(
+      fakeToF1.getVideoSender()!.getParameters().encodings[0].maxBitrate,
+      Math.round(computeConcurrencyScaledBitrateKbps(12_000, 2, 8_000) * 1000),
+      'Friend 1 independent bitrate override applied to Friend 1 sender only'
+    );
+    assert.equal(
+      fakeToF2.getVideoSender()!.getParameters().encodings[0].maxBitrate,
+      34_000_000,
+      'Friend 2 sender bitrate remained independent at 34 Mbps'
+    );
+    assert.notEqual(fakeToF1.getAudioSender()?.track ?? null, null, 'Audio track stays attached alongside video quality update');
+    assert.equal(fakeToF1.audioSetParametersCalls, 0, 'Audio sender remains untouched for A/V synchronization');
+
+    // Stop Friend 1 independently; Host + Friend 2 continue uninterrupted
+    cFriend1Bridge.stopSharing('user_stopped');
+    await waitUntil(
+      () =>
+        cFriend1Bridge.getSnapshot().isSharingLocal === false &&
+        cHostBridge.getSnapshot().incomingStreams.filter((s) => s.stream !== null).length === 1,
+      'Friend 1 stopped independently without disrupting Host (4K) or Friend 2 (1080p)'
+    );
+    console.log('  [PASS] 4C.3. Two & three simultaneous publishers, concurrency headroom, independent per-peer bitrate & A/V sync verified');
+
+    // 4C.4: Network degradation & recovery via getStats() ABR + negotiated diagnostics
+    const f2PeerInstance = cHostBridge.getPeerInstance(cFriend2Id)!;
+    // Healthy 4K60 baseline stats
+    fakeToF2.mockStatsMap = new Map<string, Record<string, unknown>>([
+      ['codec-h264', { type: 'codec', id: 'codec-h264', mimeType: 'video/H264' }],
+      ['pair-1', { type: 'candidate-pair', state: 'succeeded', nominated: true, availableOutgoingBitrate: 60_000_000, currentRoundTripTime: 0.012 }],
+      ['out-1', { type: 'outbound-rtp', kind: 'video', codecId: 'codec-h264', bytesSent: 4_500_000, timestamp: 1000, framesEncoded: 60, frameWidth: 3840, frameHeight: 2160, framesPerSecond: 60, qualityLimitationReason: 'none' }],
+    ]);
+    const baselineSample = await f2PeerInstance.sampleAndAdaptStats(10_000);
+    assert.equal(baselineSample.outbound.resolution, '3840×2160');
+    assert.equal(baselineSample.outbound.codecMimeType, 'H264');
+    assert.equal(baselineSample.outbound.adaptationStatus, 'target');
+    assert.equal(baselineSample.outbound.targetBitrateKbps, 34_000);
+
+    // Inject severe bandwidth drop & packet loss -> ABR must step down maxBitrate automatically
+    fakeToF2.mockStatsMap = new Map<string, Record<string, unknown>>([
+      ['codec-h264', { type: 'codec', id: 'codec-h264', mimeType: 'video/H264' }],
+      ['pair-1', { type: 'candidate-pair', state: 'succeeded', nominated: true, availableOutgoingBitrate: 9_000_000, currentRoundTripTime: 0.28 }],
+      ['out-1', { type: 'outbound-rtp', kind: 'video', codecId: 'codec-h264', bytesSent: 5_600_000, timestamp: 2000, framesEncoded: 118, frameWidth: 3840, frameHeight: 2160, framesPerSecond: 58, qualityLimitationReason: 'bandwidth' }],
+      ['rem-in-1', { type: 'remote-inbound-rtp', kind: 'video', fractionLost: 0.05, jitter: 0.014, roundTripTime: 0.28 }],
+    ]);
+    const degradedSample = await f2PeerInstance.sampleAndAdaptStats(12_000);
+    assert.equal(degradedSample.outbound.adaptationStatus, 'degraded');
+    assert.equal(degradedSample.outbound.qualityLimitationReason, 'bandwidth');
+    assert.equal((degradedSample.outbound.targetBitrateKbps ?? 99_999) < 34_000, true, 'ABR lowered target bitrate on bandwidth drop');
+    assert.equal(
+      (fakeToF2.getVideoSender()!.getParameters().encodings[0].maxBitrate ?? 99_999_000) < 34_000_000,
+      true,
+      'RTCRtpSender.setParameters maxBitrate updated cleanly on degradation'
+    );
+
+    // Inject recovered network conditions -> ABR must recover smoothly back to target ceiling (34_000 kbps)
+    let simTime = 14_000;
+    let recoveredBitrate = degradedSample.outbound.targetBitrateKbps ?? 0;
+    let recoveredStatus: string | null | undefined = degradedSample.outbound.adaptationStatus;
+    for (let step = 0; step < 16; step += 1) {
+      simTime += 2000;
+      fakeToF2.mockStatsMap = new Map<string, Record<string, unknown>>([
+        ['codec-h264', { type: 'codec', id: 'codec-h264', mimeType: 'video/H264' }],
+        ['pair-1', { type: 'candidate-pair', state: 'succeeded', nominated: true, availableOutgoingBitrate: 75_000_000, currentRoundTripTime: 0.011 }],
+        ['out-1', { type: 'outbound-rtp', kind: 'video', codecId: 'codec-h264', bytesSent: 5_600_000 + (step + 1) * 4_200_000, timestamp: 3000 + step * 1000, framesEncoded: 120 + (step + 1) * 60, frameWidth: 3840, frameHeight: 2160, framesPerSecond: 60, qualityLimitationReason: 'none' }],
+        ['rem-in-1', { type: 'remote-inbound-rtp', kind: 'video', fractionLost: 0.001, jitter: 0.002, roundTripTime: 0.011 }],
+      ]);
+      const sample = await f2PeerInstance.sampleAndAdaptStats(simTime);
+      recoveredBitrate = sample.outbound.targetBitrateKbps ?? 0;
+      recoveredStatus = sample.outbound.adaptationStatus;
+      if (recoveredStatus === 'target' && recoveredBitrate >= 34_000) {
+        break;
+      }
+    }
+    assert.equal(recoveredStatus, 'target', 'ABR smoothly restored target status after network recovery');
+    assert.equal(recoveredBitrate, 34_000, 'ABR restored full 34 Mbps ceiling for 2 active peers');
+    assert.equal(fakeToF2.getVideoSender()!.getParameters().encodings[0].maxBitrate, 34_000_000);
+    console.log('  [PASS] 4C.4. getStats() ABR network degradation step-down, smooth recovery & negotiated resolution/codec diagnostics verified');
+
+    cHostBridge.dispose();
+    cFriend1Bridge.dispose();
+    cFriend2Bridge.dispose();
+    await fetch(`${baseUrl}/api/rooms/${room4cId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${room4cCreated.hostToken}` },
+    });
+    await cHostWs.close();
+    await cFriend1Ws.close();
+    await cFriend2Ws.close();
+
     // Rate limiting check (exceed 40 window attempts on lookup)
     let hit429 = false;
     for (let i = 0; i < 45; i += 1) {
@@ -2025,7 +2642,7 @@ async function main() {
     assert.equal(hit429, true, 'Rate limiter must return HTTP 429 after exceeding window limit');
     console.log('  [PASS] Extra. Room lookup rate limiting verified (HTTP 429)');
 
-    console.log('\nAll Stage 3 (14) + Stage 4A (10) + Stage 4B (10) backend, Perfect Negotiation, and multi-peer tests passed!');
+    console.log('\nAll Stage 3 (14) + Stage 4A (10) + Stage 4B (10) + Stage 4C (4) backend, WebRTC quality, ABR & multi-peer tests passed!');
   } finally {
     await instance.close();
   }

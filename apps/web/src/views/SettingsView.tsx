@@ -126,6 +126,18 @@ export function SettingsView({
                 </dd>
               </div>
               <div className="flex items-center justify-between">
+                <dt className="text-[#64748B]">Target Max Bitrate</dt>
+                <dd className="font-mono font-medium text-[#172033] tabular-metrics">
+                  {((preferences.maxBitrateKbps ?? 10_000) / 1000).toFixed(1)} Mbps
+                </dd>
+              </div>
+              <div className="flex items-center justify-between">
+                <dt className="text-[#64748B]">Adaptive Bitrate (ABR)</dt>
+                <dd className="font-mono font-medium text-[#172033]">
+                  {preferences.adaptiveBitrate !== false ? 'Auto (getStats)' : 'Fixed Cap'}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between">
                 <dt className="text-[#64748B]">Codec Policy</dt>
                 <dd className="font-mono font-medium text-[#172033]">
                   {preferences.codecPreference}
@@ -140,11 +152,13 @@ export function SettingsView({
                   targetFps: 60,
                   codecPreference: 'H264',
                   includeAudio: false,
+                  maxBitrateKbps: 10_000,
+                  adaptiveBitrate: true,
                 });
                 onLogEvent(
                   'ui',
                   'Capture defaults restored',
-                  'Reset capture defaults to 1080p @ 60 FPS target, H264 preferred.'
+                  'Reset capture defaults to 1080p @ 60 FPS target, 10 Mbps, H264 preferred.'
                 );
               }}
               className="min-h-[38px] rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"

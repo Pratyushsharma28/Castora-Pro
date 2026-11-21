@@ -18,15 +18,21 @@ export type WebRtcConnectionPhase =
   | 'failed'
   | 'disconnected';
 
-export type ResolutionPresetId = '1080p' | '720p' | 'native';
+export type ResolutionPresetId = '720p' | '1080p' | '1440p' | '4k' | 'native';
 export type FrameRateTarget = 60 | 30;
-export type CodecPreference = 'H264' | 'AUTO';
+export type CodecPreference = 'H264' | 'VP9' | 'AV1' | 'AUTO';
+export type QualityLimitationReason = 'none' | 'cpu' | 'bandwidth' | 'other';
+export type AdaptationStatus = 'target' | 'degraded' | 'recovering';
 
 export interface CapturePreferences {
   resolution: ResolutionPresetId;
   targetFps: FrameRateTarget;
   codecPreference: CodecPreference;
   includeAudio: boolean;
+  /** Optional target video bitrate in kbps; defaults per resolution/FPS preset */
+  maxBitrateKbps?: number;
+  /** Enables getStats()-driven adaptive bitrate & recovery (default: true) */
+  adaptiveBitrate?: boolean;
 }
 
 export interface NetworkPreferences {
@@ -64,6 +70,13 @@ export interface StreamTelemetrySnapshot {
   jitterMs: number | null;
   droppedFrames: number | null;
   connectionState: WebRtcConnectionPhase;
+  configuredMaxBitrateKbps?: number | null;
+  targetBitrateKbps?: number | null;
+  availableOutgoingBitrateKbps?: number | null;
+  qualityLimitationReason?: QualityLimitationReason | null;
+  codecMimeType?: string | null;
+  scaleResolutionDownBy?: number | null;
+  adaptationStatus?: AdaptationStatus | null;
 }
 
 export interface ConnectedReceiverSlot {

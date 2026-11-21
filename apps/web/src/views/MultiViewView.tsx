@@ -15,6 +15,11 @@ import {
   VolumeX,
 } from 'lucide-react';
 import type { PairingLifecycleStatus, RoomSnapshot } from '../services/backendClient';
+import {
+  VIDEO_QUALITY_PRESETS,
+  getPresetDefaultBitrateKbps,
+  resolveQualityTarget,
+} from '../services/videoQualityService';
 import type { WebRtcSessionSnapshot } from '../services/webrtcSignalingBridge';
 import type { CastoraPlatform } from '../types/protocol';
 import type {
@@ -41,6 +46,11 @@ interface MultiViewViewProps {
   deviceName?: string;
   preferences?: CapturePreferences;
   onUpdatePreferences?: (next: CapturePreferences) => void;
+  onSetPeerQualityOverride?: (
+    peerDeviceId: string,
+    override: Partial<CapturePreferences> | null
+  ) => void;
+  qualityNotice?: string | null;
   activeRoom?: RoomSnapshot | null;
   activeRoomRole?: 'host' | 'receiver' | null;
   pairingStatus?: PairingLifecycleStatus;
@@ -77,8 +87,10 @@ const LAYOUT_OPTIONS: { id: MultiViewLayout; label: string; count: number }[] = 
 ];
 
 const RESOLUTION_OPTIONS: { id: ResolutionPresetId; label: string }[] = [
-  { id: '1080p', label: '1080p' },
   { id: '720p', label: '720p' },
+  { id: '1080p', label: '1080p' },
+  { id: '1440p', label: '1440p' },
+  { id: '4k', label: '4K' },
   { id: 'native', label: 'Native' },
 ];
 
@@ -89,6 +101,8 @@ const FPS_OPTIONS: { value: FrameRateTarget; label: string }[] = [
 
 const CODEC_OPTIONS: { value: CodecPreference; label: string }[] = [
   { value: 'H264', label: 'H.264' },
+  { value: 'VP9', label: 'VP9' },
+  { value: 'AV1', label: 'AV1' },
   { value: 'AUTO', label: 'Auto' },
 ];
 
@@ -120,6 +134,8 @@ export function MultiViewView({
   deviceName = 'My Device',
   preferences,
   onUpdatePreferences,
+  onSetPeerQualityOverride,
+  qualityNotice = null,
   activeRoom = null,
   activeRoomRole = null,
   webrtcState,
@@ -413,6 +429,14 @@ export function MultiViewView({
                   {slot.telemetry.resolution ?? '—'}
                 </strong>
               </span>
+              {slot.telemetry.codecMimeType && (
+                <span>
+                  Codec:{' '}
+                  <strong className="font-semibold text-[#172033]">
+                    {slot.telemetry.codecMimeType}
+                  </strong>
+                </span>
+              )}
               <span>
                 RTT:{' '}
                 <strong className="font-semibold text-[#172033]">
@@ -627,87 +651,67 @@ export function MultiViewView({
         </div>
       )}
 
-      {(shareError || webrtcState?.errorMessage || wallNotice) && (
+      {(shareError || webrtcState?.errorMessage || wallNotice || qualityNotice) && (
         <div
           role="alert"
           className="rounded-xl border border-[#DC2626]/30 bg-[#FEF2F2] px-4 py-3 text-xs text-[#B91C1C]"
         >
-          {shareError ?? webrtcState?.errorMessage ?? wallNotice}
+          {shareError ?? webrtcState?.errorMessage ?? qualityNotice ?? wallNotice}
         </div>
       )}
 
       {/* Expandable Share Settings & Outbound Preview Drawer */}
-      {showSharePanel && preferences && onUpdatePreferences && (
-        <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-5">
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-            <div className="space-y-4 lg:col-span-6">
-              <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
-                <h2 className="text-sm font-semibold text-[#172033]">
-                  Outbound Capture &amp; Targets
-                </h2>
-                <span className="text-xs text-[#64748B]">
-                  {connectedPeers.length} {connectedPeers.length === 1 ? 'peer' : 'peers'} connected
-                </span>
-              </div>
+      {showSharePanel && preferences && onUpdatePreferences && (() => {
+        const resolvedQuality = resolveQualityTarget(preferences, {
+          width: webrtcState?.localCaptureMeta?.width,
+          height: webrtcState?.localCaptureMeta?.height,
+        });
+        const presetSpec = VIDEO_QUALITY_PRESETS[preferences.resolution];
+        const adaptiveEnabled = preferences.adaptiveBitrate !== false;
 
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <div>
-                  <div className="mb-1.5 text-xs font-medium text-[#64748B]">Resolution</div>
-                  <div className="flex rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5">
-                    {RESOLUTION_OPTIONS.map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() =>
-                          onUpdatePreferences({ ...preferences, resolution: opt.id })
-                        }
-                        className={`flex-1 rounded-md py-1.5 text-xs font-medium ${
-                          preferences.resolution === opt.id
-                            ? 'bg-white text-[#172033] shadow-xs'
-                            : 'text-[#64748B] hover:text-[#172033]'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
+        return (
+          <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-5">
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+              <div className="space-y-4 lg:col-span-6">
+                <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
+                  <h2 className="text-sm font-semibold text-[#172033]">
+                    Outbound Capture &amp; Quality
+                  </h2>
+                  <span className="text-xs text-[#64748B] tabular-metrics">
+                    {connectedPeers.length} {connectedPeers.length === 1 ? 'peer' : 'peers'} connected
+                  </span>
                 </div>
 
-                <div>
-                  <div className="mb-1.5 text-xs font-medium text-[#64748B]">Frame Rate</div>
-                  <div className="flex rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5">
-                    {FPS_OPTIONS.map((opt) => (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        onClick={() =>
-                          onUpdatePreferences({ ...preferences, targetFps: opt.value })
-                        }
-                        className={`flex-1 rounded-md py-1.5 text-xs font-medium tabular-metrics ${
-                          preferences.targetFps === opt.value
-                            ? 'bg-white text-[#172033] shadow-xs'
-                            : 'text-[#64748B] hover:text-[#172033]'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <div className="mb-1.5 text-xs font-medium text-[#64748B]">Codec &amp; Audio</div>
-                  <div className="flex gap-1.5">
-                    <div className="flex flex-1 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5">
-                      {CODEC_OPTIONS.map((opt) => (
+                <div className="space-y-3">
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between text-xs">
+                      <span className="font-medium text-[#64748B]">Resolution Preset</span>
+                      <span className="text-[#64748B] tabular-metrics">
+                        {presetSpec.shortDetail} · Suggested {presetSpec.recommendedRangeLabel}
+                      </span>
+                    </div>
+                    <div className="flex rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5">
+                      {RESOLUTION_OPTIONS.map((opt) => (
                         <button
-                          key={opt.value}
+                          key={opt.id}
                           type="button"
-                          onClick={() =>
-                            onUpdatePreferences({ ...preferences, codecPreference: opt.value })
-                          }
-                          className={`flex-1 rounded-md py-1.5 text-xs font-medium ${
-                            preferences.codecPreference === opt.value
+                          onClick={() => {
+                            const nextBitrate = getPresetDefaultBitrateKbps(
+                              opt.id,
+                              preferences.targetFps,
+                              {
+                                width: webrtcState?.localCaptureMeta?.width,
+                                height: webrtcState?.localCaptureMeta?.height,
+                              }
+                            );
+                            onUpdatePreferences({
+                              ...preferences,
+                              resolution: opt.id,
+                              maxBitrateKbps: nextBitrate,
+                            });
+                          }}
+                          className={`flex-1 rounded-md py-1.5 text-xs font-medium whitespace-nowrap ${
+                            preferences.resolution === opt.id
                               ? 'bg-white text-[#172033] shadow-xs'
                               : 'text-[#64748B] hover:text-[#172033]'
                           }`}
@@ -716,31 +720,141 @@ export function MultiViewView({
                         </button>
                       ))}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() =>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <div className="mb-1.5 text-xs font-medium text-[#64748B]">Frame Rate</div>
+                      <div className="flex rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5">
+                        {FPS_OPTIONS.map((opt) => (
+                          <button
+                            key={opt.value}
+                            type="button"
+                            onClick={() =>
+                              onUpdatePreferences({
+                                ...preferences,
+                                targetFps: opt.value,
+                                maxBitrateKbps: getPresetDefaultBitrateKbps(
+                                  preferences.resolution,
+                                  opt.value,
+                                  {
+                                    width: webrtcState?.localCaptureMeta?.width,
+                                    height: webrtcState?.localCaptureMeta?.height,
+                                  }
+                                ),
+                              })
+                            }
+                            className={`flex-1 rounded-md py-1.5 text-xs font-medium tabular-metrics ${
+                              preferences.targetFps === opt.value
+                                ? 'bg-white text-[#172033] shadow-xs'
+                                : 'text-[#64748B] hover:text-[#172033]'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="mb-1.5 text-xs font-medium text-[#64748B]">Codec &amp; Audio</div>
+                      <div className="flex gap-1.5">
+                        <div className="flex flex-1 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5">
+                          {CODEC_OPTIONS.map((opt) => (
+                            <button
+                              key={opt.value}
+                              type="button"
+                              onClick={() =>
+                                onUpdatePreferences({ ...preferences, codecPreference: opt.value })
+                              }
+                              className={`flex-1 rounded-md py-1.5 text-xs font-medium ${
+                                preferences.codecPreference === opt.value
+                                  ? 'bg-white text-[#172033] shadow-xs'
+                                  : 'text-[#64748B] hover:text-[#172033]'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdatePreferences({
+                              ...preferences,
+                              includeAudio: !preferences.includeAudio,
+                            })
+                          }
+                          title="Include system or tab audio"
+                          className={`inline-flex items-center gap-1 rounded-lg border px-2.5 text-xs font-medium whitespace-nowrap ${
+                            preferences.includeAudio
+                              ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                              : 'border-[#E2E8F0] bg-white text-[#64748B]'
+                          }`}
+                        >
+                          {preferences.includeAudio ? (
+                            <Volume2 className="h-3.5 w-3.5" aria-hidden="true" />
+                          ) : (
+                            <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
+                          )}
+                          <span>Audio</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Configurable Video Bitrate & Adaptive Bitrate Control */}
+                  <div className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <label htmlFor="mv-bitrate-range" className="font-medium text-[#172033]">
+                        Target Max Bitrate
+                      </label>
+                      <div className="flex items-center gap-2.5 tabular-metrics">
+                        <span className="font-mono font-semibold text-[#2563EB]">
+                          {(resolvedQuality.configuredMaxBitrateKbps / 1000).toFixed(1)} Mbps
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdatePreferences({
+                              ...preferences,
+                              adaptiveBitrate: !adaptiveEnabled,
+                            })
+                          }
+                          className={`rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                            adaptiveEnabled
+                              ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                              : 'border-[#E2E8F0] bg-white text-[#64748B]'
+                          }`}
+                        >
+                          {adaptiveEnabled ? 'Adaptive ABR: Auto' : 'Adaptive ABR: Fixed'}
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      id="mv-bitrate-range"
+                      type="range"
+                      min={presetSpec.minBitrateKbps}
+                      max={presetSpec.maxBitrateKbps}
+                      step={500}
+                      value={resolvedQuality.configuredMaxBitrateKbps}
+                      onChange={(e) =>
                         onUpdatePreferences({
                           ...preferences,
-                          includeAudio: !preferences.includeAudio,
+                          maxBitrateKbps: Number(e.target.value),
                         })
                       }
-                      title="Include system or tab audio"
-                      className={`inline-flex items-center gap-1 rounded-lg border px-2.5 text-xs font-medium ${
-                        preferences.includeAudio
-                          ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
-                          : 'border-[#E2E8F0] bg-white text-[#64748B]'
-                      }`}
-                    >
-                      {preferences.includeAudio ? (
-                        <Volume2 className="h-3.5 w-3.5" aria-hidden="true" />
-                      ) : (
-                        <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
-                      )}
-                      <span>Audio</span>
-                    </button>
+                      className="h-1.5 w-full cursor-pointer accent-[#2563EB]"
+                    />
+                    <div className="flex items-center justify-between text-[11px] text-[#64748B] tabular-metrics">
+                      <span>{(presetSpec.minBitrateKbps / 1000).toFixed(1)} Mbps</span>
+                      <span>
+                        1080p60: 8–12M · 1440p60: 15–25M · 4K60: 30–50M
+                      </span>
+                      <span>{(presetSpec.maxBitrateKbps / 1000).toFixed(0)} Mbps</span>
+                    </div>
                   </div>
                 </div>
-              </div>
 
               {/* Target Participant Selection */}
               <div className="space-y-2">
@@ -818,6 +932,67 @@ export function MultiViewView({
                     </span>
                   </button>
                 )}
+
+                {/* Per-Outgoing Stream Diagnostics & Independent Bitrate Control */}
+                {activeOutboundTargets.length > 0 && onSetPeerQualityOverride && (
+                  <div className="pt-2 space-y-1.5">
+                    <div className="text-xs font-medium text-[#64748B]">
+                      Per-Stream Quality (Independent per Peer)
+                    </div>
+                    <div className="divide-y divide-[#E2E8F0] rounded-lg border border-[#E2E8F0] bg-[#F8FAFC]">
+                      {activeOutboundTargets.map((out) => {
+                        const overrideCap = out.qualityOverride?.maxBitrateKbps ?? null;
+                        return (
+                          <div
+                            key={out.targetDeviceId}
+                            className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs"
+                          >
+                            <div className="min-w-0">
+                              <div className="truncate font-medium text-[#172033]">
+                                {out.targetName}
+                              </div>
+                              <div className="text-[11px] text-[#64748B] tabular-metrics">
+                                {out.telemetry.resolution ?? 'Negotiating'} ·{' '}
+                                {formatBitrate(out.telemetry.bitrateKbps)} /{' '}
+                                {formatBitrate(out.telemetry.targetBitrateKbps ?? null)}
+                                {out.telemetry.codecMimeType ? ` · ${out.telemetry.codecMimeType}` : ''}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              {[
+                                { label: 'Global', kbps: null },
+                                { label: '10M', kbps: 10_000 },
+                                { label: '20M', kbps: 20_000 },
+                                { label: '40M', kbps: 40_000 },
+                              ].map((opt) => {
+                                const isActive = overrideCap === opt.kbps;
+                                return (
+                                  <button
+                                    key={opt.label}
+                                    type="button"
+                                    onClick={() =>
+                                      onSetPeerQualityOverride(
+                                        out.targetDeviceId,
+                                        opt.kbps === null ? null : { maxBitrateKbps: opt.kbps }
+                                      )
+                                    }
+                                    className={`rounded-md border px-2 py-0.5 text-[11px] font-medium tabular-metrics ${
+                                      isActive
+                                        ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                                        : 'border-[#E2E8F0] bg-white text-[#64748B] hover:text-[#172033]'
+                                    }`}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -858,7 +1033,8 @@ export function MultiViewView({
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Primary Received Video Stage */}
       <div

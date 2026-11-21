@@ -6,6 +6,7 @@ export type ScreenCaptureErrorCode =
   | 'PERMISSION_DENIED'
   | 'NO_VIDEO_TRACK'
   | 'SOURCE_UNREADABLE'
+  | 'OVERCONSTRAINED'
   | 'ABORTED'
   | 'UNKNOWN';
 
@@ -29,14 +30,20 @@ export interface CapturedScreenSession {
   stop: () => void;
 }
 
-export function buildDisplayMediaConstraints(
+export function buildVideoTrackConstraints(
   preferences: CapturePreferences
-): DisplayMediaStreamOptions {
+): MediaTrackConstraints {
   const videoConstraints: MediaTrackConstraints = {
-    frameRate: { ideal: preferences.targetFps },
+    frameRate: { ideal: preferences.targetFps, max: preferences.targetFps },
   };
 
-  if (preferences.resolution === '1080p') {
+  if (preferences.resolution === '4k') {
+    videoConstraints.width = { ideal: 3840 };
+    videoConstraints.height = { ideal: 2160 };
+  } else if (preferences.resolution === '1440p') {
+    videoConstraints.width = { ideal: 2560 };
+    videoConstraints.height = { ideal: 1440 };
+  } else if (preferences.resolution === '1080p') {
     videoConstraints.width = { ideal: 1920 };
     videoConstraints.height = { ideal: 1080 };
   } else if (preferences.resolution === '720p') {
@@ -44,10 +51,73 @@ export function buildDisplayMediaConstraints(
     videoConstraints.height = { ideal: 720 };
   }
 
+  return videoConstraints;
+}
+
+export function buildDisplayMediaConstraints(
+  preferences: CapturePreferences
+): DisplayMediaStreamOptions {
   return {
-    video: videoConstraints,
+    video: buildVideoTrackConstraints(preferences),
     audio: preferences.includeAudio,
   };
+}
+
+export async function applyCaptureTrackConstraints(
+  session: CapturedScreenSession,
+  nextPreferences: CapturePreferences
+): Promise<{
+  applied: boolean;
+  actualWidth: number | null;
+  actualHeight: number | null;
+  actualFrameRate: number | null;
+  errorMessage: string | null;
+}> {
+  const track = session.videoTrack;
+  if (!track || typeof track.applyConstraints !== 'function') {
+    const settings = track?.getSettings?.() ?? {};
+    return {
+      applied: false,
+      actualWidth: typeof settings.width === 'number' ? settings.width : session.actualWidth,
+      actualHeight: typeof settings.height === 'number' ? settings.height : session.actualHeight,
+      actualFrameRate:
+        typeof settings.frameRate === 'number' ? settings.frameRate : session.actualFrameRate,
+      errorMessage: 'Track constraint updates are not supported in this browser.',
+    };
+  }
+
+  try {
+    await track.applyConstraints(buildVideoTrackConstraints(nextPreferences));
+    const settings = track.getSettings();
+    const actualWidth = typeof settings.width === 'number' ? settings.width : session.actualWidth;
+    const actualHeight =
+      typeof settings.height === 'number' ? settings.height : session.actualHeight;
+    const actualFrameRate =
+      typeof settings.frameRate === 'number' ? settings.frameRate : session.actualFrameRate;
+
+    session.actualWidth = actualWidth;
+    session.actualHeight = actualHeight;
+    session.actualFrameRate = actualFrameRate;
+
+    return {
+      applied: true,
+      actualWidth,
+      actualHeight,
+      actualFrameRate,
+      errorMessage: null,
+    };
+  } catch (err) {
+    const mapped = mapDisplayCaptureError(err);
+    const settings = track.getSettings();
+    return {
+      applied: false,
+      actualWidth: typeof settings.width === 'number' ? settings.width : session.actualWidth,
+      actualHeight: typeof settings.height === 'number' ? settings.height : session.actualHeight,
+      actualFrameRate:
+        typeof settings.frameRate === 'number' ? settings.frameRate : session.actualFrameRate,
+      errorMessage: mapped.message,
+    };
+  }
 }
 
 export function mapDisplayCaptureError(err: unknown): ScreenCaptureError {
@@ -81,6 +151,12 @@ export function mapDisplayCaptureError(err: unknown): ScreenCaptureError {
       return new ScreenCaptureError(
         'SOURCE_UNREADABLE',
         'Browser could not read the selected screen source. Check macOS System Settings -> Privacy & Security -> Screen Recording.'
+      );
+    }
+    if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') {
+      return new ScreenCaptureError(
+        'OVERCONSTRAINED',
+        'The selected display or encoder cannot satisfy the requested resolution or frame rate. Previous working settings were kept.'
       );
     }
     if (name === 'SecurityError') {

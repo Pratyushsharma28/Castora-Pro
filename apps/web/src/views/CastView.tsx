@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, MonitorPlay, Radio, Square, Volume2, VolumeX } from 'lucide-react';
 import type { PairingLifecycleStatus, RoomSnapshot } from '../services/backendClient';
+import {
+  VIDEO_QUALITY_PRESETS,
+  getPresetDefaultBitrateKbps,
+  resolveQualityTarget,
+} from '../services/videoQualityService';
 import type { WebRtcSessionSnapshot } from '../services/webrtcSignalingBridge';
 import type { CastoraPlatform } from '../types/protocol';
 import type {
@@ -46,8 +51,10 @@ interface PublishTargetOption {
 }
 
 const RESOLUTION_OPTIONS: { id: ResolutionPresetId; label: string; detail: string }[] = [
-  { id: '1080p', label: '1080p', detail: '1920 × 1080' },
   { id: '720p', label: '720p', detail: '1280 × 720' },
+  { id: '1080p', label: '1080p', detail: '1920 × 1080' },
+  { id: '1440p', label: '1440p', detail: '2560 × 1440' },
+  { id: '4k', label: '4K', detail: '3840 × 2160' },
   { id: 'native', label: 'Native', detail: 'Display bounds' },
 ];
 
@@ -58,6 +65,8 @@ const FPS_OPTIONS: { value: FrameRateTarget; label: string }[] = [
 
 const CODEC_OPTIONS: { value: CodecPreference; label: string }[] = [
   { value: 'H264', label: 'H.264 Preferred' },
+  { value: 'VP9', label: 'VP9 Screen' },
+  { value: 'AV1', label: 'AV1 High-Eff' },
   { value: 'AUTO', label: 'Auto Negotiate' },
 ];
 
@@ -252,7 +261,7 @@ export function CastView({
 
             <fieldset className="space-y-2">
               <legend className="text-xs font-medium text-[#64748B]">Resolution Target</legend>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                 {RESOLUTION_OPTIONS.map((opt) => {
                   const selected = preferences.resolution === opt.id;
                   return (
@@ -260,7 +269,18 @@ export function CastView({
                       key={opt.id}
                       type="button"
                       onClick={() => {
-                        onUpdatePreferences({ ...preferences, resolution: opt.id });
+                        onUpdatePreferences({
+                          ...preferences,
+                          resolution: opt.id,
+                          maxBitrateKbps: getPresetDefaultBitrateKbps(
+                            opt.id,
+                            preferences.targetFps,
+                            {
+                              width: webrtcState.localCaptureMeta?.width,
+                              height: webrtcState.localCaptureMeta?.height,
+                            }
+                          ),
+                        });
                         onLogEvent('ui', 'Sender resolution target updated', `Target set to ${opt.label}.`);
                       }}
                       className={`min-h-[44px] rounded-[10px] border px-3 py-2 text-left transition-colors ${
@@ -287,7 +307,18 @@ export function CastView({
                       key={opt.value}
                       type="button"
                       onClick={() => {
-                        onUpdatePreferences({ ...preferences, targetFps: opt.value });
+                        onUpdatePreferences({
+                          ...preferences,
+                          targetFps: opt.value,
+                          maxBitrateKbps: getPresetDefaultBitrateKbps(
+                            preferences.resolution,
+                            opt.value,
+                            {
+                              width: webrtcState.localCaptureMeta?.width,
+                              height: webrtcState.localCaptureMeta?.height,
+                            }
+                          ),
+                        });
                         onLogEvent('ui', 'Sender FPS target updated', `Target set to ${opt.value} FPS.`);
                       }}
                       className={`min-h-[42px] rounded-[10px] border px-3 py-2 text-left text-xs font-semibold tabular-metrics transition-colors ${
@@ -303,10 +334,67 @@ export function CastView({
               </div>
             </fieldset>
 
+            {(() => {
+              const presetSpec = VIDEO_QUALITY_PRESETS[preferences.resolution];
+              const resolvedQuality = resolveQualityTarget(preferences, {
+                width: webrtcState.localCaptureMeta?.width,
+                height: webrtcState.localCaptureMeta?.height,
+              });
+              const adaptiveEnabled = preferences.adaptiveBitrate !== false;
+              return (
+                <div className="rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] p-3 space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <label htmlFor="cast-bitrate-range" className="font-medium text-[#172033]">
+                      Target Max Bitrate
+                    </label>
+                    <div className="flex items-center gap-2 tabular-metrics">
+                      <span className="font-mono font-semibold text-[#2563EB]">
+                        {(resolvedQuality.configuredMaxBitrateKbps / 1000).toFixed(1)} Mbps
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onUpdatePreferences({
+                            ...preferences,
+                            adaptiveBitrate: !adaptiveEnabled,
+                          })
+                        }
+                        className={`rounded-md border px-2 py-0.5 text-[11px] font-medium ${
+                          adaptiveEnabled
+                            ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                            : 'border-[#E2E8F0] bg-white text-[#64748B]'
+                        }`}
+                      >
+                        {adaptiveEnabled ? 'ABR Auto' : 'Fixed'}
+                      </button>
+                    </div>
+                  </div>
+                  <input
+                    id="cast-bitrate-range"
+                    type="range"
+                    min={presetSpec.minBitrateKbps}
+                    max={presetSpec.maxBitrateKbps}
+                    step={500}
+                    value={resolvedQuality.configuredMaxBitrateKbps}
+                    onChange={(e) =>
+                      onUpdatePreferences({
+                        ...preferences,
+                        maxBitrateKbps: Number(e.target.value),
+                      })
+                    }
+                    className="h-1.5 w-full cursor-pointer accent-[#2563EB]"
+                  />
+                  <div className="text-[11px] text-[#64748B] tabular-metrics">
+                    Suggested {presetSpec.label}: {presetSpec.recommendedRangeLabel}
+                  </div>
+                </div>
+              );
+            })()}
+
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <fieldset className="space-y-2">
                 <legend className="text-xs font-medium text-[#64748B]">Codec Policy</legend>
-                <div className="space-y-1.5">
+                <div className="grid grid-cols-2 gap-1.5">
                   {CODEC_OPTIONS.map((opt) => {
                     const selected = preferences.codecPreference === opt.value;
                     return (
@@ -316,7 +404,7 @@ export function CastView({
                         onClick={() =>
                           onUpdatePreferences({ ...preferences, codecPreference: opt.value })
                         }
-                        className={`flex min-h-[40px] w-full items-center justify-between rounded-[10px] border px-3 text-xs font-medium transition-colors ${
+                        className={`flex min-h-[38px] items-center justify-center rounded-[10px] border px-2.5 text-xs font-medium transition-colors ${
                           selected
                             ? 'border-[#2563EB] bg-[#EFF6FF] text-[#172033]'
                             : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#64748B] hover:text-[#172033]'

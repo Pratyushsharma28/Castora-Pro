@@ -7,10 +7,12 @@ import type {
 } from '../types/studio';
 import type { CastoraSignalingClient, RoomSnapshot } from './backendClient';
 import {
+  applyCaptureTrackConstraints,
   startScreenCapture,
   type CapturedScreenSession,
 } from './screenCaptureService';
 import { createEmptyTelemetry } from './streamStatsService';
+import { resolveQualityTarget } from './videoQualityService';
 import { CastoraWebRtcPeer } from './webrtcPeerService';
 
 export interface IncomingScreenEntry {
@@ -45,6 +47,7 @@ export interface OutboundPeerEntry {
   statusDetail: string | null;
   errorMessage: string | null;
   telemetry: StreamTelemetrySnapshot;
+  qualityOverride?: Partial<CapturePreferences> | null;
 }
 
 export interface WebRtcSessionSnapshot {
@@ -126,6 +129,7 @@ export class WebRtcSignalingBridge {
   private peers = new Map<string, CastoraWebRtcPeer>();
   private incomingMap = new Map<string, IncomingScreenEntry>();
   private outboundMap = new Map<string, OutboundPeerEntry>();
+  private peerQualityOverrides = new Map<string, Partial<CapturePreferences>>();
   private statusDetail: string | null = null;
   private errorMessage: string | null = null;
 
@@ -153,6 +157,156 @@ export class WebRtcSignalingBridge {
 
   getPeerDeviceIds(): string[] {
     return Array.from(this.peers.keys());
+  }
+
+  getPeerInstance(peerDeviceId: string): CastoraWebRtcPeer | undefined {
+    return this.peers.get(peerDeviceId);
+  }
+
+  getEffectivePreferencesForPeer(peerDeviceId: string): CapturePreferences {
+    const override = this.peerQualityOverrides.get(peerDeviceId);
+    if (!override) return this.preferences;
+    return {
+      ...this.preferences,
+      ...override,
+    };
+  }
+
+  async setPeerQualityOverride(
+    peerDeviceId: string,
+    override: Partial<CapturePreferences> | null
+  ): Promise<void> {
+    if (!override || Object.keys(override).length === 0) {
+      this.peerQualityOverrides.delete(peerDeviceId);
+    } else {
+      const merged = {
+        ...(this.peerQualityOverrides.get(peerDeviceId) ?? {}),
+        ...override,
+      };
+      this.peerQualityOverrides.set(peerDeviceId, merged);
+    }
+
+    const outEntry = this.outboundMap.get(peerDeviceId);
+    if (outEntry) {
+      outEntry.qualityOverride = this.peerQualityOverrides.get(peerDeviceId) ?? null;
+      this.outboundMap.set(peerDeviceId, outEntry);
+    }
+
+    const peer = this.peers.get(peerDeviceId);
+    if (peer && peer.hasOutboundStream()) {
+      const effectivePrefs = this.getEffectivePreferencesForPeer(peerDeviceId);
+      await peer.updateEncodingPreferences(
+        effectivePrefs,
+        Math.max(1, this.outboundMap.size)
+      );
+      const target = resolveQualityTarget(effectivePrefs, {
+        width: this.captureSession?.actualWidth,
+        height: this.captureSession?.actualHeight,
+      });
+      if (outEntry) {
+        outEntry.telemetry = {
+          ...outEntry.telemetry,
+          configuredMaxBitrateKbps: target.configuredMaxBitrateKbps,
+          targetBitrateKbps: target.configuredMaxBitrateKbps,
+        };
+        this.outboundMap.set(peerDeviceId, outEntry);
+      }
+      this.callbacks.onLogEvent(
+        'webrtc',
+        `Updated stream quality for ${outEntry?.targetName ?? peerDeviceId}`,
+        `Bitrate cap ${(target.configuredMaxBitrateKbps / 1000).toFixed(1)} Mbps · ${effectivePrefs.targetFps} FPS · ABR=${target.adaptiveEnabled ? 'on' : 'off'}`
+      );
+    }
+    this.emit();
+  }
+
+  async applyCapturePreferencesUpdate(nextPreferences: CapturePreferences): Promise<{
+    applied: boolean;
+    fallbackUsed: boolean;
+    notice: string | null;
+    appliedPreferences: CapturePreferences;
+  }> {
+    const previousPrefs = this.preferences;
+    const resolutionOrFpsChanged =
+      previousPrefs.resolution !== nextPreferences.resolution ||
+      previousPrefs.targetFps !== nextPreferences.targetFps;
+
+    let notice: string | null = null;
+
+    if (this.captureSession && resolutionOrFpsChanged) {
+      const constraintResult = await applyCaptureTrackConstraints(
+        this.captureSession,
+        nextPreferences
+      );
+
+      if (!constraintResult.applied) {
+        this.errorMessage = constraintResult.errorMessage;
+        this.callbacks.onLogEvent(
+          'error',
+          'Capture constraint update failed',
+          constraintResult.errorMessage ?? 'Kept previous working capture settings.'
+        );
+        this.emit();
+        return {
+          applied: false,
+          fallbackUsed: true,
+          notice:
+            constraintResult.errorMessage ??
+            'Requested resolution or frame rate is unsupported; kept previous settings.',
+          appliedPreferences: previousPrefs,
+        };
+      }
+
+      const requestedTarget = resolveQualityTarget(nextPreferences);
+      if (
+        nextPreferences.resolution !== 'native' &&
+        constraintResult.actualWidth &&
+        constraintResult.actualHeight &&
+        (constraintResult.actualWidth < requestedTarget.targetWidth ||
+          constraintResult.actualHeight < requestedTarget.targetHeight)
+      ) {
+        notice = `Selected source delivered ${constraintResult.actualWidth}×${constraintResult.actualHeight} instead of ${requestedTarget.targetWidth}×${requestedTarget.targetHeight}; streaming at actual captured resolution.`;
+        this.statusDetail = notice;
+        this.callbacks.onLogEvent('webrtc', 'Capture resolution capped by display surface', notice);
+      }
+    }
+
+    this.preferences = nextPreferences;
+    const activeCount = Math.max(1, this.outboundMap.size);
+
+    for (const peerId of Array.from(this.outboundMap.keys())) {
+      const peer = this.peers.get(peerId);
+      if (peer && peer.hasOutboundStream()) {
+        const effectivePrefs = this.getEffectivePreferencesForPeer(peerId);
+        await peer.updateEncodingPreferences(effectivePrefs, activeCount);
+        const outEntry = this.outboundMap.get(peerId);
+        const resolved = resolveQualityTarget(effectivePrefs, {
+          width: this.captureSession?.actualWidth,
+          height: this.captureSession?.actualHeight,
+        });
+        if (outEntry) {
+          outEntry.telemetry = {
+            ...outEntry.telemetry,
+            targetFps: effectivePrefs.targetFps,
+            configuredMaxBitrateKbps: resolved.configuredMaxBitrateKbps,
+            targetBitrateKbps: resolved.configuredMaxBitrateKbps,
+            resolution:
+              this.captureSession?.actualWidth && this.captureSession?.actualHeight
+                ? `${this.captureSession.actualWidth}×${this.captureSession.actualHeight}`
+                : outEntry.telemetry.resolution,
+          };
+          this.outboundMap.set(peerId, outEntry);
+        }
+      }
+    }
+
+    this.emit();
+    return {
+      applied: true,
+      fallbackUsed: false,
+      notice,
+      appliedPreferences: nextPreferences,
+    };
   }
 
   private resolveParticipantMeta(peerDeviceId: string): {
@@ -200,6 +354,10 @@ export class WebRtcSignalingBridge {
 
     const primaryOutbound = outboundPeers[0] ?? null;
     const primaryInbound = incomingStreams.find((i) => i.stream !== null) ?? incomingStreams[0] ?? null;
+    const resolvedGlobal = resolveQualityTarget(this.preferences, {
+      width: this.captureSession?.actualWidth,
+      height: this.captureSession?.actualHeight,
+    });
 
     const outboundTelemetry: StreamTelemetrySnapshot = primaryOutbound
       ? primaryOutbound.telemetry
@@ -210,6 +368,12 @@ export class WebRtcSignalingBridge {
             this.captureSession?.actualWidth && this.captureSession?.actualHeight
               ? `${this.captureSession.actualWidth}×${this.captureSession.actualHeight}`
               : null,
+          configuredMaxBitrateKbps: this.captureSession
+            ? resolvedGlobal.configuredMaxBitrateKbps
+            : null,
+          targetBitrateKbps: this.captureSession
+            ? resolvedGlobal.configuredMaxBitrateKbps
+            : null,
         };
 
     const inboundTelemetry: StreamTelemetrySnapshot = primaryInbound
@@ -425,6 +589,7 @@ export class WebRtcSignalingBridge {
     }
     this.outboundMap.delete(peerDeviceId);
     this.incomingMap.delete(peerDeviceId);
+    this.peerQualityOverrides.delete(peerDeviceId);
   }
 
   updateContext(params: {
@@ -575,8 +740,11 @@ export class WebRtcSignalingBridge {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to start screen capture';
+      // Preserve any existing working capture session if re-capture/upgrade was cancelled or failed
       this.errorMessage = message;
-      this.statusDetail = message;
+      this.statusDetail = this.captureSession
+        ? `${message} Previous screen share remains active.`
+        : message;
       this.callbacks.onLogEvent('error', 'Screen capture failed', message);
       this.emit();
       throw err;
@@ -594,6 +762,19 @@ export class WebRtcSignalingBridge {
         ? `${session.actualWidth}×${session.actualHeight}`
         : null;
 
+    const requestedSpec = resolveQualityTarget(this.preferences);
+    if (
+      this.preferences.resolution !== 'native' &&
+      session.actualWidth &&
+      session.actualHeight &&
+      (session.actualWidth < requestedSpec.targetWidth ||
+        session.actualHeight < requestedSpec.targetHeight)
+    ) {
+      const capNotice = `Requested ${requestedSpec.preset.label} (${requestedSpec.targetWidth}×${requestedSpec.targetHeight}), display surface provided actual ${session.actualWidth}×${session.actualHeight}.`;
+      this.statusDetail = capNotice;
+      this.callbacks.onLogEvent('webrtc', 'Actual capture resolution reported', capNotice);
+    }
+
     this.callbacks.onLogEvent(
       'webrtc',
       'Local screen capture started',
@@ -602,9 +783,11 @@ export class WebRtcSignalingBridge {
 
     const targets = this.resolvePublishTargets(targetSelection);
     if (targets.length === 0) {
-      this.statusDetail = this.activeRoom
-        ? 'Local preview active. Waiting for an approved connected peer in this room.'
-        : 'Local preview active. Create or join a paired room to share your screen.';
+      if (!this.statusDetail) {
+        this.statusDetail = this.activeRoom
+          ? 'Local preview active. Waiting for an approved connected peer in this room.'
+          : 'Local preview active. Create or join a paired room to share your screen.';
+      }
       this.emit();
       return;
     }
@@ -619,7 +802,7 @@ export class WebRtcSignalingBridge {
     const errors: string[] = [];
     for (const peerId of targets) {
       try {
-        await this.publishActiveCaptureToPeer(peerId);
+        await this.publishActiveCaptureToPeer(peerId, targets.length);
       } catch (err) {
         errors.push(err instanceof Error ? err.message : `Failed connecting to ${peerId}`);
       }
@@ -643,11 +826,17 @@ export class WebRtcSignalingBridge {
     if (!this.activeRoom || !this.isSelfAuthorizedInRoom()) {
       throw new Error('Create or join an approved room before transmitting your screen.');
     }
-    await this.publishActiveCaptureToPeer(targetPeerDeviceId);
+    await this.publishActiveCaptureToPeer(
+      targetPeerDeviceId,
+      Math.max(1, this.outboundMap.size + 1)
+    );
     this.emit();
   }
 
-  private async publishActiveCaptureToPeer(targetPeerDeviceId: string): Promise<void> {
+  private async publishActiveCaptureToPeer(
+    targetPeerDeviceId: string,
+    expectedOutboundPeersCount?: number
+  ): Promise<void> {
     if (!this.captureSession || !this.activeRoom) return;
 
     const meta = this.resolveParticipantMeta(targetPeerDeviceId);
@@ -665,6 +854,12 @@ export class WebRtcSignalingBridge {
     const sessionId = meta.sessionId;
     const roomId = this.activeRoom.roomId;
 
+    const effectivePrefs = this.getEffectivePreferencesForPeer(targetPeerDeviceId);
+    const resolvedQuality = resolveQualityTarget(effectivePrefs, {
+      width: this.captureSession.actualWidth,
+      height: this.captureSession.actualHeight,
+    });
+
     const peer = this.getOrCreatePeer(targetPeerDeviceId, sessionId);
 
     this.outboundMap.set(targetPeerDeviceId, {
@@ -677,21 +872,40 @@ export class WebRtcSignalingBridge {
       iceConnectionState: null,
       statusDetail: `Connecting outbound stream to ${meta.deviceName}...`,
       errorMessage: null,
-      telemetry: createEmptyTelemetry(this.preferences.targetFps, 'connecting'),
+      qualityOverride: this.peerQualityOverrides.get(targetPeerDeviceId) ?? null,
+      telemetry: {
+        ...createEmptyTelemetry(effectivePrefs.targetFps, 'connecting'),
+        configuredMaxBitrateKbps: resolvedQuality.configuredMaxBitrateKbps,
+        targetBitrateKbps: resolvedQuality.configuredMaxBitrateKbps,
+        resolution:
+          this.captureSession.actualWidth && this.captureSession.actualHeight
+            ? `${this.captureSession.actualWidth}×${this.captureSession.actualHeight}`
+            : null,
+      },
     });
     this.statusDetail = `Sharing screen to ${meta.deviceName}...`;
     this.emit();
 
-    const width =
-      this.captureSession.actualWidth ?? (this.preferences.resolution === '720p' ? 1280 : 1920);
-    const height =
-      this.captureSession.actualHeight ?? (this.preferences.resolution === '720p' ? 720 : 1080);
+    const width = Math.max(
+      320,
+      Math.min(3840, Math.round(this.captureSession.actualWidth ?? resolvedQuality.targetWidth))
+    );
+    const height = Math.max(
+      240,
+      Math.min(2160, Math.round(this.captureSession.actualHeight ?? resolvedQuality.targetHeight))
+    );
     const fps = Math.max(
       1,
-      Math.min(120, Math.round(this.captureSession.actualFrameRate ?? this.preferences.targetFps))
+      Math.min(120, Math.round(this.captureSession.actualFrameRate ?? effectivePrefs.targetFps))
     );
     const announcedCodec: CastoraVideoCodec =
-      this.preferences.codecPreference === 'H264' ? 'H264' : 'VP8';
+      effectivePrefs.codecPreference === 'H264'
+        ? 'H264'
+        : effectivePrefs.codecPreference === 'VP9'
+          ? 'VP9'
+          : effectivePrefs.codecPreference === 'AV1'
+            ? 'AV1'
+            : 'VP8';
 
     // Register stream_start on signaling server before/alongside SDP offer
     signaling.sendEnvelope({
@@ -709,10 +923,13 @@ export class WebRtcSignalingBridge {
       },
     });
 
+    const activePeerCount = expectedOutboundPeersCount ?? Math.max(1, this.outboundMap.size);
+
     await peer.publishLocalStream({
       localStream: this.captureSession.stream,
       streamId,
-      preferences: this.preferences,
+      preferences: effectivePrefs,
+      activeOutboundPeers: activePeerCount,
     });
   }
 
@@ -742,9 +959,20 @@ export class WebRtcSignalingBridge {
     const peer = this.peers.get(targetPeerDeviceId);
     if (peer) {
       await peer.stopLocalStream();
-      // Only remove the peer connection if neither outbound nor inbound streams remain active.
-      // Wait: keeping the warm peer connection until room leave/disconnect makes re-sharing instant
-      // and preserves any active reverse stream completely!
+    }
+
+    // Rebalance concurrency headroom for remaining outbound peers cleanly
+    const remainingCount = this.outboundMap.size;
+    if (remainingCount > 0) {
+      for (const remainingPeerId of this.outboundMap.keys()) {
+        const remainingPeer = this.peers.get(remainingPeerId);
+        if (remainingPeer && remainingPeer.hasOutboundStream()) {
+          void remainingPeer.updateEncodingPreferences(
+            this.getEffectivePreferencesForPeer(remainingPeerId),
+            remainingCount
+          );
+        }
+      }
     }
   }
 

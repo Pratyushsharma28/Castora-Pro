@@ -1,4 +1,8 @@
-import type { StreamTelemetrySnapshot, WebRtcConnectionPhase } from '../types/studio';
+import type {
+  QualityLimitationReason,
+  StreamTelemetrySnapshot,
+  WebRtcConnectionPhase,
+} from '../types/studio';
 
 interface PriorRtpSample {
   timestampMs: number;
@@ -29,7 +33,26 @@ export function createEmptyTelemetry(
     jitterMs: null,
     droppedFrames: null,
     connectionState,
+    configuredMaxBitrateKbps: null,
+    targetBitrateKbps: null,
+    availableOutgoingBitrateKbps: null,
+    qualityLimitationReason: null,
+    codecMimeType: null,
+    scaleResolutionDownBy: null,
+    adaptationStatus: null,
   };
+}
+
+function normalizeCodecLabel(mimeType: unknown): string | null {
+  if (typeof mimeType !== 'string' || !mimeType) return null;
+  return mimeType.replace(/^video\//i, '').toUpperCase();
+}
+
+function normalizeLimitationReason(reason: unknown): QualityLimitationReason | null {
+  if (reason === 'none' || reason === 'cpu' || reason === 'bandwidth' || reason === 'other') {
+    return reason;
+  }
+  return null;
 }
 
 export class WebRtcStatsCollector {
@@ -107,25 +130,44 @@ export class WebRtcStatsCollector {
     }
 
     let selectedPairRttSec: number | null = null;
+    let availableOutgoingBps: number | null = null;
     let activeTransportPairId: string | null = null;
+    const codecMap = new Map<string, string>();
 
     report.forEach((stat) => {
+      const rec = stat as unknown as Record<string, unknown>;
       if (stat.type === 'transport') {
         const t = stat as RTCTransportStats;
         if (typeof t.selectedCandidatePairId === 'string') {
           activeTransportPairId = t.selectedCandidatePairId;
+        }
+      } else if (stat.type === 'codec' && typeof stat.id === 'string') {
+        const label = normalizeCodecLabel(rec.mimeType);
+        if (label) {
+          codecMap.set(stat.id, label);
         }
       }
     });
 
     report.forEach((stat) => {
       if (stat.type === 'candidate-pair') {
-        const pair = stat as RTCIceCandidatePairStats;
+        const pair = stat as RTCIceCandidatePairStats & {
+          availableOutgoingBitrate?: number;
+        };
         const isSelected =
           (activeTransportPairId && pair.id === activeTransportPairId) ||
           (pair.nominated && pair.state === 'succeeded');
-        if (isSelected && typeof pair.currentRoundTripTime === 'number') {
-          selectedPairRttSec = pair.currentRoundTripTime;
+        if (isSelected) {
+          if (typeof pair.currentRoundTripTime === 'number') {
+            selectedPairRttSec = pair.currentRoundTripTime;
+          }
+          if (
+            typeof pair.availableOutgoingBitrate === 'number' &&
+            Number.isFinite(pair.availableOutgoingBitrate) &&
+            pair.availableOutgoingBitrate > 0
+          ) {
+            availableOutgoingBps = pair.availableOutgoingBitrate;
+          }
         }
       }
     });
@@ -135,14 +177,18 @@ export class WebRtcStatsCollector {
       inbound.rttMs = selectedPairRttSec * 1000;
     }
 
+    if (availableOutgoingBps !== null) {
+      outbound.availableOutgoingBitrateKbps = availableOutgoingBps / 1000;
+    }
+
     if (params.localVideoTrack && params.localVideoTrack.readyState === 'live') {
-      this.extractSenderStats(report, outbound);
+      this.extractSenderStats(report, outbound, codecMap);
     } else {
       this.priorOutbound = null;
     }
 
     if (params.hasInboundVideo) {
-      this.extractReceiverStats(report, inbound);
+      this.extractReceiverStats(report, inbound, codecMap);
     } else {
       this.priorInbound = null;
     }
@@ -150,7 +196,11 @@ export class WebRtcStatsCollector {
     return { outbound, inbound };
   }
 
-  private extractSenderStats(report: RTCStatsReport, target: StreamTelemetrySnapshot): void {
+  private extractSenderStats(
+    report: RTCStatsReport,
+    target: StreamTelemetrySnapshot,
+    codecMap: Map<string, string>
+  ): void {
     let outbound: Record<string, unknown> | null = null;
     let remoteInbound: Record<string, unknown> | null = null;
     let mediaSource: Record<string, unknown> | null = null;
@@ -158,7 +208,6 @@ export class WebRtcStatsCollector {
     report.forEach((stat) => {
       const rec = stat as unknown as Record<string, unknown>;
       if (stat.type === 'outbound-rtp' && rec.kind === 'video') {
-        // Prefer active outbound stream if multiple historical senders exist
         if (rec.active !== false || !outbound) {
           outbound = rec;
         }
@@ -191,6 +240,20 @@ export class WebRtcStatsCollector {
 
       if (typeof ob.framesPerSecond === 'number' && Number.isFinite(ob.framesPerSecond)) {
         target.encodedFps = ob.framesPerSecond;
+      }
+
+      if (typeof ob.codecId === 'string' && codecMap.has(ob.codecId)) {
+        target.codecMimeType = codecMap.get(ob.codecId) ?? null;
+      }
+
+      target.qualityLimitationReason = normalizeLimitationReason(ob.qualityLimitationReason);
+
+      if (
+        typeof ob.targetBitrate === 'number' &&
+        Number.isFinite(ob.targetBitrate) &&
+        ob.targetBitrate > 0
+      ) {
+        target.targetBitrateKbps = ob.targetBitrate / 1000;
       }
 
       if (this.priorOutbound && ts > this.priorOutbound.timestampMs) {
@@ -226,7 +289,11 @@ export class WebRtcStatsCollector {
     }
   }
 
-  private extractReceiverStats(report: RTCStatsReport, target: StreamTelemetrySnapshot): void {
+  private extractReceiverStats(
+    report: RTCStatsReport,
+    target: StreamTelemetrySnapshot,
+    codecMap: Map<string, string>
+  ): void {
     let inbound: Record<string, unknown> | null = null;
 
     report.forEach((stat) => {
@@ -265,6 +332,10 @@ export class WebRtcStatsCollector {
 
     if (typeof ib.jitter === 'number' && Number.isFinite(ib.jitter)) {
       target.jitterMs = ib.jitter * 1000;
+    }
+
+    if (typeof ib.codecId === 'string' && codecMap.has(ib.codecId)) {
+      target.codecMimeType = codecMap.get(ib.codecId) ?? null;
     }
 
     if (this.priorInbound && ts > this.priorInbound.timestampMs) {
