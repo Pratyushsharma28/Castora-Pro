@@ -1,4 +1,9 @@
-import { ArrowRight, Cast, ShieldAlert, Smartphone } from 'lucide-react';
+import { ArrowRight, Cast, RefreshCw, ShieldAlert, Smartphone } from 'lucide-react';
+import type {
+  BackendHealthResponse,
+  RoomSnapshot,
+  SignalingSocketState,
+} from '../services/backendClient';
 import type {
   BrowserCapabilityReport,
   CapturePreferences,
@@ -20,6 +25,11 @@ interface ControlRoomViewProps {
   localStream: MediaStream | null;
   programTelemetry: StreamTelemetrySnapshot;
   recentSessions: SessionSummaryRecord[];
+  backendHealth: BackendHealthResponse | null;
+  backendError: string | null;
+  signalingState: SignalingSocketState;
+  activeRoom: RoomSnapshot | null;
+  onReconnectBackend: () => void;
   onNavigate: (destination: StudioDestination) => void;
 }
 
@@ -34,6 +44,11 @@ export function ControlRoomView({
   localStream,
   programTelemetry,
   recentSessions,
+  backendHealth,
+  backendError,
+  signalingState,
+  activeRoom,
+  onReconnectBackend,
   onNavigate,
 }: ControlRoomViewProps) {
   const activeCount = receivers.filter((r) => r.connectionState === 'connected').length;
@@ -135,15 +150,72 @@ export function ControlRoomView({
           <div className="border border-[#252A2F] bg-[#191D20] p-4">
             <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                Session Status
+                Backend &amp; Signaling
               </h2>
-              <SignalBadge label="STAGE 1 READY" tone="standby" />
+              <div className="flex items-center gap-2">
+                <SignalBadge
+                  label={
+                    signalingState === 'connected'
+                      ? 'WS ONLINE'
+                      : signalingState === 'connecting'
+                        ? 'CONNECTING'
+                        : signalingState === 'error'
+                          ? 'WS ERROR'
+                          : 'OFFLINE'
+                  }
+                  tone={
+                    signalingState === 'connected'
+                      ? 'active'
+                      : signalingState === 'connecting'
+                        ? 'signal'
+                        : signalingState === 'error'
+                          ? 'fault'
+                          : 'standby'
+                  }
+                  pulse={signalingState === 'connecting'}
+                />
+                <button
+                  type="button"
+                  onClick={onReconnectBackend}
+                  title="Refresh backend health & reconnect signaling"
+                  aria-label="Refresh backend connection"
+                  className="inline-flex h-7 w-7 items-center justify-center border border-[#252A2F] bg-[#131619] text-[#929A9D] hover:border-[#FF7849] hover:text-[#F2F3F0]"
+                >
+                  <RefreshCw className="h-3 w-3" aria-hidden="true" />
+                </button>
+              </div>
             </div>
 
             <dl className="mt-3 space-y-2.5 text-xs">
               <div className="flex items-center justify-between gap-2">
-                <dt className="text-[#929A9D]">Signaling Transport</dt>
-                <dd className="font-mono text-[#F2F3F0]">Standby (Stage 2)</dd>
+                <dt className="text-[#929A9D]">API Health (/api/health)</dt>
+                <dd className="font-mono text-[#F2F3F0]">
+                  {backendHealth
+                    ? `OK (${backendHealth.transport})`
+                    : backendError
+                      ? 'Unreachable'
+                      : 'Checking...'}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[#929A9D]">Signaling Channel</dt>
+                <dd className="font-mono text-[#F2F3F0]">
+                  {signalingState === 'connected' ? '/castora (Connected)' : `/castora (${signalingState})`}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[#929A9D]">Active Room</dt>
+                <dd className="font-mono text-[#F2F3F0] tabular-metrics">
+                  {activeRoom ? activeRoom.roomId : 'None'}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[#929A9D]">Server Devices / Rooms</dt>
+                <dd className="font-mono text-[#F2F3F0] tabular-metrics">
+                  {backendHealth
+                    ? `${backendHealth.activeDevices} dev · ${backendHealth.activeRooms} rm`
+                    : '—'}
+                </dd>
               </div>
               <div className="flex items-center justify-between gap-2">
                 <dt className="text-[#929A9D]">Protocol Contract</dt>

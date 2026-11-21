@@ -38,5 +38,7 @@ captures/
 node_modules/
 build/
 dist/
+dist-server/
+.certs/
 coverage/
 *.log

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Check, QrCode, ScanLine, ShieldCheck, X } from 'lucide-react';
+import type { RoomSnapshot, SignalingSocketState } from '../services/backendClient';
 import type {
   BrowserCapabilityReport,
   IncomingApprovalRequest,
@@ -14,6 +15,12 @@ interface ReceiversViewProps {
   initialRoomCode: string;
   incomingApprovals: IncomingApprovalRequest[];
   activePhase: WebRtcConnectionPhase;
+  signalingState: SignalingSocketState;
+  activeRoom: RoomSnapshot | null;
+  activeRoomRole: 'host' | 'receiver' | null;
+  onCreateRoom: () => Promise<RoomSnapshot>;
+  onJoinRoom: (roomId: string) => Promise<RoomSnapshot>;
+  onCloseRoom: () => Promise<void>;
   onLogEvent: (category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error', title: string, detail: string) => void;
 }
 
@@ -26,11 +33,18 @@ export function ReceiversView({
   initialRoomCode,
   incomingApprovals,
   activePhase,
+  signalingState,
+  activeRoom,
+  activeRoomRole,
+  onCreateRoom,
+  onJoinRoom,
+  onCloseRoom,
   onLogEvent,
 }: ReceiversViewProps) {
   const [mode, setMode] = useState<'join' | 'host'>('join');
   const [roomCode, setRoomCode] = useState<string>(initialRoomCode);
   const [qrInput, setQrInput] = useState<string>('');
+  const [busy, setBusy] = useState<boolean>(false);
   const [feedback, setFeedback] = useState<{ tone: 'info' | 'error'; text: string } | null>(null);
 
   const handleRoomInputChange = (raw: string) => {
@@ -41,7 +55,7 @@ export function ReceiversView({
     }
   };
 
-  const handleSubmitJoin = (e: React.FormEvent) => {
+  const handleSubmitJoin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!ROOM_CODE_PATTERN.test(roomCode)) {
       const msg = 'Enter a valid 6-character alphanumeric room code (example: K7M4P9).';
@@ -50,9 +64,19 @@ export function ReceiversView({
       return;
     }
 
-    const msg = `Room code ${roomCode} validated. Live room pairing & approval handshake activate in Stage 2–3 once WebSocket signaling (/castora) is mounted.`;
-    setFeedback({ tone: 'info', text: msg });
-    onLogEvent('signaling', 'Room join validated (Stage 1 standby)', `Validated room ${roomCode} as ${deviceName} (${deviceId}).`);
+    setBusy(true);
+    try {
+      const joined = await onJoinRoom(roomCode);
+      setFeedback({
+        tone: 'info',
+        text: `Joined room ${joined.roomId} hosted by ${joined.hostDeviceName}. WebRTC stream approval activates in Stage 3–4.`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to join room';
+      setFeedback({ tone: 'error', text: message });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleParseQrPayload = () => {
@@ -85,11 +109,33 @@ export function ReceiversView({
     setFeedback({ tone: 'error', text: 'Could not extract a valid 6-character room code from input.' });
   };
 
-  const handleHostStandby = () => {
-    const msg =
-      'Host QR & ephemeral 6-character room code generation require the Stage 2–3 signaling coordinator so room IDs are server-verified and collision-free.';
-    setFeedback({ tone: 'info', text: msg });
-    onLogEvent('signaling', 'Host room requested (Stage 2–3 pending)', msg);
+  const handleCreateRoom = async () => {
+    setBusy(true);
+    try {
+      const created = await onCreateRoom();
+      setFeedback({
+        tone: 'info',
+        text: `Room ${created.roomId} active until ${new Date(created.expiresAt).toLocaleTimeString()}.`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to create room';
+      setFeedback({ tone: 'error', text: message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCloseRoom = async () => {
+    setBusy(true);
+    try {
+      await onCloseRoom();
+      setFeedback({ tone: 'info', text: 'Room closed and signaling session detached.' });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to close room';
+      setFeedback({ tone: 'error', text: message });
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -104,8 +150,20 @@ export function ReceiversView({
           </p>
         </div>
         <SignalBadge
-          label={activePhase === 'connected' ? 'SESSION ACTIVE' : 'STANDBY'}
-          tone={activePhase === 'connected' ? 'active' : 'standby'}
+          label={
+            activePhase === 'connected'
+              ? 'SESSION ACTIVE'
+              : activeRoom
+                ? `ROOM ${activeRoom.roomId}`
+                : signalingState === 'connected'
+                  ? 'SIGNALING ONLINE'
+                  : 'STANDBY'
+          }
+          tone={
+            activePhase === 'connected' || signalingState === 'connected'
+              ? 'active'
+              : 'standby'
+          }
         />
       </div>
 
@@ -164,9 +222,10 @@ export function ReceiversView({
 
                 <button
                   type="submit"
-                  className="inline-flex min-h-[44px] w-full items-center justify-center bg-[#FF7849] px-4 text-xs font-semibold text-[#101214] hover:opacity-90"
+                  disabled={busy}
+                  className="inline-flex min-h-[44px] w-full items-center justify-center bg-[#FF7849] px-4 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
                 >
-                  Validate &amp; Join Room
+                  {busy ? 'Joining Room...' : 'Join Room'}
                 </button>
 
                 <div className="border-t border-[#252A2F] pt-3 space-y-2">
@@ -200,22 +259,49 @@ export function ReceiversView({
               </form>
             ) : (
               <div className="space-y-4">
-                <div className="flex flex-col items-center justify-center border border-[#252A2F] bg-[#131619] px-4 py-8 text-center">
+                <div className="flex flex-col items-center justify-center border border-[#252A2F] bg-[#131619] px-4 py-6 text-center">
                   <QrCode className="h-8 w-8 text-[#929A9D]" aria-hidden="true" />
-                  <p className="mt-3 text-xs font-medium text-[#F2F3F0]">
-                    QR Room Code Standby
-                  </p>
-                  <p className="mt-1 max-w-xs text-xs leading-relaxed text-[#929A9D]">
-                    Server-issued room codes and scannable HTTPS LAN QR links activate in Stage 2–3.
-                  </p>
+                  {activeRoom && activeRoomRole === 'host' ? (
+                    <>
+                      <p className="mt-3 font-mono text-2xl font-bold tracking-[0.25em] text-[#FF7849] tabular-metrics">
+                        {activeRoom.roomId}
+                      </p>
+                      <p className="mt-1 text-xs text-[#929A9D] tabular-metrics">
+                        Expires {new Date(activeRoom.expiresAt).toLocaleTimeString()} ·{' '}
+                        {activeRoom.activeReceiverCount} / {activeRoom.maxReceivers} receivers
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="mt-3 text-xs font-medium text-[#F2F3F0]">
+                        Create Ephemeral Signaling Room
+                      </p>
+                      <p className="mt-1 max-w-xs text-xs leading-relaxed text-[#929A9D]">
+                        Generates a server-verified 6-character room code with automatic TTL expiration. QR image rendering activates in Stage 3.
+                      </p>
+                    </>
+                  )}
                 </div>
-                <button
-                  type="button"
-                  onClick={handleHostStandby}
-                  className="inline-flex min-h-[44px] w-full items-center justify-center border border-[#252A2F] bg-[#131619] px-4 text-xs font-semibold text-[#F2F3F0] hover:border-[#FF7849]"
-                >
-                  Check Room Host Readiness
-                </button>
+
+                {activeRoom && activeRoomRole === 'host' ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={handleCloseRoom}
+                    className="inline-flex min-h-[44px] w-full items-center justify-center border border-[#EF4444]/60 bg-[#131619] px-4 text-xs font-semibold text-[#EF4444] hover:bg-[#EF4444]/10 disabled:opacity-50"
+                  >
+                    Close Active Room
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={handleCreateRoom}
+                    className="inline-flex min-h-[44px] w-full items-center justify-center bg-[#FF7849] px-4 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
+                  >
+                    {busy ? 'Creating Room...' : 'Create Room Code'}
+                  </button>
+                )}
               </div>
             )}
 

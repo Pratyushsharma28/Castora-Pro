@@ -1,4 +1,5 @@
 import { Cast, Radio } from 'lucide-react';
+import type { SignalingSocketState } from '../../services/backendClient';
 import type { StudioDestination } from '../../types/studio';
 
 interface NavDestinationItem {
@@ -18,7 +19,7 @@ const NAV_ITEMS: NavDestinationItem[] = [
 interface TopControlBarProps {
   activeDestination: StudioDestination;
   onSelectDestination: (destination: StudioDestination) => void;
-  isSignalingReady: boolean;
+  signalingState: SignalingSocketState;
   isSecureContext: boolean;
   onPrimaryAction: () => void;
 }
@@ -26,10 +27,26 @@ interface TopControlBarProps {
 export function TopControlBar({
   activeDestination,
   onSelectDestination,
-  isSignalingReady,
+  signalingState,
   isSecureContext,
   onPrimaryAction,
 }: TopControlBarProps) {
+  const wsStatusLabel =
+    signalingState === 'connected'
+      ? 'WS ONLINE'
+      : signalingState === 'connecting'
+        ? 'WS CONNECTING'
+        : signalingState === 'error'
+          ? 'WS ERROR'
+          : 'WS OFFLINE';
+
+  const wsStatusToneClass =
+    signalingState === 'connected'
+      ? 'text-[#8BD7B0]'
+      : signalingState === 'error'
+        ? 'text-[#EF4444]'
+        : 'text-[#929A9D]';
+
   return (
     <header className="sticky top-0 z-30 border-b border-[#252A2F] bg-[#191D20]">
       <div className="mx-auto flex h-14 max-w-[1440px] items-center justify-between gap-4 px-4 sm:px-6">
@@ -79,7 +96,7 @@ export function TopControlBar({
           <div className="hidden lg:flex items-center gap-3 text-[11px] tabular-metrics text-[#929A9D] whitespace-nowrap shrink-0">
             <span>{isSecureContext ? 'HTTPS READY' : 'HTTP ONLY'}</span>
             <span aria-hidden="true">·</span>
-            <span>{isSignalingReady ? 'WS ONLINE' : 'WS STANDBY'}</span>
+            <span className={wsStatusToneClass}>{wsStatusLabel}</span>
           </div>
 
           <button
