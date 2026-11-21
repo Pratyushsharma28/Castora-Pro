@@ -1,5 +1,19 @@
 import { useState } from 'react';
-import { Cast, Check, LogOut, MonitorPlay, QrCode, ScanLine, ShieldCheck, Square, Trash2, X } from 'lucide-react';
+import {
+  Check,
+  Copy,
+  Link2,
+  LogIn,
+  LogOut,
+  MonitorPlay,
+  Plus,
+  QrCode,
+  ShieldCheck,
+  Square,
+  Trash2,
+  Users,
+  X,
+} from 'lucide-react';
 import type {
   PairingLifecycleStatus,
   RoomSnapshot,
@@ -36,7 +50,11 @@ interface ReceiversViewProps {
   onStartSharing: (targetSelection: string | string[] | null) => Promise<void>;
   onStopSharing: () => void;
   onNavigate: (destination: StudioDestination) => void;
-  onLogEvent: (category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error', title: string, detail: string) => void;
+  onLogEvent: (
+    category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error',
+    title: string,
+    detail: string
+  ) => void;
 }
 
 const ROOM_CODE_PATTERN = /^[A-Z0-9]{6}$/;
@@ -63,7 +81,6 @@ export function ReceiversView({
   deviceName,
   capabilities,
   initialRoomCode,
-  activePhase,
   signalingState,
   activeRoom,
   activeRoomRole,
@@ -90,6 +107,7 @@ export function ReceiversView({
   const [busy, setBusy] = useState<boolean>(false);
   const [shareBusy, setShareBusy] = useState<boolean>(false);
   const [actionId, setActionId] = useState<string | null>(null);
+  const [copiedType, setCopiedType] = useState<'code' | 'link' | null>(null);
   const [feedback, setFeedback] = useState<{ tone: 'info' | 'error'; text: string } | null>(null);
 
   const pendingRequests = activeRoom?.pendingRequests ?? [];
@@ -109,6 +127,21 @@ export function ReceiversView({
     }
   };
 
+  const handleCopy = async (kind: 'code' | 'link') => {
+    if (!activeRoom) return;
+    const text =
+      kind === 'code'
+        ? activeRoom.roomId
+        : `${window.location.origin}/?room=${activeRoom.roomId}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedType(kind);
+      window.setTimeout(() => setCopiedType(null), 1800);
+    } catch {
+      setFeedback({ tone: 'error', text: 'Clipboard access blocked by browser.' });
+    }
+  };
+
   const handleSubmitJoin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!ROOM_CODE_PATTERN.test(roomCode)) {
@@ -123,7 +156,7 @@ export function ReceiversView({
       const submitted = await onSubmitPairRequest(roomCode);
       setFeedback({
         tone: 'info',
-        text: `Pairing request submitted to room ${submitted.roomId} (${submitted.hostDeviceName}). Awaiting host approval.`,
+        text: `Request sent to room ${submitted.roomId} (${submitted.hostDeviceName}). Waiting for host approval.`,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to submit pairing request';
@@ -136,15 +169,18 @@ export function ReceiversView({
   const handleParseQrPayload = () => {
     const trimmed = qrInput.trim();
     if (!trimmed) {
-      setFeedback({ tone: 'error', text: 'Paste a Castora join URL or 6-character room code first.' });
+      setFeedback({ tone: 'error', text: 'Paste a join URL or 6-character room code first.' });
       return;
     }
     try {
       const url = new URL(trimmed);
-      const paramRoom = (url.searchParams.get('room') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+      const paramRoom = (url.searchParams.get('room') ?? '')
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '')
+        .slice(0, 6);
       if (ROOM_CODE_PATTERN.test(paramRoom)) {
         setRoomCode(paramRoom);
-        setFeedback({ tone: 'info', text: `Extracted room code ${paramRoom} from join URL.` });
+        setFeedback({ tone: 'info', text: `Loaded room code ${paramRoom} from join link.` });
         onLogEvent('ui', 'Parsed QR join URL', `Extracted room code ${paramRoom}.`);
         return;
       }
@@ -160,7 +196,7 @@ export function ReceiversView({
       return;
     }
 
-    setFeedback({ tone: 'error', text: 'Could not extract a valid 6-character room code from input.' });
+    setFeedback({ tone: 'error', text: 'Could not find a valid 6-character room code.' });
   };
 
   const handleCreateRoom = async () => {
@@ -169,7 +205,7 @@ export function ReceiversView({
       const created = await onCreateRoom();
       setFeedback({
         tone: 'info',
-        text: `Room ${created.roomId} active until ${new Date(created.expiresAt).toLocaleTimeString()}.`,
+        text: `Room ${created.roomId} created. Expires at ${new Date(created.expiresAt).toLocaleTimeString()}.`,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to create room';
@@ -183,7 +219,7 @@ export function ReceiversView({
     setBusy(true);
     try {
       await onCloseRoom();
-      setFeedback({ tone: 'info', text: 'Room closed and all receiver sessions detached.' });
+      setFeedback({ tone: 'info', text: 'Room closed and all participants disconnected.' });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to close room';
       setFeedback({ tone: 'error', text: message });
@@ -196,7 +232,7 @@ export function ReceiversView({
     setBusy(true);
     try {
       await onLeaveRoom();
-      setFeedback({ tone: 'info', text: 'Left room cleanly.' });
+      setFeedback({ tone: 'info', text: 'Left room.' });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to leave room';
       setFeedback({ tone: 'error', text: message });
@@ -209,7 +245,7 @@ export function ReceiversView({
     setShareBusy(true);
     try {
       await onStartSharing(null);
-      setFeedback({ tone: 'info', text: 'Started sharing your screen in the active room.' });
+      setFeedback({ tone: 'info', text: 'Sharing your screen with connected participants.' });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to share your screen';
       setFeedback({ tone: 'error', text: message });
@@ -226,13 +262,13 @@ export function ReceiversView({
     try {
       if (action === 'approve') {
         await onApproveReceiver(targetDeviceId);
-        setFeedback({ tone: 'info', text: `Approved receiver ${targetDeviceId}.` });
+        setFeedback({ tone: 'info', text: `Approved participant ${targetDeviceId}.` });
       } else if (action === 'reject') {
         await onRejectReceiver(targetDeviceId);
         setFeedback({ tone: 'info', text: `Rejected request from ${targetDeviceId}.` });
       } else {
         await onRemoveReceiver(targetDeviceId);
-        setFeedback({ tone: 'info', text: `Removed paired receiver ${targetDeviceId}.` });
+        setFeedback({ tone: 'info', text: `Removed participant ${targetDeviceId}.` });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Action failed';
@@ -244,13 +280,14 @@ export function ReceiversView({
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="font-display text-lg font-semibold tracking-tight text-[#F2F3F0]">
-            Receivers &amp; Pairing
+          <h1 className="font-display text-xl font-semibold tracking-tight text-[#172033]">
+            Rooms &amp; Participants
           </h1>
-          <p className="text-xs text-[#929A9D]">
-            Server-verified room codes, explicit host approval, bidirectional screen sharing, and up to 6 paired participants per room.
+          <p className="text-sm text-[#64748B]">
+            Create or join a room with up to 6 paired participants. All approved members can share and view screens.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -260,36 +297,179 @@ export function ReceiversView({
             pulse={pairingStatus === 'Request pending' || pairingStatus === 'Awaiting approval'}
           />
           <SignalBadge
-            label={
-              activePhase === 'connected'
-                ? 'STREAM LIVE'
-                : activeRoom
-                  ? `ROOM ${activeRoom.roomId}`
-                  : signalingState === 'connected'
-                    ? 'WS ONLINE'
-                    : 'STANDBY'
-            }
-            tone={
-              activePhase === 'connected' || signalingState === 'connected'
-                ? 'active'
-                : 'standby'
-            }
+            label={signalingState === 'connected' ? 'Server Online' : 'Offline'}
+            tone={signalingState === 'connected' ? 'active' : 'standby'}
           />
         </div>
       </div>
 
+      {feedback && (
+        <div
+          role={feedback.tone === 'error' ? 'alert' : 'status'}
+          className={`rounded-xl border px-4 py-3 text-sm ${
+            feedback.tone === 'error'
+              ? 'border-[#DC2626]/30 bg-[#FEF2F2] text-[#B91C1C]'
+              : 'border-[#E2E8F0] bg-white text-[#172033]'
+          }`}
+        >
+          {feedback.text}
+        </div>
+      )}
+
+      {/* Active Room Summary Card */}
+      {activeRoom && (
+        <section
+          aria-label="Active Room Details"
+          className="rounded-xl border border-[#E2E8F0] bg-white p-5 sm:p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+        >
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-xs font-medium text-[#64748B]">Room Code</span>
+                <span className="font-mono text-2xl font-bold tracking-[0.2em] text-[#172033] tabular-metrics">
+                  {activeRoom.roomId}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void handleCopy('code')}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                >
+                  {copiedType === 'code' ? (
+                    <>
+                      <Check className="h-3.5 w-3.5 text-[#16A34A]" aria-hidden="true" />
+                      <span className="text-[#16A34A]">Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Copy Code</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleCopy('link')}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                >
+                  {copiedType === 'link' ? (
+                    <>
+                      <Check className="h-3.5 w-3.5 text-[#16A34A]" aria-hidden="true" />
+                      <span className="text-[#16A34A]">Link Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Link2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Copy Invite Link</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-[#64748B] tabular-metrics">
+                <span>
+                  Role:{' '}
+                  <strong className="font-semibold text-[#172033]">
+                    {activeRoomRole === 'host' ? 'Host' : 'Participant'}
+                  </strong>
+                </span>
+                <span aria-hidden="true">·</span>
+                <span>Host: {activeRoom.hostDeviceName}</span>
+                <span aria-hidden="true">·</span>
+                <span>
+                  {activeRoom.activeReceiverCount} connected / {activeRoom.pairedReceiverCount} paired (max{' '}
+                  {activeRoom.maxReceivers})
+                </span>
+                <span aria-hidden="true">·</span>
+                <span>Expires {new Date(activeRoom.expiresAt).toLocaleTimeString()}</span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              {isApprovedMember && (
+                <>
+                  <button
+                    type="button"
+                    disabled={shareBusy || !canShareScreen}
+                    onClick={handleShareBack}
+                    className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] bg-[#2563EB] px-4 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                  >
+                    <MonitorPlay className="h-4 w-4" aria-hidden="true" />
+                    <span>
+                      {shareBusy
+                        ? 'Starting...'
+                        : webrtcState.isSharingLocal
+                          ? 'Change Screen'
+                          : 'Share Screen'}
+                    </span>
+                  </button>
+                  {webrtcState.isSharingLocal && (
+                    <button
+                      type="button"
+                      onClick={onStopSharing}
+                      className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] border border-[#DC2626]/30 bg-[#FEF2F2] px-4 text-sm font-semibold text-[#DC2626] hover:bg-[#FEE2E2]"
+                    >
+                      <Square className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Stop Sharing</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('multi-view')}
+                    className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                  >
+                    <span>Open Screens</span>
+                  </button>
+                </>
+              )}
+
+              {activeRoomRole === 'host' ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={handleCloseRoom}
+                  className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] border border-[#DC2626]/30 bg-white px-4 text-sm font-semibold text-[#DC2626] hover:bg-[#FEF2F2] disabled:opacity-50"
+                >
+                  <LogOut className="h-4 w-4" aria-hidden="true" />
+                  <span>{busy ? 'Closing...' : 'Close Room'}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={handleLeaveRoom}
+                  className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] border border-[#DC2626]/30 bg-white px-4 text-sm font-semibold text-[#DC2626] hover:bg-[#FEF2F2] disabled:opacity-50"
+                >
+                  <LogOut className="h-4 w-4" aria-hidden="true" />
+                  <span>{busy ? 'Leaving...' : 'Leave Room'}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {pairingDetail && activeRoomRole === 'receiver' && (
+            <p className="mt-3 border-t border-[#E2E8F0] pt-3 text-xs text-[#64748B]">
+              {pairingDetail}
+              {myPairedSlot && (
+                <span className="ml-2 font-mono text-[#172033] tabular-metrics">
+                  · Assigned Slot {myPairedSlot.assignedSlotIndex + 1}
+                </span>
+              )}
+            </p>
+          )}
+        </section>
+      )}
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        {/* Left: Join / Host Pairing Panel */}
-        <section className="min-w-0 space-y-4 lg:col-span-5" aria-label="Room Pairing">
-          <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-4">
-            <div className="grid grid-cols-2 border border-[#252A2F] bg-[#131619]">
+        {/* Left: Join or Create Room */}
+        <section className="min-w-0 space-y-4 lg:col-span-5" aria-label="Join or Create Room">
+          <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-5">
+            <div className="grid grid-cols-2 gap-1 rounded-[10px] bg-[#F1F5F9] p-1">
               <button
                 type="button"
                 onClick={() => setMode('join')}
-                className={`min-h-[44px] text-xs font-semibold tracking-wide transition-colors ${
+                className={`min-h-[40px] rounded-lg text-sm font-semibold transition-colors ${
                   mode === 'join'
-                    ? 'bg-[#FF7849] text-[#101214]'
-                    : 'text-[#929A9D] hover:text-[#F2F3F0]'
+                    ? 'bg-white text-[#172033] shadow-xs'
+                    : 'text-[#64748B] hover:text-[#172033]'
                 }`}
               >
                 Join Room
@@ -297,13 +477,13 @@ export function ReceiversView({
               <button
                 type="button"
                 onClick={() => setMode('host')}
-                className={`min-h-[44px] text-xs font-semibold tracking-wide transition-colors ${
+                className={`min-h-[40px] rounded-lg text-sm font-semibold transition-colors ${
                   mode === 'host'
-                    ? 'bg-[#FF7849] text-[#101214]'
-                    : 'text-[#929A9D] hover:text-[#F2F3F0]'
+                    ? 'bg-white text-[#172033] shadow-xs'
+                    : 'text-[#64748B] hover:text-[#172033]'
                 }`}
               >
-                Host Receiver Room
+                Create Room
               </button>
             </div>
 
@@ -312,7 +492,7 @@ export function ReceiversView({
                 <div>
                   <label
                     htmlFor="castora-room-code"
-                    className="block text-[11px] font-medium uppercase tracking-[0.08em] text-[#929A9D]"
+                    className="block text-xs font-medium text-[#172033]"
                   >
                     6-Character Room Code
                   </label>
@@ -326,9 +506,9 @@ export function ReceiversView({
                     maxLength={6}
                     value={roomCode}
                     onChange={(e) => handleRoomInputChange(e.target.value)}
-                    placeholder="ABC123"
-                    disabled={Boolean(activeRoom && activeRoomRole === 'receiver')}
-                    className="mt-1.5 h-12 w-full border border-[#252A2F] bg-[#131619] px-3 font-mono text-lg font-semibold tracking-[0.28em] text-[#F2F3F0] placeholder:text-[#929A9D]/40 focus:border-[#FF7849] focus:outline-none tabular-metrics disabled:opacity-60"
+                    placeholder="K7M4P9"
+                    disabled={Boolean(activeRoom)}
+                    className="mt-1.5 h-12 w-full rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 font-mono text-lg font-semibold tracking-[0.25em] text-[#172033] placeholder:text-[#94A3B8] focus:border-[#2563EB] focus:bg-white focus:outline-none tabular-metrics disabled:opacity-60"
                   />
                 </div>
 
@@ -337,71 +517,70 @@ export function ReceiversView({
                     type="button"
                     disabled={busy}
                     onClick={handleLeaveRoom}
-                    className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 border border-[#EF4444]/60 bg-[#131619] px-4 text-xs font-semibold text-[#EF4444] hover:bg-[#EF4444]/10 disabled:opacity-50"
+                    className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-[10px] border border-[#DC2626]/30 bg-[#FEF2F2] px-4 text-sm font-semibold text-[#DC2626] hover:bg-[#FEE2E2] disabled:opacity-50"
                   >
-                    <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+                    <LogOut className="h-4 w-4" aria-hidden="true" />
                     <span>{busy ? 'Leaving Room...' : `Leave Room ${activeRoom.roomId}`}</span>
                   </button>
                 ) : (
                   <button
                     type="submit"
-                    disabled={busy || activeRoomRole === 'host'}
-                    className="inline-flex min-h-[44px] w-full items-center justify-center bg-[#FF7849] px-4 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
+                    disabled={busy || Boolean(activeRoom)}
+                    className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-[10px] bg-[#2563EB] px-4 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
                   >
-                    {busy ? 'Submitting Request...' : 'Submit Pairing Request'}
+                    <LogIn className="h-4 w-4" aria-hidden="true" />
+                    <span>{busy ? 'Submitting Request...' : 'Request to Join Room'}</span>
                   </button>
                 )}
 
-                <div className="border-t border-[#252A2F] pt-3 space-y-2">
-                  <div className="flex items-center justify-between text-[11px] text-[#929A9D]">
-                    <span className="inline-flex items-center gap-1.5 uppercase tracking-[0.08em]">
-                      <ScanLine className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>QR Link / Token</span>
-                    </span>
-                    <span className="font-mono">
-                      BarcodeDetector: {capabilities.supportsBarcodeDetector ? 'YES' : 'NO'}
-                    </span>
-                  </div>
+                <div className="border-t border-[#E2E8F0] pt-4 space-y-2">
+                  <label
+                    htmlFor="castora-qr-input"
+                    className="block text-xs font-medium text-[#64748B]"
+                  >
+                    Or paste invite link / room token
+                  </label>
                   <div className="flex gap-2">
                     <input
+                      id="castora-qr-input"
                       type="text"
                       value={qrInput}
                       onChange={(e) => setQrInput(e.target.value)}
                       placeholder="https://.../join?room=K7M4P9"
-                      aria-label="Paste QR join URL or room token"
-                      className="h-11 flex-1 border border-[#252A2F] bg-[#131619] px-3 text-xs text-[#F2F3F0] placeholder:text-[#929A9D]/50 focus:border-[#FF7849] focus:outline-none"
+                      className="h-11 flex-1 rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-xs text-[#172033] placeholder:text-[#94A3B8] focus:border-[#2563EB] focus:bg-white focus:outline-none"
                     />
                     <button
                       type="button"
                       onClick={handleParseQrPayload}
-                      className="min-h-[44px] border border-[#252A2F] bg-[#131619] px-3 text-xs font-medium text-[#F2F3F0] hover:border-[#FF7849]"
+                      className="min-h-[44px] rounded-[10px] border border-[#E2E8F0] bg-white px-3.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
                     >
-                      Parse
+                      Load
                     </button>
                   </div>
                 </div>
               </form>
             ) : (
               <div className="space-y-4">
-                <div className="flex flex-col items-center justify-center border border-[#252A2F] bg-[#131619] px-4 py-6 text-center">
-                  <QrCode className="h-8 w-8 text-[#929A9D]" aria-hidden="true" />
+                <div className="flex flex-col items-center justify-center rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-4 py-6 text-center">
+                  <QrCode className="h-8 w-8 text-[#2563EB]" aria-hidden="true" />
                   {activeRoom && activeRoomRole === 'host' ? (
                     <>
-                      <p className="mt-3 font-mono text-2xl font-bold tracking-[0.25em] text-[#FF7849] tabular-metrics">
+                      <p className="mt-3 font-mono text-2xl font-bold tracking-[0.22em] text-[#172033] tabular-metrics">
                         {activeRoom.roomId}
                       </p>
-                      <p className="mt-1 text-xs text-[#929A9D] tabular-metrics">
+                      <p className="mt-1 text-xs text-[#64748B] tabular-metrics">
                         Expires {new Date(activeRoom.expiresAt).toLocaleTimeString()} ·{' '}
-                        {activeRoom.activeReceiverCount} connected / {activeRoom.pairedReceiverCount} paired (max {activeRoom.maxReceivers})
+                        {activeRoom.activeReceiverCount} connected / {activeRoom.pairedReceiverCount} paired (max{' '}
+                        {activeRoom.maxReceivers})
                       </p>
                     </>
                   ) : (
                     <>
-                      <p className="mt-3 text-xs font-medium text-[#F2F3F0]">
-                        Create Ephemeral Signaling Room
+                      <p className="mt-3 text-sm font-semibold text-[#172033]">
+                        Host a New Room
                       </p>
-                      <p className="mt-1 max-w-xs text-xs leading-relaxed text-[#929A9D]">
-                        Generates a server-verified 6-character room code with automatic TTL expiration and host approval controls.
+                      <p className="mt-1 max-w-xs text-xs leading-relaxed text-[#64748B]">
+                        Generates a 6-character code with explicit host approval for up to 6 participants.
                       </p>
                     </>
                   )}
@@ -412,321 +591,226 @@ export function ReceiversView({
                     type="button"
                     disabled={busy}
                     onClick={handleCloseRoom}
-                    className="inline-flex min-h-[44px] w-full items-center justify-center border border-[#EF4444]/60 bg-[#131619] px-4 text-xs font-semibold text-[#EF4444] hover:bg-[#EF4444]/10 disabled:opacity-50"
+                    className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-[10px] border border-[#DC2626]/30 bg-[#FEF2F2] px-4 text-sm font-semibold text-[#DC2626] hover:bg-[#FEE2E2] disabled:opacity-50"
                   >
-                    Close Active Room
+                    <LogOut className="h-4 w-4" aria-hidden="true" />
+                    <span>{busy ? 'Closing...' : 'Close Active Room'}</span>
                   </button>
                 ) : (
                   <button
                     type="button"
-                    disabled={busy || activeRoomRole === 'receiver'}
+                    disabled={busy || Boolean(activeRoom)}
                     onClick={handleCreateRoom}
-                    className="inline-flex min-h-[44px] w-full items-center justify-center bg-[#FF7849] px-4 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
+                    className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-[10px] bg-[#2563EB] px-4 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
                   >
-                    {busy ? 'Creating Room...' : 'Create Room Code'}
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                    <span>{busy ? 'Creating Room...' : 'Create Room'}</span>
                   </button>
                 )}
               </div>
             )}
-
-            {feedback && (
-              <div
-                role={feedback.tone === 'error' ? 'alert' : 'status'}
-                className={`border px-3 py-2.5 text-xs leading-relaxed ${
-                  feedback.tone === 'error'
-                    ? 'border-[#EF4444]/60 bg-[#131619] text-[#EF4444]'
-                    : 'border-[#252A2F] bg-[#131619] text-[#F2F3F0]'
-                }`}
-              >
-                {feedback.text}
-              </div>
-            )}
           </div>
 
-          {/* Local Identity */}
-          <div className="border border-[#252A2F] bg-[#191D20] p-4">
-            <h2 className="border-b border-[#252A2F] pb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-              Local Endpoint Identity
+          {/* Local Device Info */}
+          <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+            <h2 className="border-b border-[#E2E8F0] pb-2.5 text-sm font-semibold text-[#172033]">
+              Your Device
             </h2>
             <dl className="mt-3 space-y-2 text-xs">
               <div className="flex items-center justify-between gap-2">
-                <dt className="text-[#929A9D]">Display Name</dt>
-                <dd className="font-medium text-[#F2F3F0]">{deviceName}</dd>
+                <dt className="text-[#64748B]">Name</dt>
+                <dd className="font-medium text-[#172033]">{deviceName}</dd>
               </div>
               <div className="flex items-center justify-between gap-2">
-                <dt className="text-[#929A9D]">Device ID</dt>
-                <dd className="font-mono text-[#F2F3F0] tabular-metrics">{deviceId}</dd>
+                <dt className="text-[#64748B]">Device ID</dt>
+                <dd className="font-mono text-[#172033] tabular-metrics">{deviceId}</dd>
               </div>
               <div className="flex items-center justify-between gap-2">
-                <dt className="text-[#929A9D]">Platform</dt>
-                <dd className="font-mono text-[#F2F3F0]">{capabilities.detectedPlatform}</dd>
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <dt className="text-[#929A9D]">H.264 Decode</dt>
-                <dd className="font-mono text-[#8BD7B0]">
-                  {capabilities.supportsVideoH264Decode ? 'Supported' : 'Check Codecs'}
-                </dd>
+                <dt className="text-[#64748B]">Platform</dt>
+                <dd className="text-[#172033]">{capabilities.detectedPlatform}</dd>
               </div>
             </dl>
           </div>
         </section>
 
-        {/* Right: Pairing Status, Bidirectional Controls, Incoming Screens, Approval Queue */}
-        <section className="min-w-0 space-y-4 lg:col-span-7" aria-label="Approval Queue and Pairing Status">
-          {/* Participant Pairing Status Card */}
-          {(activeRoomRole === 'receiver' ||
-            pairingStatus === 'Rejected' ||
-            pairingStatus === 'Expired' ||
-            pairingStatus === 'Disconnected' ||
-            pairingStatus === 'Request pending' ||
-            pairingStatus === 'Awaiting approval') && (
-            <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-3">
-              <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
-                <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                  Participant Pairing Status
-                </h2>
-                <SignalBadge
-                  label={pairingStatus}
-                  tone={statusToTone(pairingStatus)}
-                  pulse={pairingStatus === 'Request pending' || pairingStatus === 'Awaiting approval'}
-                />
-              </div>
-              <p className="text-xs leading-relaxed text-[#F2F3F0]">
-                {pairingDetail ?? 'Ready to pair with a host room code.'}
-              </p>
-              {activeRoom && activeRoomRole === 'receiver' && (
-                <dl className="grid grid-cols-2 gap-2 border-t border-[#252A2F] pt-3 text-xs sm:grid-cols-4">
-                  <div>
-                    <dt className="text-[10px] uppercase tracking-[0.08em] text-[#929A9D]">Room</dt>
-                    <dd className="mt-0.5 font-mono text-[#F2F3F0] tabular-metrics">{activeRoom.roomId}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-[10px] uppercase tracking-[0.08em] text-[#929A9D]">Host</dt>
-                    <dd className="mt-0.5 truncate text-[#F2F3F0]">{activeRoom.hostDeviceName}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-[10px] uppercase tracking-[0.08em] text-[#929A9D]">Assigned Slot</dt>
-                    <dd className="mt-0.5 font-mono text-[#F2F3F0] tabular-metrics">
-                      {myPairedSlot ? `SLOT ${String(myPairedSlot.assignedSlotIndex + 1).padStart(2, '0')}` : 'Pending'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-[10px] uppercase tracking-[0.08em] text-[#929A9D]">Expires</dt>
-                    <dd className="mt-0.5 font-mono text-[#F2F3F0] tabular-metrics">
-                      {new Date(activeRoom.expiresAt).toLocaleTimeString()}
-                    </dd>
-                  </div>
-                </dl>
-              )}
-            </div>
-          )}
-
-          {/* Quick Bidirectional Screen Sharing Controls when approved in room */}
-          {isApprovedMember && (
-            <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                    Bidirectional Screen Share
+        {/* Right: Approval Queue, Participant List, Incoming Screens */}
+        <section className="min-w-0 space-y-6 lg:col-span-7" aria-label="Participants and Approvals">
+          {/* Approval Queue */}
+          {(activeRoomRole === 'host' || pendingRequests.length > 0) && (
+            <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+              <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-3">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
+                  <h2 className="text-sm font-semibold text-[#172033]">
+                    Approval Requests
                   </h2>
-                  <p className="mt-0.5 text-xs text-[#929A9D]">
-                    {activeRoomRole === 'receiver'
-                      ? 'Share your screen to all connected participants in this room while watching incoming screens.'
-                      : 'Share your screen to approved participants or view incoming participant screens below.'}
-                  </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={shareBusy || !canShareScreen}
-                    onClick={handleShareBack}
-                    className="inline-flex min-h-[38px] items-center gap-1.5 bg-[#FF7849] px-3 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
-                  >
-                    <MonitorPlay className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>
-                      {shareBusy
-                        ? 'Starting...'
-                        : webrtcState.isSharingLocal
-                          ? 'Replace My Screen'
-                          : 'Share My Screen'}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!webrtcState.isSharingLocal}
-                    onClick={onStopSharing}
-                    className="inline-flex min-h-[38px] items-center gap-1.5 border border-[#EF4444]/60 bg-[#131619] px-3 text-xs font-semibold text-[#EF4444] hover:bg-[#EF4444]/10 disabled:border-[#252A2F] disabled:text-[#929A9D] disabled:opacity-50"
-                  >
-                    <Square className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Stop My Screen</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onNavigate('cast')}
-                    className="inline-flex min-h-[38px] items-center gap-1.5 border border-[#252A2F] bg-[#131619] px-3 text-xs font-medium text-[#F2F3F0] hover:border-[#FF7849]"
-                  >
-                    <Cast className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Open Cast Studio</span>
-                  </button>
-                </div>
+                <span className="text-xs text-[#64748B] tabular-metrics">
+                  {pendingRequests.length} pending
+                </span>
               </div>
-              {webrtcState.errorMessage && (
-                <div
-                  role="alert"
-                  className="border border-[#EF4444]/60 bg-[#131619] px-3 py-2 text-xs text-[#EF4444]"
-                >
-                  {webrtcState.errorMessage}
-                </div>
+
+              {pendingRequests.length === 0 ? (
+                <p className="mt-3 text-xs leading-relaxed text-[#64748B]">
+                  No pending requests. Participants entering your room code appear here for explicit approval before joining.
+                </p>
+              ) : (
+                <ul className="mt-3 divide-y divide-[#E2E8F0]">
+                  {pendingRequests.map((req) => (
+                    <li
+                      key={req.deviceId}
+                      className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div className="min-w-0 space-y-0.5">
+                        <div className="truncate text-sm font-semibold text-[#172033]">
+                          {req.deviceName}
+                        </div>
+                        <div className="text-xs text-[#64748B] tabular-metrics">
+                          {req.platform} · {req.deviceId}
+                        </div>
+                      </div>
+                      {activeRoomRole === 'host' && (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            disabled={actionId === req.deviceId}
+                            onClick={() => runHostDecision(req.deviceId, 'approve')}
+                            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg bg-[#16A34A] px-3.5 text-xs font-semibold text-white hover:bg-[#15803D] disabled:opacity-50"
+                          >
+                            <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span>Approve</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={actionId === req.deviceId}
+                            onClick={() => runHostDecision(req.deviceId, 'reject')}
+                            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-3.5 text-xs font-medium text-[#172033] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-50"
+                          >
+                            <X className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span>Reject</span>
+                          </button>
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
           )}
 
-          {/* Incoming Screens Panel (works symmetrically for Host & Paired Participant) */}
-          {(isApprovedMember || webrtcState.incomingStreams.length > 0) && (
-            <IncomingScreensPanel
-              streams={webrtcState.incomingStreams}
-              emptyMessage={
-                activeRoomRole === 'receiver'
-                  ? `Paired with ${activeRoom?.hostDeviceName ?? 'host'}. Waiting for host to click Share My Screen — or click Share My Screen above to cast your screen to them.`
-                  : 'No paired participant is sharing their screen back yet. Approved participants can click Share My Screen to publish to this room.'
-              }
-            />
-          )}
-
-          {/* Host Incoming Approval Queue */}
-          <div className="border border-[#252A2F] bg-[#191D20] p-4">
-            <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
+          {/* Participant Roster */}
+          <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3">
               <div className="flex items-center gap-2">
-                <ShieldCheck className="h-4 w-4 text-[#8BD7B0]" aria-hidden="true" />
-                <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                  Incoming Approval Queue
+                <Users className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
+                <h2 className="text-sm font-semibold text-[#172033]">
+                  Participant List
                 </h2>
               </div>
-              <span className="font-mono text-xs text-[#929A9D] tabular-metrics">
-                {pendingRequests.length} pending
+              <span className="text-xs text-[#64748B] tabular-metrics">
+                {activeRoom
+                  ? `${activeRoom.activeReceiverCount} / ${activeRoom.maxReceivers} receiver slots connected`
+                  : '0 / 6 slots'}
               </span>
             </div>
 
-            {pendingRequests.length === 0 ? (
-              <div className="py-6">
-                <div className="hidden sm:grid grid-cols-4 border-b border-[#252A2F] pb-2 text-[10px] uppercase tracking-[0.08em] text-[#929A9D]">
-                  <span>Receiver</span>
-                  <span>Platform</span>
-                  <span>Status</span>
-                  <span className="text-right">Action</span>
-                </div>
-                <p className="mt-4 text-xs leading-relaxed text-[#929A9D]">
-                  No incoming pairing requests. Participants never auto-pair — every device joining a room code must be explicitly approved by the host before pairing completes.
-                </p>
-              </div>
-            ) : (
-              <div className="mt-3 divide-y divide-[#252A2F]">
-                {pendingRequests.map((req) => (
-                  <div
-                    key={req.deviceId}
-                    className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
-                  >
-                    <div className="space-y-0.5 text-xs">
-                      <div className="font-medium text-[#F2F3F0]">{req.deviceName}</div>
-                      <div className="font-mono text-[#929A9D] tabular-metrics">
-                        {req.platform} · {req.deviceId} · Awaiting approval
-                      </div>
-                    </div>
-                    {activeRoomRole === 'host' && (
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          disabled={actionId === req.deviceId}
-                          onClick={() => runHostDecision(req.deviceId, 'approve')}
-                          className="inline-flex min-h-[44px] items-center gap-1.5 bg-[#8BD7B0] px-3 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
-                        >
-                          <Check className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Approve</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={actionId === req.deviceId}
-                          onClick={() => runHostDecision(req.deviceId, 'reject')}
-                          className="inline-flex min-h-[44px] items-center gap-1.5 border border-[#252A2F] bg-[#131619] px-3 text-xs font-medium text-[#F2F3F0] hover:border-[#EF4444] disabled:opacity-50"
-                        >
-                          <X className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Reject</span>
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Host / Room Paired Participants Roster */}
-          <div className="border border-[#252A2F] bg-[#191D20] p-4">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#252A2F] pb-2.5">
-              <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                Paired Participants
-              </h2>
-              <div className="flex items-center gap-3">
-                <span className="font-mono text-xs text-[#929A9D] tabular-metrics">
-                  {activeRoom ? `${activeRoom.activeReceiverCount} connected / ${pairedReceivers.length} paired` : '0 / 6'}
-                </span>
-                {activeRoomRole === 'host' && pairedReceivers.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => onNavigate('cast')}
-                    className="inline-flex min-h-[30px] items-center gap-1.5 bg-[#FF7849] px-3 text-[11px] font-semibold text-[#101214] hover:opacity-90"
-                  >
-                    <Cast className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Open Cast Studio</span>
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {pairedReceivers.length === 0 ? (
-              <p className="mt-3 text-xs leading-relaxed text-[#929A9D]">
-                No paired participants in this room yet. Approved devices appear here with assigned slots (up to 6) and individual disconnect controls.
+            {!activeRoom ? (
+              <p className="mt-3 text-xs leading-relaxed text-[#64748B]">
+                Create a room or join with a code to view connected participants and manage room access.
               </p>
             ) : (
-              <ul className="mt-3 divide-y divide-[#252A2F]">
-                {pairedReceivers.map((rx) => (
-                  <li
-                    key={rx.deviceId}
-                    className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between"
-                  >
-                    <div className="space-y-0.5 text-xs">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-[11px] text-[#929A9D] tabular-metrics">
-                          SLOT {String(rx.assignedSlotIndex + 1).padStart(2, '0')}
-                        </span>
-                        <span className="font-medium text-[#F2F3F0]">{rx.deviceName}</span>
-                      </div>
-                      <div className="font-mono text-[11px] text-[#929A9D] tabular-metrics">
-                        {rx.platform} · {rx.deviceId}
-                      </div>
+              <ul className="mt-2 divide-y divide-[#E2E8F0]">
+                {/* Host Entry */}
+                <li className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-[#172033] truncate">
+                        {activeRoom.hostDeviceName}
+                        {activeRoom.hostDeviceId === deviceId ? ' (You)' : ''}
+                      </span>
+                      <span className="text-xs font-medium text-[#2563EB]">Host</span>
                     </div>
-                    <div className="flex items-center gap-3">
-                      <SignalBadge
-                        label={rx.connected ? 'Paired' : 'Disconnected'}
-                        tone={rx.connected ? 'active' : 'warn'}
-                      />
-                      {activeRoomRole === 'host' && (
-                        <button
-                          type="button"
-                          disabled={actionId === rx.deviceId}
-                          onClick={() => runHostDecision(rx.deviceId, 'remove')}
-                          className="inline-flex min-h-[36px] items-center gap-1.5 border border-[#252A2F] bg-[#131619] px-3 text-xs font-medium text-[#F2F3F0] hover:border-[#EF4444] hover:text-[#EF4444] disabled:opacity-50"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Remove</span>
-                        </button>
-                      )}
+                    <div className="text-xs text-[#64748B] tabular-metrics">
+                      {activeRoom.hostPlatform} · {activeRoom.hostDeviceId}
                     </div>
+                  </div>
+                  <SignalBadge
+                    label={activeRoom.hostConnected ? 'Connected' : 'Disconnected'}
+                    tone={activeRoom.hostConnected ? 'active' : 'warn'}
+                  />
+                </li>
+
+                {pairedReceivers.length === 0 ? (
+                  <li className="py-4 text-xs text-[#64748B]">
+                    No paired participants yet. Share room code{' '}
+                    <span className="font-mono font-semibold text-[#172033]">{activeRoom.roomId}</span>{' '}
+                    so others can request access.
                   </li>
-                ))}
+                ) : (
+                  pairedReceivers.map((rx) => {
+                    const isSharingToMe = webrtcState.incomingStreams.some(
+                      (s) => s.senderDeviceId === rx.deviceId && s.stream !== null
+                    );
+                    return (
+                      <li
+                        key={rx.deviceId}
+                        className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-xs text-[#64748B] tabular-metrics">
+                              Slot {rx.assignedSlotIndex + 1}
+                            </span>
+                            <span aria-hidden="true" className="text-[#CBD5E1]">
+                              ·
+                            </span>
+                            <span className="truncate text-sm font-semibold text-[#172033]">
+                              {rx.deviceName}
+                              {rx.deviceId === deviceId ? ' (You)' : ''}
+                            </span>
+                          </div>
+                          <div className="text-xs text-[#64748B] tabular-metrics">
+                            {rx.platform} · {rx.deviceId}
+                            {isSharingToMe && ' · Sharing screen'}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-3 shrink-0">
+                          <SignalBadge
+                            label={rx.connected ? 'Connected' : 'Disconnected'}
+                            tone={rx.connected ? 'active' : 'warn'}
+                          />
+                          {activeRoomRole === 'host' && (
+                            <button
+                              type="button"
+                              disabled={actionId === rx.deviceId}
+                              onClick={() => runHostDecision(rx.deviceId, 'remove')}
+                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#64748B] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-50"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                              <span>Remove</span>
+                            </button>
+                          )}
+                        </div>
+                      </li>
+                    );
+                  })
+                )}
               </ul>
             )}
           </div>
+
+          {(isApprovedMember || webrtcState.incomingStreams.length > 0) && (
+            <IncomingScreensPanel
+              streams={webrtcState.incomingStreams}
+              compactTelemetry
+              emptyMessage={
+                activeRoomRole === 'receiver'
+                  ? `Connected to room ${activeRoom?.roomId ?? ''}. Incoming screens appear here whenever a participant shares.`
+                  : 'No participant is sharing a screen right now.'
+              }
+            />
+          )}
         </section>
       </div>
     </div>

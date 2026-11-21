@@ -1,12 +1,35 @@
-import { useEffect, useRef, useState } from 'react';
-import { Maximize2, Minimize2, Power, Volume2, VolumeX } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronUp,
+  Maximize2,
+  Minimize2,
+  MonitorPlay,
+  Power,
+  Radio,
+  SlidersHorizontal,
+  Square,
+  Users,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
+import type { PairingLifecycleStatus, RoomSnapshot } from '../services/backendClient';
+import type { WebRtcSessionSnapshot } from '../services/webrtcSignalingBridge';
+import type { CastoraPlatform } from '../types/protocol';
 import type {
   BrowserCapabilityReport,
+  CapturePreferences,
+  CodecPreference,
   ConnectedReceiverSlot,
+  FrameRateTarget,
   MultiViewLayout,
+  ResolutionPresetId,
   StreamTelemetrySnapshot,
+  StudioDestination,
 } from '../types/studio';
 import { SignalBadge } from '../components/common/SignalBadge';
+import { TelemetryStrip } from '../components/common/TelemetryStrip';
 import { VideoSurface } from '../components/common/VideoSurface';
 
 interface MultiViewViewProps {
@@ -14,17 +37,59 @@ interface MultiViewViewProps {
   onChangeLayout: (layout: MultiViewLayout) => void;
   slots: ConnectedReceiverSlot[];
   capabilities: BrowserCapabilityReport;
+  deviceId?: string;
+  deviceName?: string;
+  preferences?: CapturePreferences;
+  onUpdatePreferences?: (next: CapturePreferences) => void;
+  activeRoom?: RoomSnapshot | null;
+  activeRoomRole?: 'host' | 'receiver' | null;
+  pairingStatus?: PairingLifecycleStatus;
+  webrtcState?: WebRtcSessionSnapshot;
+  onStartSharing?: (targetSelection: string | string[] | null) => Promise<void>;
+  onConnectReceiver?: (targetPeerId: string) => Promise<void>;
+  onStopSharing?: () => void;
+  onNavigate?: (destination: StudioDestination) => void;
+  defaultShowSharePanel?: boolean;
   onToggleMute?: (slotIndex: number) => void;
   onDisconnectSlot?: (peerDeviceId: string) => void;
-  onLogEvent: (category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error', title: string, detail: string) => void;
+  onLogEvent: (
+    category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error',
+    title: string,
+    detail: string
+  ) => void;
+}
+
+interface PublishTargetOption {
+  deviceId: string;
+  deviceName: string;
+  platform: CastoraPlatform;
+  roleLabel: string;
+  connected: boolean;
 }
 
 const LAYOUT_OPTIONS: { id: MultiViewLayout; label: string; count: number }[] = [
+  { id: 'auto', label: 'Auto', count: 0 },
   { id: '2-up', label: '2-Up', count: 2 },
   { id: '3-up', label: '3-Up', count: 3 },
   { id: '4-up', label: '4-Up', count: 4 },
   { id: '6-up', label: '6-Up', count: 6 },
   { id: 'spotlight', label: 'Spotlight', count: 6 },
+];
+
+const RESOLUTION_OPTIONS: { id: ResolutionPresetId; label: string }[] = [
+  { id: '1080p', label: '1080p' },
+  { id: '720p', label: '720p' },
+  { id: 'native', label: 'Native' },
+];
+
+const FPS_OPTIONS: { value: FrameRateTarget; label: string }[] = [
+  { value: 60, label: '60 FPS' },
+  { value: 30, label: '30 FPS' },
+];
+
+const CODEC_OPTIONS: { value: CodecPreference; label: string }[] = [
+  { value: 'H264', label: 'H.264' },
+  { value: 'AUTO', label: 'Auto' },
 ];
 
 const EMPTY_TELEMETRY: StreamTelemetrySnapshot = {
@@ -51,6 +116,18 @@ export function MultiViewView({
   onChangeLayout,
   slots,
   capabilities,
+  deviceId,
+  deviceName = 'My Device',
+  preferences,
+  onUpdatePreferences,
+  activeRoom = null,
+  activeRoomRole = null,
+  webrtcState,
+  onStartSharing,
+  onConnectReceiver,
+  onStopSharing,
+  onNavigate,
+  defaultShowSharePanel = false,
   onToggleMute,
   onDisconnectSlot,
   onLogEvent,
@@ -58,7 +135,17 @@ export function MultiViewView({
   const [spotlightIndex, setSpotlightIndex] = useState<number>(0);
   const [wallNotice, setWallNotice] = useState<string | null>(null);
   const [isWallFullscreen, setIsWallFullscreen] = useState<boolean>(false);
+  const [showSharePanel, setShowSharePanel] = useState<boolean>(defaultShowSharePanel);
+  const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
+  const [shareBusy, setShareBusy] = useState<boolean>(false);
+  const [shareError, setShareError] = useState<string | null>(null);
   const wallRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (defaultShowSharePanel) {
+      setShowSharePanel(true);
+    }
+  }, [defaultShowSharePanel]);
 
   useEffect(() => {
     if (typeof document === 'undefined') return;
@@ -75,27 +162,124 @@ export function MultiViewView({
     };
   }, []);
 
-  const slotCount = LAYOUT_OPTIONS.find((opt) => opt.id === layout)?.count ?? 6;
-  const activeStreamCount = slots.filter((s) => s.stream !== null).length;
+  const canCapture = capabilities.isSecureContext && capabilities.supportsDisplayMedia;
+  const isApprovedInRoom =
+    Boolean(activeRoom) &&
+    (activeRoomRole === 'host' ||
+      Boolean(activeRoom?.pairedReceivers.some((r) => r.deviceId === deviceId)));
+  const isPendingParticipant = Boolean(activeRoom) && !isApprovedInRoom;
 
-  const normalizedSlots: ConnectedReceiverSlot[] = Array.from(
-    { length: slotCount },
-    (_, idx) =>
-      slots[idx] ?? {
-        slotIndex: idx,
-        receiverDeviceId: '',
-        deviceName: `Standby Feed ${String(idx + 1).padStart(2, '0')}`,
-        platform: 'macos',
-        connectionState: 'idle',
-        stream: null,
-        hasAudioTrack: false,
-        muted: true,
-        telemetry: EMPTY_TELEMETRY,
+  const roomPeers: PublishTargetOption[] = useMemo(() => {
+    if (!activeRoom || !isApprovedInRoom || !deviceId) return [];
+    const list: PublishTargetOption[] = [];
+    if (activeRoom.hostDeviceId !== deviceId) {
+      list.push({
+        deviceId: activeRoom.hostDeviceId,
+        deviceName: activeRoom.hostDeviceName,
+        platform: activeRoom.hostPlatform,
+        roleLabel: 'Host',
+        connected: activeRoom.hostConnected,
+      });
+    }
+    for (const rx of activeRoom.pairedReceivers) {
+      if (rx.deviceId === deviceId) continue;
+      list.push({
+        deviceId: rx.deviceId,
+        deviceName: rx.deviceName,
+        platform: rx.platform,
+        roleLabel: `Slot ${rx.assignedSlotIndex + 1}`,
+        connected: rx.connected,
+      });
+    }
+    return list;
+  }, [activeRoom, deviceId, isApprovedInRoom]);
+
+  const connectedPeers = roomPeers.filter((p) => p.connected);
+
+  useEffect(() => {
+    if (connectedPeers.length === 0) {
+      setSelectedTarget(null);
+      return;
+    }
+    if (selectedTarget === 'ALL') return;
+    const stillValid = connectedPeers.some((p) => p.deviceId === selectedTarget);
+    if (!stillValid) {
+      setSelectedTarget(connectedPeers.length > 1 ? 'ALL' : connectedPeers[0].deviceId);
+    }
+  }, [connectedPeers, selectedTarget]);
+
+  const handleStartLocalShare = async () => {
+    if (!onStartSharing) return;
+    setShareError(null);
+    setShareBusy(true);
+    try {
+      await onStartSharing(selectedTarget);
+    } catch (err) {
+      setShareError(err instanceof Error ? err.message : 'Unable to start screen sharing');
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const handleConnectSelected = async () => {
+    if (!onConnectReceiver || !selectedTarget) return;
+    setShareError(null);
+    setShareBusy(true);
+    try {
+      if (selectedTarget === 'ALL') {
+        for (const peer of connectedPeers) {
+          await onConnectReceiver(peer.deviceId);
+        }
+      } else {
+        await onConnectReceiver(selectedTarget);
       }
-  );
+    } catch (err) {
+      setShareError(err instanceof Error ? err.message : 'Unable to send screen to peer');
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const activeStreamCount = slots.filter((s) => s.stream !== null).length;
+  const activeOutboundTargets = webrtcState?.outboundPeers ?? [];
+  const needsTargetSend =
+    Boolean(webrtcState?.localStream) &&
+    Boolean(selectedTarget) &&
+    Boolean(onConnectReceiver) &&
+    (selectedTarget === 'ALL'
+      ? connectedPeers.some(
+          (p) => !activeOutboundTargets.some((o) => o.targetDeviceId === p.deviceId)
+        )
+      : !activeOutboundTargets.some((o) => o.targetDeviceId === selectedTarget));
+
+  const slotCount =
+    layout === 'auto'
+      ? slots.length
+      : LAYOUT_OPTIONS.find((opt) => opt.id === layout)?.count ?? 6;
+
+  const normalizedSlots: ConnectedReceiverSlot[] =
+    layout === 'auto'
+      ? slots
+      : Array.from(
+          { length: slotCount },
+          (_, idx) =>
+            slots[idx] ?? {
+              slotIndex: idx,
+              receiverDeviceId: '',
+              deviceName: `Standby Feed ${idx + 1}`,
+              platform: 'macos',
+              connectionState: 'idle',
+              stream: null,
+              hasAudioTrack: false,
+              muted: true,
+              telemetry: EMPTY_TELEMETRY,
+            }
+        );
 
   const handleWallFullscreen = async () => {
-    const wallEl = wallRef.current as (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void }) | null;
+    const wallEl = wallRef.current as
+      | (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void })
+      | null;
     if (!capabilities.supportsFullscreen || !wallEl) {
       setWallNotice('Fullscreen API is not available in this browser context.');
       return;
@@ -112,7 +296,7 @@ export function MultiViewView({
         } else if (typeof fsDoc.webkitExitFullscreen === 'function') {
           await fsDoc.webkitExitFullscreen();
         }
-        onLogEvent('ui', 'Exited monitor wall fullscreen', 'Returned Multi-View to standard viewport.');
+        onLogEvent('ui', 'Exited monitor wall fullscreen', 'Returned Screens grid to standard view.');
       } else {
         if (activeEl) {
           if (typeof document.exitFullscreen === 'function') {
@@ -126,81 +310,112 @@ export function MultiViewView({
         } else if (typeof wallEl.webkitRequestFullscreen === 'function') {
           await wallEl.webkitRequestFullscreen();
         }
-        onLogEvent('ui', 'Entered monitor wall fullscreen', `Expanded ${layout} wall to fullscreen.`);
+        onLogEvent('ui', 'Entered monitor wall fullscreen', `Expanded ${layout} grid to fullscreen.`);
       }
       setWallNotice(null);
     } catch {
-      setWallNotice('Browser blocked fullscreen request outside a direct gesture or iframe policy.');
+      setWallNotice('Browser blocked fullscreen request outside a direct gesture.');
     }
   };
 
   const gridClass =
-    layout === '2-up'
-      ? 'grid-cols-1 md:grid-cols-2'
-      : layout === '3-up'
-        ? 'grid-cols-1 md:grid-cols-3'
-        : layout === '4-up'
-          ? 'grid-cols-1 sm:grid-cols-2'
-          : 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-3';
+    layout === 'auto'
+      ? normalizedSlots.length <= 1
+        ? 'grid-cols-1'
+        : normalizedSlots.length === 2
+          ? 'grid-cols-1 md:grid-cols-2'
+          : 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3'
+      : layout === '2-up'
+        ? 'grid-cols-1 md:grid-cols-2'
+        : layout === '3-up'
+          ? 'grid-cols-1 md:grid-cols-3'
+          : layout === '4-up'
+            ? 'grid-cols-1 sm:grid-cols-2'
+            : 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-3';
 
   const renderTile = (slot: ConnectedReceiverSlot, isPrimarySpotlight = false) => {
-    const slotCode = `IN-${String(slot.slotIndex + 1).padStart(2, '0')}`;
+    const slotCode = `Screen ${slot.slotIndex + 1}`;
     const hasRealPeer = slot.receiverDeviceId.length > 0;
     const isActive = hasRealPeer && slot.connectionState === 'connected' && slot.stream !== null;
-    const isConnecting = hasRealPeer && (slot.connectionState === 'connecting' || slot.connectionState === 'reconnecting');
+    const isConnecting =
+      hasRealPeer &&
+      (slot.connectionState === 'connecting' || slot.connectionState === 'reconnecting');
+    const isDisconnected = hasRealPeer && slot.connectionState === 'disconnected';
     const isError = hasRealPeer && slot.connectionState === 'failed';
     const isSpotlightTarget = layout === 'spotlight' && slot.slotIndex === spotlightIndex;
+    const isSingleLarge = layout === 'auto' && normalizedSlots.length === 1;
 
-    const measuredFps = slot.telemetry.decodedFps ?? slot.telemetry.encodedFps ?? slot.telemetry.captureFps;
+    const measuredFps =
+      slot.telemetry.decodedFps ?? slot.telemetry.encodedFps ?? slot.telemetry.captureFps;
 
     return (
       <VideoSurface
         key={`${slot.slotIndex}-${slot.receiverDeviceId || 'standby'}`}
         slotLabel={slotCode}
-        title={
-          hasRealPeer
-            ? `${slot.deviceName} (${slot.receiverDeviceId})`
-            : `${slot.deviceName}`
+        title={hasRealPeer ? slot.deviceName : slot.deviceName}
+        subtitle={
+          hasRealPeer ? `${slot.platform} · ${slot.receiverDeviceId}` : undefined
         }
         stream={slot.stream}
         muted={slot.muted}
+        large={isPrimarySpotlight || isSingleLarge}
         highlight={isPrimarySpotlight || isSpotlightTarget || isActive}
         standbyReason={
           hasRealPeer
-            ? `Connecting to incoming stream from ${slot.deviceName}...`
-            : 'No incoming stream on this feed. Real incoming participant screens and getStats() telemetry appear automatically when shared.'
+            ? `Connecting to stream from ${slot.deviceName}...`
+            : 'Available feed slot. Incoming participant screens appear here automatically.'
         }
         statusBadge={
           <SignalBadge
-            label={isActive ? 'LIVE' : isConnecting ? 'CONNECTING' : isError ? 'ERROR' : 'STANDBY'}
-            tone={isActive ? 'active' : isConnecting ? 'signal' : isError ? 'fault' : 'standby'}
+            label={
+              isActive
+                ? 'Live'
+                : isConnecting
+                  ? 'Connecting'
+                  : isDisconnected
+                    ? 'Disconnected'
+                    : isError
+                      ? 'Error'
+                      : 'Standby'
+            }
+            tone={
+              isActive
+                ? 'active'
+                : isConnecting
+                  ? 'signal'
+                  : isDisconnected
+                    ? 'warn'
+                    : isError
+                      ? 'fault'
+                      : 'standby'
+            }
             pulse={isConnecting}
           />
         }
         footerMeta={
-          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] tabular-metrics">
-            <div className="flex flex-wrap items-center gap-3 text-[#929A9D]">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs tabular-metrics">
+            <div className="flex flex-wrap items-center gap-3 text-[#64748B]">
               <span>
                 FPS:{' '}
-                <strong className="font-medium text-[#F2F3F0]">
+                <strong className="font-semibold text-[#172033]">
                   {measuredFps !== null ? measuredFps.toFixed(1) : '—'}
                 </strong>
               </span>
               <span>
                 Bitrate:{' '}
-                <strong className="font-medium text-[#F2F3F0]">
+                <strong className="font-semibold text-[#172033]">
                   {formatBitrate(slot.telemetry.bitrateKbps)}
                 </strong>
               </span>
               <span>
                 Res:{' '}
-                <strong className="font-medium text-[#F2F3F0]">
+                <strong className="font-semibold text-[#172033]">
                   {slot.telemetry.resolution ?? '—'}
                 </strong>
               </span>
               <span>
                 RTT:{' '}
-                <strong className="font-medium text-[#F2F3F0]">
+                <strong className="font-semibold text-[#172033]">
                   {slot.telemetry.rttMs !== null ? `${slot.telemetry.rttMs.toFixed(1)} ms` : '—'}
                 </strong>
               </span>
@@ -212,9 +427,13 @@ export function MultiViewView({
                   type="button"
                   onClick={() => {
                     setSpotlightIndex(slot.slotIndex);
-                    onLogEvent('ui', 'Spotlight tile switched', `Focused ${slotCode} in Multi-View spotlight stage.`);
+                    onLogEvent(
+                      'ui',
+                      'Spotlight tile switched',
+                      `Focused ${slotCode} in Screens spotlight.`
+                    );
                   }}
-                  className="border border-[#252A2F] bg-[#191D20] px-2 py-1 text-[10px] font-medium text-[#F2F3F0] hover:border-[#FF7849]"
+                  className="rounded-lg border border-[#E2E8F0] bg-white px-2.5 py-1 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
                 >
                   Focus
                 </button>
@@ -226,29 +445,31 @@ export function MultiViewView({
                 title={
                   isActive && slot.hasAudioTrack
                     ? slot.muted
-                      ? 'Unmute tile'
-                      : 'Mute tile'
-                    : 'Available when stream has audio'
+                      ? 'Unmute audio'
+                      : 'Mute audio'
+                    : 'No audio track'
                 }
-                className="inline-flex h-7 w-7 items-center justify-center border border-[#252A2F] bg-[#191D20] text-[#929A9D] hover:border-[#FF7849] hover:text-[#F2F3F0] disabled:opacity-40"
-                aria-label={`Toggle mute for ${slotCode}`}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[#E2E8F0] bg-white text-[#64748B] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-40"
+                aria-label={`Toggle mute for ${slot.deviceName}`}
               >
                 {slot.muted ? (
                   <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
                 ) : (
-                  <Volume2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  <Volume2 className="h-3.5 w-3.5 text-[#2563EB]" aria-hidden="true" />
                 )}
               </button>
-              <button
-                type="button"
-                disabled={!hasRealPeer || !onDisconnectSlot}
-                onClick={() => onDisconnectSlot?.(slot.receiverDeviceId)}
-                title={hasRealPeer ? 'Disconnect participant' : 'Available when participant is connected'}
-                className="inline-flex h-7 w-7 items-center justify-center border border-[#252A2F] bg-[#191D20] text-[#929A9D] hover:border-[#EF4444] hover:text-[#EF4444] disabled:opacity-40"
-                aria-label={`Disconnect ${slotCode}`}
-              >
-                <Power className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
+              {onDisconnectSlot && (
+                <button
+                  type="button"
+                  disabled={!hasRealPeer}
+                  onClick={() => onDisconnectSlot(slot.receiverDeviceId)}
+                  title={hasRealPeer ? 'Disconnect participant' : 'No active participant'}
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[#E2E8F0] bg-white text-[#64748B] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-40"
+                  aria-label={`Disconnect ${slot.deviceName}`}
+                >
+                  <Power className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              )}
             </div>
           </div>
         }
@@ -257,22 +478,80 @@ export function MultiViewView({
   };
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <div className="space-y-5">
+      {/* Unified Screen-Sharing Control Bar */}
+      <div className="flex flex-col gap-3 rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h1 className="font-display text-lg font-semibold tracking-tight text-[#F2F3F0]">
-            Multi-View Incoming Screens
-          </h1>
-          <p className="text-xs text-[#929A9D]">
-            Live incoming participant screens ({activeStreamCount} active) with real getStats() FPS, bitrate, resolution, and RTT.
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="font-display text-lg font-semibold tracking-tight text-[#172033]">
+              Screens
+            </h1>
+            <span className="text-xs text-[#64748B] tabular-metrics">
+              {activeStreamCount} incoming {activeStreamCount === 1 ? 'stream' : 'streams'} live
+              {webrtcState?.isSharingLocal ? ' · Sharing your screen' : ''}
+            </span>
+          </div>
+          <p className="mt-0.5 text-xs text-[#64748B]">
+            View shared participant screens in full resolution or broadcast your own display simultaneously.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {onStartSharing && (
+            <>
+              <button
+                type="button"
+                disabled={shareBusy || !canCapture || isPendingParticipant}
+                onClick={handleStartLocalShare}
+                className="inline-flex min-h-[38px] items-center gap-2 rounded-[10px] bg-[#2563EB] px-3.5 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+              >
+                <MonitorPlay className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>
+                  {shareBusy
+                    ? 'Starting...'
+                    : webrtcState?.isSharingLocal
+                      ? 'Change Screen'
+                      : 'Share Screen'}
+                </span>
+              </button>
+              {webrtcState?.isSharingLocal && onStopSharing && (
+                <button
+                  type="button"
+                  onClick={onStopSharing}
+                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded-[10px] border border-[#DC2626]/30 bg-[#FEF2F2] px-3.5 text-xs font-semibold text-[#DC2626] hover:bg-[#FEE2E2]"
+                >
+                  <Square className="h-3 w-3" aria-hidden="true" />
+                  <span>Stop Sharing</span>
+                </button>
+              )}
+            </>
+          )}
+
+          {preferences && onUpdatePreferences && (
+            <button
+              type="button"
+              aria-expanded={showSharePanel}
+              onClick={() => setShowSharePanel((prev) => !prev)}
+              className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-[10px] border px-3 text-xs font-medium transition-colors ${
+                showSharePanel
+                  ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                  : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB]'
+              }`}
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Share Controls</span>
+              {showSharePanel ? (
+                <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+              ) : (
+                <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+            </button>
+          )}
+
           <div
             role="group"
-            aria-label="Multi-View Grid Layout"
-            className="inline-flex border border-[#252A2F] bg-[#191D20]"
+            aria-label="Screen Grid Layout"
+            className="inline-flex overflow-x-auto rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] p-0.5"
           >
             {LAYOUT_OPTIONS.map((opt) => {
               const active = layout === opt.id;
@@ -282,12 +561,12 @@ export function MultiViewView({
                   type="button"
                   onClick={() => {
                     onChangeLayout(opt.id);
-                    onLogEvent('ui', 'Multi-View layout switched', `Monitor wall set to ${opt.label}.`);
+                    onLogEvent('ui', 'Screens layout switched', `Grid set to ${opt.label}.`);
                   }}
-                  className={`min-h-[36px] px-3 text-xs font-medium transition-colors whitespace-nowrap ${
+                  className={`min-h-[32px] rounded-lg px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
                     active
-                      ? 'bg-[#FF7849] text-[#101214]'
-                      : 'text-[#929A9D] hover:text-[#F2F3F0]'
+                      ? 'bg-white text-[#172033] shadow-xs'
+                      : 'text-[#64748B] hover:text-[#172033]'
                   }`}
                 >
                   {opt.label}
@@ -299,33 +578,332 @@ export function MultiViewView({
           <button
             type="button"
             onClick={handleWallFullscreen}
-            className="inline-flex min-h-[36px] items-center gap-1.5 border border-[#252A2F] bg-[#191D20] px-3 text-xs font-medium text-[#F2F3F0] hover:border-[#FF7849]"
+            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-[10px] border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
           >
             {isWallFullscreen ? (
               <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
             ) : (
               <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-            <span>{isWallFullscreen ? 'Exit Wall Fullscreen' : 'Fullscreen Wall'}</span>
+            <span className="hidden sm:inline">
+              {isWallFullscreen ? 'Exit Fullscreen' : 'Fullscreen Grid'}
+            </span>
           </button>
         </div>
       </div>
 
-      {wallNotice && (
-        <div className="border border-[#252A2F] bg-[#191D20] px-3 py-2 text-xs text-[#929A9D]">
-          {wallNotice}
+      {!canCapture && (
+        <div
+          role="alert"
+          className="flex items-start gap-3 rounded-xl border border-[#F59E0B]/40 bg-[#FFFBEB] px-4 py-3 text-xs text-[#78350F]"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#B45309]" aria-hidden="true" />
+          <span>
+            {!capabilities.isSecureContext
+              ? 'Screen sharing requires a secure HTTPS origin. Receiving incoming streams remains available.'
+              : 'Screen capture (getDisplayMedia) is unavailable in this browser.'}
+          </span>
         </div>
       )}
 
+      {isPendingParticipant && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#F59E0B]/40 bg-[#FFFBEB] px-4 py-3 text-xs text-[#78350F]">
+          <span>
+            Waiting for host approval in room{' '}
+            <strong className="font-mono">{activeRoom?.roomId}</strong> before sharing or viewing screens.
+          </span>
+          {onNavigate && (
+            <button
+              type="button"
+              onClick={() => onNavigate('receivers')}
+              className="rounded-lg border border-[#F59E0B]/40 bg-white px-3 py-1.5 font-medium text-[#78350F] hover:bg-[#FEF3C7]"
+            >
+              View Room Status
+            </button>
+          )}
+        </div>
+      )}
+
+      {(shareError || webrtcState?.errorMessage || wallNotice) && (
+        <div
+          role="alert"
+          className="rounded-xl border border-[#DC2626]/30 bg-[#FEF2F2] px-4 py-3 text-xs text-[#B91C1C]"
+        >
+          {shareError ?? webrtcState?.errorMessage ?? wallNotice}
+        </div>
+      )}
+
+      {/* Expandable Share Settings & Outbound Preview Drawer */}
+      {showSharePanel && preferences && onUpdatePreferences && (
+        <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-5">
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+            <div className="space-y-4 lg:col-span-6">
+              <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
+                <h2 className="text-sm font-semibold text-[#172033]">
+                  Outbound Capture &amp; Targets
+                </h2>
+                <span className="text-xs text-[#64748B]">
+                  {connectedPeers.length} {connectedPeers.length === 1 ? 'peer' : 'peers'} connected
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div>
+                  <div className="mb-1.5 text-xs font-medium text-[#64748B]">Resolution</div>
+                  <div className="flex rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5">
+                    {RESOLUTION_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() =>
+                          onUpdatePreferences({ ...preferences, resolution: opt.id })
+                        }
+                        className={`flex-1 rounded-md py-1.5 text-xs font-medium ${
+                          preferences.resolution === opt.id
+                            ? 'bg-white text-[#172033] shadow-xs'
+                            : 'text-[#64748B] hover:text-[#172033]'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="mb-1.5 text-xs font-medium text-[#64748B]">Frame Rate</div>
+                  <div className="flex rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5">
+                    {FPS_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() =>
+                          onUpdatePreferences({ ...preferences, targetFps: opt.value })
+                        }
+                        className={`flex-1 rounded-md py-1.5 text-xs font-medium tabular-metrics ${
+                          preferences.targetFps === opt.value
+                            ? 'bg-white text-[#172033] shadow-xs'
+                            : 'text-[#64748B] hover:text-[#172033]'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="mb-1.5 text-xs font-medium text-[#64748B]">Codec &amp; Audio</div>
+                  <div className="flex gap-1.5">
+                    <div className="flex flex-1 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5">
+                      {CODEC_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() =>
+                            onUpdatePreferences({ ...preferences, codecPreference: opt.value })
+                          }
+                          className={`flex-1 rounded-md py-1.5 text-xs font-medium ${
+                            preferences.codecPreference === opt.value
+                              ? 'bg-white text-[#172033] shadow-xs'
+                              : 'text-[#64748B] hover:text-[#172033]'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdatePreferences({
+                          ...preferences,
+                          includeAudio: !preferences.includeAudio,
+                        })
+                      }
+                      title="Include system or tab audio"
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2.5 text-xs font-medium ${
+                        preferences.includeAudio
+                          ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                          : 'border-[#E2E8F0] bg-white text-[#64748B]'
+                      }`}
+                    >
+                      {preferences.includeAudio ? (
+                        <Volume2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      ) : (
+                        <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
+                      )}
+                      <span>Audio</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Target Participant Selection */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium text-[#64748B]">Share Target</span>
+                  {onNavigate && (
+                    <button
+                      type="button"
+                      onClick={() => onNavigate('receivers')}
+                      className="font-medium text-[#2563EB] hover:underline"
+                    >
+                      Manage Room
+                    </button>
+                  )}
+                </div>
+
+                {!activeRoom || !isApprovedInRoom ? (
+                  <p className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs text-[#64748B]">
+                    Join or create a room in Rooms to share with participants.
+                  </p>
+                ) : connectedPeers.length === 0 ? (
+                  <p className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs text-[#64748B]">
+                    Waiting for other approved participants in room{' '}
+                    <span className="font-mono font-semibold text-[#172033]">{activeRoom.roomId}</span>.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {connectedPeers.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedTarget('ALL')}
+                        className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border px-3 text-xs font-medium ${
+                          selectedTarget === 'ALL'
+                            ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                            : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB]'
+                        }`}
+                      >
+                        <Users className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>All Participants ({connectedPeers.length})</span>
+                      </button>
+                    )}
+                    {connectedPeers.map((peer) => {
+                      const active = selectedTarget === peer.deviceId;
+                      return (
+                        <button
+                          key={peer.deviceId}
+                          type="button"
+                          onClick={() => setSelectedTarget(peer.deviceId)}
+                          className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border px-3 text-xs font-medium ${
+                            active
+                              ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                              : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB]'
+                          }`}
+                        >
+                          <span>{peer.deviceName}</span>
+                          <span className="text-[11px] opacity-70">({peer.roleLabel})</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {needsTargetSend && (
+                  <button
+                    type="button"
+                    disabled={shareBusy}
+                    onClick={handleConnectSelected}
+                    className="inline-flex min-h-[38px] items-center gap-2 rounded-[10px] border border-[#16A34A]/40 bg-[#F0FDF4] px-3.5 text-xs font-semibold text-[#15803D] hover:bg-[#DCFCE7]"
+                  >
+                    <Radio className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>
+                      {selectedTarget === 'ALL'
+                        ? 'Send Active Screen to All Participants'
+                        : 'Send Active Screen to Selected Participant'}
+                    </span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-3 lg:col-span-6">
+              <VideoSurface
+                slotLabel="My Screen"
+                title={
+                  webrtcState?.isSharingLocal
+                    ? activeOutboundTargets.length > 0
+                      ? `${deviceName} → ${activeOutboundTargets.map((o) => o.targetName).join(', ')}`
+                      : `${deviceName} (Local Preview)`
+                    : 'Local Outbound Preview'
+                }
+                stream={webrtcState?.localStream ?? null}
+                muted
+                highlight={Boolean(webrtcState?.isSharingLocal)}
+                standbyReason="Click Share Screen to pick a display, window, or browser tab."
+                statusBadge={
+                  <SignalBadge
+                    label={
+                      webrtcState?.isSharingLocal
+                        ? activeOutboundTargets.some((o) => o.phase === 'connected')
+                          ? 'Live'
+                          : 'Preview'
+                        : 'Idle'
+                    }
+                    tone={
+                      webrtcState?.isSharingLocal
+                        ? activeOutboundTargets.some((o) => o.phase === 'connected')
+                          ? 'active'
+                          : 'signal'
+                        : 'standby'
+                    }
+                  />
+                }
+              />
+              {webrtcState && <TelemetryStrip telemetry={webrtcState.outboundTelemetry} compact />}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Primary Received Video Stage */}
       <div
         ref={wallRef}
         className={
           isWallFullscreen
-            ? 'h-screen w-screen overflow-y-auto bg-[#101214] p-4'
-            : 'min-w-0 bg-[#101214]'
+            ? 'h-screen w-screen overflow-y-auto bg-[#F5F7FB] p-4 sm:p-6'
+            : 'min-w-0'
         }
       >
-        {layout === 'spotlight' ? (
+        {layout === 'auto' && normalizedSlots.length === 0 ? (
+          <div className="flex min-h-[420px] flex-col items-center justify-center rounded-xl border border-[#E2E8F0] bg-white px-6 py-12 text-center shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] text-[#2563EB]">
+              <MonitorPlay className="h-6 w-6" aria-hidden="true" />
+            </div>
+            <h2 className="mt-4 font-display text-base font-semibold text-[#172033]">
+              No incoming screens yet
+            </h2>
+            <p className="mt-1.5 max-w-md text-sm leading-relaxed text-[#64748B]">
+              {activeRoom
+                ? 'When a participant in this room shares their screen, their video fills this stage automatically. You can also share your own screen at any time.'
+                : 'Create or join a room first, then any participant can share and receive screens independently.'}
+            </p>
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+              {onStartSharing && canCapture && !isPendingParticipant && (
+                <button
+                  type="button"
+                  disabled={shareBusy}
+                  onClick={handleStartLocalShare}
+                  className="inline-flex min-h-[42px] items-center gap-2 rounded-[10px] bg-[#2563EB] px-4 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                >
+                  <MonitorPlay className="h-4 w-4" aria-hidden="true" />
+                  <span>{shareBusy ? 'Starting...' : 'Share Your Screen'}</span>
+                </button>
+              )}
+              {!activeRoom && onNavigate && (
+                <button
+                  type="button"
+                  onClick={() => onNavigate('receivers')}
+                  className="inline-flex min-h-[42px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-semibold text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                >
+                  <Users className="h-4 w-4" aria-hidden="true" />
+                  <span>Go to Rooms</span>
+                </button>
+              )}
+            </div>
+          </div>
+        ) : layout === 'spotlight' ? (
           <div className="space-y-4">
             <div className="min-w-0">
               {renderTile(
@@ -345,6 +923,38 @@ export function MultiViewView({
           </div>
         )}
       </div>
+
+      {/* Compact Outbound Status Strip when sharing & drawer collapsed */}
+      {webrtcState?.isSharingLocal && !showSharePanel && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#2563EB]/30 bg-[#EFF6FF] px-4 py-3">
+          <div className="flex items-center gap-3 text-sm">
+            <SignalBadge label="Sharing your screen" tone="active" />
+            <span className="text-xs text-[#64748B]">
+              {activeOutboundTargets.length > 0
+                ? `Streaming to ${activeOutboundTargets.map((o) => o.targetName).join(', ')}`
+                : 'Local capture active — waiting for connected peers'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowSharePanel(true)}
+              className="rounded-lg border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+            >
+              Show Self-Preview
+            </button>
+            {onStopSharing && (
+              <button
+                type="button"
+                onClick={onStopSharing}
+                className="rounded-lg bg-[#DC2626] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#B91C1C]"
+              >
+                Stop Sharing
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

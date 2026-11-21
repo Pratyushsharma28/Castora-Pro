@@ -1,22 +1,22 @@
 @import "tailwindcss";
 
 @theme {
-  --font-display: "Outfit", ui-sans-serif, system-ui, sans-serif;
-  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Plus Jakarta Sans", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter", "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
 :root {
-  --castora-bg: #101214;
-  --castora-surface: #191D20;
-  --castora-bay: #131619;
-  --castora-line: #252A2F;
-  --castora-text: #F2F3F0;
-  --castora-muted: #929A9D;
-  --castora-signal: #FF7849;
-  --castora-active: #8BD7B0;
-  --castora-warn: #F59E0B;
-  --castora-fault: #EF4444;
+  --castora-bg: #F5F7FB;
+  --castora-surface: #FFFFFF;
+  --castora-bay: #F8FAFC;
+  --castora-line: #E2E8F0;
+  --castora-text: #172033;
+  --castora-muted: #64748B;
+  --castora-signal: #2563EB;
+  --castora-active: #16A34A;
+  --castora-warn: #D97706;
+  --castora-fault: #DC2626;
 }
 
 @layer base {
@@ -39,6 +39,14 @@
   select:not(:disabled) {
     cursor: pointer;
   }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible {
+    outline: 2px solid #2563EB;
+    outline-offset: 2px;
+  }
 }
 
 .tabular-metrics {
@@ -53,6 +61,4 @@
   max-width: none !important;
   max-height: none !important;
   margin: 0 !important;
-  background-color: #101214 !important;
 }
-

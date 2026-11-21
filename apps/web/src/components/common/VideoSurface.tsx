@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Maximize2, Minimize2, MonitorOff } from 'lucide-react';
+import { Maximize2, Minimize2, Monitor } from 'lucide-react';
 
 interface VideoSurfaceProps {
   slotLabel: string;
   title: string;
+  subtitle?: string;
   stream: MediaStream | null;
   muted?: boolean;
   standbyReason: string;
@@ -12,6 +13,7 @@ interface VideoSurfaceProps {
   footerMeta?: ReactNode;
   highlight?: boolean;
   allowFullscreen?: boolean;
+  large?: boolean;
 }
 
 type FullscreenDocument = Document & {
@@ -36,6 +38,7 @@ function getCurrentFullscreenElement(): Element | null {
 export function VideoSurface({
   slotLabel,
   title,
+  subtitle,
   stream,
   muted = true,
   standbyReason,
@@ -44,6 +47,7 @@ export function VideoSurface({
   footerMeta,
   highlight = false,
   allowFullscreen = true,
+  large = false,
 }: VideoSurfaceProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -103,8 +107,6 @@ export function VideoSurface({
         return;
       }
 
-      // If a parent container (e.g. Multi-View wall) is currently fullscreen, exit it before
-      // entering fullscreen for this specific stream so per-stream fullscreen works independently.
       if (activeEl) {
         if (typeof document.exitFullscreen === 'function') {
           await document.exitFullscreen();
@@ -130,37 +132,65 @@ export function VideoSurface({
       ref={containerRef}
       className={
         isFullscreen
-          ? 'flex h-screen w-screen flex-col overflow-hidden bg-[#101214]'
-          : `flex min-w-0 flex-col border bg-[#191D20] ${
-              highlight ? 'border-[#FF7849]' : 'border-[#252A2F]'
+          ? 'flex h-screen w-screen flex-col overflow-hidden bg-[#0F172A]'
+          : `flex min-w-0 flex-col overflow-hidden rounded-xl border bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] ${
+              highlight ? 'border-[#2563EB]/50 ring-1 ring-[#2563EB]/15' : 'border-[#E2E8F0]'
             }`
       }
     >
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[#252A2F] bg-[#191D20] px-3 py-2">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <span className="font-mono text-[11px] font-medium tracking-[0.08em] text-[#929A9D] tabular-metrics shrink-0">
+      <div
+        className={
+          isFullscreen
+            ? 'flex shrink-0 items-center justify-between gap-3 border-b border-white/10 bg-[#0F172A] px-4 py-2.5'
+            : 'flex shrink-0 items-center justify-between gap-3 border-b border-[#E2E8F0] bg-white px-4 py-2.5'
+        }
+      >
+        <div className="min-w-0 flex items-center gap-2.5">
+          <span
+            className={`font-mono text-[11px] font-medium tabular-metrics shrink-0 ${
+              isFullscreen ? 'text-slate-400' : 'text-[#64748B]'
+            }`}
+          >
             {slotLabel}
           </span>
-          <span className="truncate text-xs font-medium text-[#F2F3F0]">{title}</span>
+          <div className="min-w-0">
+            <div
+              className={`truncate text-sm font-semibold ${
+                isFullscreen ? 'text-white' : 'text-[#172033]'
+              }`}
+            >
+              {title}
+            </div>
+            {subtitle && (
+              <div
+                className={`truncate text-[11px] ${
+                  isFullscreen ? 'text-slate-400' : 'text-[#64748B]'
+                }`}
+              >
+                {subtitle}
+              </div>
+            )}
+          </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+
+        <div className="flex items-center gap-2.5 shrink-0">
           {statusBadge}
           {stream && allowFullscreen && (
             <button
               type="button"
               onClick={handleFullscreen}
-              title={isFullscreen ? 'Exit fullscreen video' : 'Open stream in fullscreen'}
-              aria-label={isFullscreen ? `Exit fullscreen ${slotLabel}` : `Fullscreen ${slotLabel}`}
-              className={`inline-flex h-7 items-center gap-1.5 border px-2 text-[11px] font-medium transition-colors ${
+              title={isFullscreen ? 'Exit fullscreen' : 'Open stream in fullscreen'}
+              aria-label={isFullscreen ? `Exit fullscreen for ${title}` : `Fullscreen ${title}`}
+              className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
                 isFullscreen
-                  ? 'border-[#FF7849] bg-[#FF7849] text-[#101214]'
-                  : 'border-[#252A2F] bg-[#131619] text-[#F2F3F0] hover:border-[#FF7849]'
+                  ? 'border-white/20 bg-white/10 text-white hover:bg-white/20'
+                  : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]'
               }`}
             >
               {isFullscreen ? (
-                <Minimize2 className="h-3 w-3 shrink-0" aria-hidden="true" />
+                <Minimize2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               ) : (
-                <Maximize2 className="h-3 w-3 shrink-0" aria-hidden="true" />
+                <Maximize2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               )}
               <span className="hidden sm:inline">{isFullscreen ? 'Exit' : 'Fullscreen'}</span>
             </button>
@@ -171,9 +201,11 @@ export function VideoSurface({
       <div
         className={
           isFullscreen
-            ? 'relative flex-1 min-h-0 w-full bg-[#101214] overflow-hidden'
-            : `relative w-full bg-[#131619] overflow-hidden ${
-                stream ? 'aspect-video max-h-[75vh]' : 'aspect-video'
+            ? 'relative flex-1 min-h-0 w-full overflow-hidden bg-[#0F172A]'
+            : `relative w-full overflow-hidden ${
+                stream
+                  ? `bg-[#0F172A] aspect-video ${large ? 'max-h-[78vh]' : 'max-h-[72vh]'}`
+                  : 'bg-[#F8FAFC] aspect-video max-h-[56vh]'
               }`
         }
       >
@@ -184,24 +216,34 @@ export function VideoSurface({
             playsInline
             muted={muted}
             onDoubleClick={allowFullscreen ? () => void handleFullscreen() : undefined}
-            className="absolute inset-0 h-full w-full object-contain bg-[#101214]"
+            className="absolute inset-0 h-full w-full bg-[#0F172A] object-contain"
           />
         ) : (
-          <div className="flex h-full w-full flex-col items-center justify-center px-4 py-6 text-center">
-            <MonitorOff className="h-6 w-6 text-[#929A9D]/70" aria-hidden="true" />
-            <p className="mt-2.5 text-xs font-medium tracking-[0.04em] text-[#F2F3F0]">
-              NO ACTIVE SIGNAL
-            </p>
-            <p className="mt-1 max-w-sm text-xs leading-relaxed text-[#929A9D]">
+          <div className="flex h-full w-full flex-col items-center justify-center px-6 py-8 text-center">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#E2E8F0] bg-white text-[#64748B] shadow-xs">
+              <Monitor className="h-5 w-5" aria-hidden="true" />
+            </div>
+            <p className="mt-3 text-sm font-semibold text-[#172033]">Waiting for screen signal</p>
+            <p className="mt-1 max-w-md text-xs leading-relaxed text-[#64748B]">
               {standbyReason}
             </p>
-            {actions && <div className="mt-4 flex flex-wrap items-center justify-center gap-2">{actions}</div>}
+            {actions && (
+              <div className="mt-4 flex flex-wrap items-center justify-center gap-2.5">
+                {actions}
+              </div>
+            )}
           </div>
         )}
       </div>
 
       {footerMeta && (
-        <div className="shrink-0 border-t border-[#252A2F] bg-[#131619] px-3 py-2">
+        <div
+          className={
+            isFullscreen
+              ? 'shrink-0 border-t border-white/10 bg-[#0F172A] px-4 py-2 text-slate-300'
+              : 'shrink-0 border-t border-[#E2E8F0] bg-[#F8FAFC] px-4 py-2.5'
+          }
+        >
           {footerMeta}
         </div>
       )}

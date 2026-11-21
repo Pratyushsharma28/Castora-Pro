@@ -11,17 +11,19 @@ interface SignalBadgeProps {
 export function SignalBadge({ label, tone, pulse = false }: SignalBadgeProps) {
   const toneClass =
     tone === 'active'
-      ? 'text-[#8BD7B0]'
+      ? 'text-[#15803D]'
       : tone === 'signal'
-        ? 'text-[#FF7849]'
+        ? 'text-[#2563EB]'
         : tone === 'warn'
-          ? 'text-[#F59E0B]'
+          ? 'text-[#B45309]'
           : tone === 'fault'
-            ? 'text-[#EF4444]'
-            : 'text-[#929A9D]';
+            ? 'text-[#DC2626]'
+            : 'text-[#64748B]';
 
   return (
-    <span className={`inline-flex items-center gap-1.5 text-xs font-medium tabular-metrics whitespace-nowrap ${toneClass}`}>
+    <span
+      className={`inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap tabular-metrics ${toneClass}`}
+    >
       {tone === 'active' && <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />}
       {tone === 'warn' && <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />}
       {tone === 'fault' && <CircleSlash className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />}
@@ -34,7 +36,7 @@ export function SignalBadge({ label, tone, pulse = false }: SignalBadgeProps) {
       {tone === 'standby' && (
         <span
           aria-hidden="true"
-          className="inline-block h-2 w-2 border border-[#929A9D]"
+          className="inline-block h-2 w-2 rounded-full bg-[#CBD5E1]"
         />
       )}
       <span>{label}</span>

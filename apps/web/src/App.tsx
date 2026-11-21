@@ -39,7 +39,6 @@ import type {
   StudioDestination,
 } from './types/studio';
 import { ActivityView } from './views/ActivityView';
-import { CastView } from './views/CastView';
 import { ControlRoomView } from './views/ControlRoomView';
 import { MultiViewView } from './views/MultiViewView';
 import { ReceiversView } from './views/ReceiversView';
@@ -65,6 +64,24 @@ function getInitialRouteState(): {
   if (window.location.pathname.includes('/join') || room.length > 0) {
     return { destination: 'receivers', roomCode: room };
   }
+
+  const viewParam = (params.get('view') ?? '').toLowerCase();
+  if (viewParam === 'rooms' || viewParam === 'receivers') {
+    return { destination: 'receivers', roomCode: '' };
+  }
+  if (viewParam === 'screens' || viewParam === 'multi-view') {
+    return { destination: 'multi-view', roomCode: '' };
+  }
+  if (viewParam === 'cast') {
+    return { destination: 'cast', roomCode: '' };
+  }
+  if (viewParam === 'settings') {
+    return { destination: 'settings', roomCode: '' };
+  }
+  if (viewParam === 'activity') {
+    return { destination: 'activity', roomCode: '' };
+  }
+
   return { destination: 'control-room', roomCode: '' };
 }
 
@@ -133,7 +150,7 @@ export function App() {
 
   const initialRoute = getInitialRouteState();
   const [destination, setDestination] = useState<StudioDestination>(initialRoute.destination);
-  const [multiViewLayout, setMultiViewLayout] = useState<MultiViewLayout>('4-up');
+  const [multiViewLayout, setMultiViewLayout] = useState<MultiViewLayout>('auto');
 
   const [preferences, setPreferences] = useState<CapturePreferences>({
     resolution: '1080p',
@@ -761,14 +778,39 @@ export function App() {
     telemetry: entry.telemetry,
   }));
 
+  const isApprovedInRoom =
+    Boolean(activeRoom) &&
+    (activeRoomRole === 'host' ||
+      Boolean(activeRoom?.pairedReceivers.some((r) => r.deviceId === deviceId)));
+  const canQuickShare =
+    capabilities.isSecureContext &&
+    capabilities.supportsDisplayMedia &&
+    (!activeRoom || isApprovedInRoom);
+
+  const handleTopBarPrimaryAction = () => {
+    if (webrtcState.isSharingLocal) {
+      handleStopSharing();
+      return;
+    }
+    if (canQuickShare) {
+      setDestination('multi-view');
+      void handleStartSharing(null).catch(() => {
+        // Picker cancellation or capture error is surfaced via bridge state / activity log
+      });
+      return;
+    }
+    setDestination('multi-view');
+  };
+
   return (
-    <div className="min-h-screen bg-[#101214] text-[#F2F3F0] flex flex-col">
+    <div className="min-h-screen bg-[#F5F7FB] text-[#172033] flex flex-col">
       <TopControlBar
         activeDestination={destination}
         onSelectDestination={setDestination}
         signalingState={signalingState}
-        isSecureContext={capabilities.isSecureContext}
-        onPrimaryAction={() => setDestination('cast')}
+        isSharingLocal={webrtcState.isSharingLocal}
+        canQuickShare={canQuickShare}
+        onPrimaryAction={handleTopBarPrimaryAction}
       />
 
       <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 pb-24 sm:px-6 md:pb-8">
@@ -787,28 +829,12 @@ export function App() {
             activeRoom={activeRoom}
             activeRoomRole={activeRoomRole}
             pairingStatus={pairingStatus}
+            onCreateRoom={handleCreateRoom}
+            onSubmitPairRequest={handleSubmitPairRequest}
             onStartSharing={handleStartSharing}
             onStopSharing={handleStopSharing}
             onReconnectBackend={handleReconnectBackend}
             onNavigate={setDestination}
-          />
-        )}
-
-        {destination === 'cast' && (
-          <CastView
-            deviceId={deviceId}
-            capabilities={capabilities}
-            preferences={preferences}
-            onUpdatePreferences={setPreferences}
-            activeRoom={activeRoom}
-            activeRoomRole={activeRoomRole}
-            pairingStatus={pairingStatus}
-            webrtcState={webrtcState}
-            onStartSharing={handleStartSharing}
-            onConnectReceiver={handleConnectReceiver}
-            onStopSharing={handleStopSharing}
-            onNavigate={setDestination}
-            onLogEvent={logEvent}
           />
         )}
 
@@ -839,12 +865,25 @@ export function App() {
           />
         )}
 
-        {destination === 'multi-view' && (
+        {(destination === 'multi-view' || destination === 'cast') && (
           <MultiViewView
             layout={multiViewLayout}
             onChangeLayout={setMultiViewLayout}
             slots={multiViewSlots}
             capabilities={capabilities}
+            deviceId={deviceId}
+            deviceName={deviceName}
+            preferences={preferences}
+            onUpdatePreferences={setPreferences}
+            activeRoom={activeRoom}
+            activeRoomRole={activeRoomRole}
+            pairingStatus={pairingStatus}
+            webrtcState={webrtcState}
+            onStartSharing={handleStartSharing}
+            onConnectReceiver={handleConnectReceiver}
+            onStopSharing={handleStopSharing}
+            onNavigate={setDestination}
+            defaultShowSharePanel={destination === 'cast'}
             onToggleMute={(slotIndex) => {
               const targetId = multiViewSlots[slotIndex]?.receiverDeviceId ?? String(slotIndex);
               setMutedSlots((prev) => ({ ...prev, [targetId]: !(prev[targetId] ?? true) }));
@@ -878,6 +917,8 @@ export function App() {
             onUpdateNetworkPrefs={setNetworkPrefs}
             capabilities={capabilities}
             onReprobeCapabilities={handleReprobeCapabilities}
+            activityEvents={activityEvents}
+            onClearActivityEvents={() => setActivityEvents([])}
             onLogEvent={logEvent}
           />
         )}

@@ -8,7 +8,7 @@ export type StudioDestination =
   | 'activity'
   | 'settings';
 
-export type MultiViewLayout = '2-up' | '3-up' | '4-up' | '6-up' | 'spotlight';
+export type MultiViewLayout = 'auto' | '2-up' | '3-up' | '4-up' | '6-up' | 'spotlight';
 
 export type WebRtcConnectionPhase =
   | 'idle'

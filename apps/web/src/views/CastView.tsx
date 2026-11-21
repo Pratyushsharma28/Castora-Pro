@@ -30,7 +30,11 @@ interface CastViewProps {
   onConnectReceiver: (targetPeerId: string) => Promise<void>;
   onStopSharing: () => void;
   onNavigate: (destination: StudioDestination) => void;
-  onLogEvent: (category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error', title: string, detail: string) => void;
+  onLogEvent: (
+    category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error',
+    title: string,
+    detail: string
+  ) => void;
 }
 
 interface PublishTargetOption {
@@ -42,14 +46,14 @@ interface PublishTargetOption {
 }
 
 const RESOLUTION_OPTIONS: { id: ResolutionPresetId; label: string; detail: string }[] = [
-  { id: '1080p', label: '1080p', detail: '1920 × 1080 target' },
-  { id: '720p', label: '720p', detail: '1280 × 720 target' },
-  { id: 'native', label: 'Native', detail: 'Display native bounds' },
+  { id: '1080p', label: '1080p', detail: '1920 × 1080' },
+  { id: '720p', label: '720p', detail: '1280 × 720' },
+  { id: 'native', label: 'Native', detail: 'Display bounds' },
 ];
 
 const FPS_OPTIONS: { value: FrameRateTarget; label: string }[] = [
-  { value: 60, label: '60 FPS Target' },
-  { value: 30, label: '30 FPS Target' },
+  { value: 60, label: '60 FPS' },
+  { value: 30, label: '30 FPS' },
 ];
 
 const CODEC_OPTIONS: { value: CodecPreference; label: string }[] = [
@@ -57,20 +61,24 @@ const CODEC_OPTIONS: { value: CodecPreference; label: string }[] = [
   { value: 'AUTO', label: 'Auto Negotiate' },
 ];
 
-function webrtcPhaseBadge(phase: WebRtcConnectionPhase): { label: string; tone: SignalTone; pulse?: boolean } {
+function webrtcPhaseBadge(phase: WebRtcConnectionPhase): {
+  label: string;
+  tone: SignalTone;
+  pulse?: boolean;
+} {
   switch (phase) {
     case 'connected':
-      return { label: 'CONNECTED', tone: 'active' };
+      return { label: 'Connected', tone: 'active' };
     case 'connecting':
-      return { label: 'CONNECTING', tone: 'signal', pulse: true };
+      return { label: 'Connecting', tone: 'signal', pulse: true };
     case 'reconnecting':
-      return { label: 'RECONNECTING', tone: 'warn', pulse: true };
+      return { label: 'Reconnecting', tone: 'warn', pulse: true };
     case 'failed':
-      return { label: 'ERROR', tone: 'fault' };
+      return { label: 'Error', tone: 'fault' };
     case 'disconnected':
-      return { label: 'DISCONNECTED', tone: 'warn' };
+      return { label: 'Disconnected', tone: 'warn' };
     default:
-      return { label: 'STANDBY', tone: 'standby' };
+      return { label: 'Standby', tone: 'standby' };
   }
 }
 
@@ -107,7 +115,7 @@ export function CastView({
         deviceId: activeRoom.hostDeviceId,
         deviceName: activeRoom.hostDeviceName,
         platform: activeRoom.hostPlatform,
-        roleLabel: 'HOST',
+        roleLabel: 'Host',
         connected: activeRoom.hostConnected,
       });
     }
@@ -117,7 +125,7 @@ export function CastView({
         deviceId: rx.deviceId,
         deviceName: rx.deviceName,
         platform: rx.platform,
-        roleLabel: `SLOT ${String(rx.assignedSlotIndex + 1).padStart(2, '0')}`,
+        roleLabel: `Slot ${rx.assignedSlotIndex + 1}`,
         connected: rx.connected,
       });
     }
@@ -146,8 +154,7 @@ export function CastView({
     try {
       await onStartSharing(selectedTarget);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unable to start screen sharing';
-      setLocalError(msg);
+      setLocalError(err instanceof Error ? err.message : 'Unable to start screen sharing');
     } finally {
       setBusy(false);
     }
@@ -166,8 +173,7 @@ export function CastView({
         await onConnectReceiver(selectedTarget);
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unable to connect WebRTC peer';
-      setLocalError(msg);
+      setLocalError(err instanceof Error ? err.message : 'Unable to connect WebRTC peer');
     } finally {
       setBusy(false);
     }
@@ -191,17 +197,17 @@ export function CastView({
     <div className="space-y-6">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
-          <h1 className="font-display text-lg font-semibold tracking-tight text-[#F2F3F0]">
-            Cast Studio
+          <h1 className="font-display text-xl font-semibold tracking-tight text-[#172033]">
+            Screen Sharing Controls
           </h1>
-          <p className="text-xs text-[#929A9D]">
-            Bidirectional WebRTC screen capture and playback. Both the room host and approved Mac participants can share and receive screens independently.
+          <p className="text-sm text-[#64748B]">
+            Configure capture quality, target participants, and preview incoming screens.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <SignalBadge label={`Connection Status: ${badge.label}`} tone={badge.tone} pulse={badge.pulse} />
+        <div className="flex items-center gap-3">
+          <SignalBadge label={badge.label} tone={badge.tone} pulse={badge.pulse} />
           <SignalBadge
-            label={canCapture ? 'DISPLAY CAPTURE READY' : 'CAPTURE RESTRICTED'}
+            label={canCapture ? 'Capture Ready' : 'Capture Restricted'}
             tone={canCapture ? 'active' : 'warn'}
           />
         </div>
@@ -210,55 +216,42 @@ export function CastView({
       {!canCapture && (
         <div
           role="alert"
-          className="flex items-start gap-3 border border-[#F59E0B]/50 bg-[#191D20] px-4 py-3 text-xs leading-relaxed text-[#F2F3F0]"
+          className="flex items-start gap-3 rounded-xl border border-[#F59E0B]/40 bg-[#FFFBEB] px-4 py-3 text-xs text-[#78350F]"
         >
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#F59E0B]" aria-hidden="true" />
-          <div>
-            <span className="font-semibold text-[#F59E0B]">
-              {!capabilities.isSecureContext
-                ? 'Secure HTTPS origin required for getDisplayMedia.'
-                : 'getDisplayMedia is unavailable in this browser.'}
-            </span>{' '}
-            <span className="text-[#929A9D]">
-              Mac desktop Chrome, Edge, or Safari over HTTPS/localhost supports screen sharing.
-            </span>
-          </div>
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#B45309]" aria-hidden="true" />
+          <span>
+            {!capabilities.isSecureContext
+              ? 'Secure HTTPS origin required for getDisplayMedia.'
+              : 'getDisplayMedia is unavailable in this browser.'}
+          </span>
         </div>
       )}
 
       {isPendingParticipant && (
-        <div className="flex items-center justify-between gap-3 border border-[#F59E0B]/50 bg-[#191D20] px-4 py-3 text-xs text-[#929A9D]">
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-[#F59E0B]/40 bg-[#FFFBEB] px-4 py-3 text-xs text-[#78350F]">
           <span>
-            Waiting for host approval in room <strong className="font-mono text-[#F2F3F0]">{activeRoom?.roomId}</strong> before publishing or receiving streams.
+            Waiting for host approval in room{' '}
+            <strong className="font-mono">{activeRoom?.roomId}</strong> before sharing.
           </span>
           <button
             type="button"
             onClick={() => onNavigate('receivers')}
-            className="shrink-0 border border-[#252A2F] bg-[#131619] px-3 py-1.5 font-medium text-[#F2F3F0] hover:border-[#FF7849]"
+            className="shrink-0 rounded-lg border border-[#F59E0B]/40 bg-white px-3 py-1.5 font-medium text-[#78350F] hover:bg-[#FEF3C7]"
           >
-            Check Pairing Status
+            Check Room
           </button>
         </div>
       )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        {/* Left: Capture Configuration & Target Participants */}
         <section className="min-w-0 space-y-4 lg:col-span-5" aria-label="Capture Parameters">
-          <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-5">
-            <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
-              <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                Capture Controls
-              </h2>
-              <span className="font-mono text-[11px] text-[#929A9D]">
-                Stage 4B · Bidirectional WebRTC
-              </span>
-            </div>
+          <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-5">
+            <h2 className="border-b border-[#E2E8F0] pb-2.5 text-sm font-semibold text-[#172033]">
+              Capture Settings
+            </h2>
 
-            {/* Resolution */}
             <fieldset className="space-y-2">
-              <legend className="text-[11px] font-medium uppercase tracking-[0.08em] text-[#929A9D]">
-                Resolution Target
-              </legend>
+              <legend className="text-xs font-medium text-[#64748B]">Resolution Target</legend>
               <div className="grid grid-cols-3 gap-2">
                 {RESOLUTION_OPTIONS.map((opt) => {
                   const selected = preferences.resolution === opt.id;
@@ -268,27 +261,24 @@ export function CastView({
                       type="button"
                       onClick={() => {
                         onUpdatePreferences({ ...preferences, resolution: opt.id });
-                        onLogEvent('ui', 'Sender resolution target updated', `Target set to ${opt.label} (${opt.detail}).`);
+                        onLogEvent('ui', 'Sender resolution target updated', `Target set to ${opt.label}.`);
                       }}
-                      className={`min-h-[44px] border px-2.5 py-2 text-left transition-colors ${
+                      className={`min-h-[44px] rounded-[10px] border px-3 py-2 text-left transition-colors ${
                         selected
-                          ? 'border-[#FF7849] bg-[#131619] text-[#F2F3F0]'
-                          : 'border-[#252A2F] bg-[#131619] text-[#929A9D] hover:text-[#F2F3F0]'
+                          ? 'border-[#2563EB] bg-[#EFF6FF] text-[#172033]'
+                          : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#64748B] hover:text-[#172033]'
                       }`}
                     >
                       <div className="text-xs font-semibold tabular-metrics">{opt.label}</div>
-                      <div className="mt-0.5 text-[10px] text-[#929A9D]">{opt.detail}</div>
+                      <div className="mt-0.5 text-[11px] opacity-80">{opt.detail}</div>
                     </button>
                   );
                 })}
               </div>
             </fieldset>
 
-            {/* Frame rate */}
             <fieldset className="space-y-2">
-              <legend className="text-[11px] font-medium uppercase tracking-[0.08em] text-[#929A9D]">
-                Frame Rate Target
-              </legend>
+              <legend className="text-xs font-medium text-[#64748B]">Frame Rate Target</legend>
               <div className="grid grid-cols-2 gap-2">
                 {FPS_OPTIONS.map((opt) => {
                   const selected = preferences.targetFps === opt.value;
@@ -300,10 +290,10 @@ export function CastView({
                         onUpdatePreferences({ ...preferences, targetFps: opt.value });
                         onLogEvent('ui', 'Sender FPS target updated', `Target set to ${opt.value} FPS.`);
                       }}
-                      className={`min-h-[44px] border px-3 py-2 text-left text-xs font-medium tabular-metrics transition-colors ${
+                      className={`min-h-[42px] rounded-[10px] border px-3 py-2 text-left text-xs font-semibold tabular-metrics transition-colors ${
                         selected
-                          ? 'border-[#FF7849] bg-[#131619] text-[#F2F3F0]'
-                          : 'border-[#252A2F] bg-[#131619] text-[#929A9D] hover:text-[#F2F3F0]'
+                          ? 'border-[#2563EB] bg-[#EFF6FF] text-[#172033]'
+                          : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#64748B] hover:text-[#172033]'
                       }`}
                     >
                       {opt.label}
@@ -313,12 +303,9 @@ export function CastView({
               </div>
             </fieldset>
 
-            {/* Codec & Audio */}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <fieldset className="space-y-2">
-                <legend className="text-[11px] font-medium uppercase tracking-[0.08em] text-[#929A9D]">
-                  Codec Policy
-                </legend>
+                <legend className="text-xs font-medium text-[#64748B]">Codec Policy</legend>
                 <div className="space-y-1.5">
                   {CODEC_OPTIONS.map((opt) => {
                     const selected = preferences.codecPreference === opt.value;
@@ -326,22 +313,16 @@ export function CastView({
                       <button
                         key={opt.value}
                         type="button"
-                        onClick={() => {
-                          onUpdatePreferences({ ...preferences, codecPreference: opt.value });
-                          onLogEvent('ui', 'Codec preference updated', `Codec policy: ${opt.label}`);
-                        }}
-                        className={`flex min-h-[40px] w-full items-center justify-between border px-3 text-xs font-medium transition-colors ${
+                        onClick={() =>
+                          onUpdatePreferences({ ...preferences, codecPreference: opt.value })
+                        }
+                        className={`flex min-h-[40px] w-full items-center justify-between rounded-[10px] border px-3 text-xs font-medium transition-colors ${
                           selected
-                            ? 'border-[#FF7849] bg-[#131619] text-[#F2F3F0]'
-                            : 'border-[#252A2F] bg-[#131619] text-[#929A9D] hover:text-[#F2F3F0]'
+                            ? 'border-[#2563EB] bg-[#EFF6FF] text-[#172033]'
+                            : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#64748B] hover:text-[#172033]'
                         }`}
                       >
                         <span>{opt.label}</span>
-                        {opt.value === 'H264' && (
-                          <span className="font-mono text-[10px] text-[#929A9D]">
-                            {capabilities.supportsVideoH264Encode ? 'HW/SW OK' : 'UNAVAILABLE'}
-                          </span>
-                        )}
                       </button>
                     );
                   })}
@@ -349,63 +330,55 @@ export function CastView({
               </fieldset>
 
               <div className="space-y-2">
-                <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-[#929A9D]">
-                  System / Tab Audio
-                </div>
+                <div className="text-xs font-medium text-[#64748B]">System / Tab Audio</div>
                 <button
                   type="button"
-                  onClick={() => {
-                    const next = !preferences.includeAudio;
-                    onUpdatePreferences({ ...preferences, includeAudio: next });
-                    onLogEvent('ui', 'Capture audio toggled', next ? 'Audio capture enabled' : 'Audio capture disabled');
-                  }}
-                  className={`flex min-h-[44px] w-full items-center justify-between border px-3 text-xs font-medium transition-colors ${
+                  onClick={() =>
+                    onUpdatePreferences({ ...preferences, includeAudio: !preferences.includeAudio })
+                  }
+                  className={`flex min-h-[44px] w-full items-center justify-between rounded-[10px] border px-3 text-xs font-medium transition-colors ${
                     preferences.includeAudio
-                      ? 'border-[#FF7849] bg-[#131619] text-[#F2F3F0]'
-                      : 'border-[#252A2F] bg-[#131619] text-[#929A9D]'
+                      ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                      : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#64748B]'
                   }`}
                 >
                   <span className="inline-flex items-center gap-2">
                     {preferences.includeAudio ? (
-                      <Volume2 className="h-3.5 w-3.5 text-[#FF7849]" aria-hidden="true" />
+                      <Volume2 className="h-3.5 w-3.5" aria-hidden="true" />
                     ) : (
                       <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
                     )}
-                    <span>{preferences.includeAudio ? 'Include Audio' : 'Video Only'}</span>
-                  </span>
-                  <span className="font-mono text-[10px] uppercase">
-                    {preferences.includeAudio ? 'ON' : 'OFF'}
+                    <span>{preferences.includeAudio ? 'Audio Enabled' : 'Video Only'}</span>
                   </span>
                 </button>
               </div>
             </div>
 
-            {/* Capture Action Buttons */}
-            <div className="border-t border-[#252A2F] pt-4 space-y-2.5">
+            <div className="border-t border-[#E2E8F0] pt-4 space-y-2.5">
               <div className="flex flex-wrap items-center gap-2.5">
                 <button
                   type="button"
                   disabled={busy || !canCapture || isPendingParticipant}
                   onClick={handleRequestStartSharing}
-                  className="inline-flex min-h-[44px] flex-1 items-center justify-center gap-2 bg-[#FF7849] px-4 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
+                  className="inline-flex min-h-[44px] flex-1 items-center justify-center gap-2 rounded-[10px] bg-[#2563EB] px-4 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
                 >
                   <MonitorPlay className="h-4 w-4" aria-hidden="true" />
                   <span>
                     {busy
-                      ? 'Requesting Screen...'
+                      ? 'Starting...'
                       : webrtcState.isSharingLocal
-                        ? 'Replace My Screen'
-                        : 'Share My Screen'}
+                        ? 'Change Screen'
+                        : 'Share Screen'}
                   </span>
                 </button>
                 <button
                   type="button"
                   disabled={!webrtcState.isSharingLocal}
                   onClick={onStopSharing}
-                  className="inline-flex min-h-[44px] items-center justify-center gap-1.5 border border-[#EF4444]/60 bg-[#131619] px-4 text-xs font-semibold text-[#EF4444] hover:bg-[#EF4444]/10 disabled:border-[#252A2F] disabled:text-[#929A9D] disabled:opacity-50"
+                  className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-[10px] border border-[#DC2626]/30 bg-[#FEF2F2] px-4 text-sm font-semibold text-[#DC2626] hover:bg-[#FEE2E2] disabled:border-[#E2E8F0] disabled:bg-[#F8FAFC] disabled:text-[#94A3B8] disabled:opacity-50"
                 >
                   <Square className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Stop My Screen</span>
+                  <span>Stop</span>
                 </button>
               </div>
 
@@ -414,13 +387,13 @@ export function CastView({
                   type="button"
                   disabled={busy}
                   onClick={handleConnectSelected}
-                  className="inline-flex min-h-[40px] w-full items-center justify-center gap-2 border border-[#8BD7B0]/60 bg-[#131619] px-4 text-xs font-semibold text-[#8BD7B0] hover:bg-[#8BD7B0]/10 disabled:opacity-50"
+                  className="inline-flex min-h-[40px] w-full items-center justify-center gap-2 rounded-[10px] border border-[#16A34A]/40 bg-[#F0FDF4] px-4 text-xs font-semibold text-[#15803D] hover:bg-[#DCFCE7] disabled:opacity-50"
                 >
                   <Radio className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>
                     {selectedTarget === 'ALL'
-                      ? 'Transmit Active Screen to All Connected Peers'
-                      : 'Transmit Active Screen to Selected Peer'}
+                      ? 'Send Screen to All Connected Peers'
+                      : 'Send Screen to Selected Peer'}
                   </span>
                 </button>
               )}
@@ -429,48 +402,33 @@ export function CastView({
             {errorToDisplay && (
               <div
                 role="alert"
-                className="border border-[#EF4444]/60 bg-[#131619] px-3 py-2.5 text-xs leading-relaxed text-[#EF4444]"
+                className="rounded-lg border border-[#DC2626]/30 bg-[#FEF2F2] px-3 py-2 text-xs text-[#B91C1C]"
               >
                 {errorToDisplay}
               </div>
             )}
-
-            {!errorToDisplay && webrtcState.statusDetail && (
-              <div className="border border-[#252A2F] bg-[#131619] px-3 py-2.5 text-xs leading-relaxed text-[#F2F3F0]">
-                {webrtcState.statusDetail}
-              </div>
-            )}
           </div>
 
-          {/* Room Participant Targets */}
-          <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-3">
-            <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
-              <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                Connected Room Participants
-              </h2>
-              <div className="flex items-center gap-3">
-                <span className="font-mono text-xs text-[#929A9D] tabular-metrics">
-                  {connectedPeers.length} online
-                </span>
-                <button
-                  type="button"
-                  onClick={() => onNavigate('receivers')}
-                  className="text-[11px] font-medium text-[#FF7849] hover:underline"
-                >
-                  Manage
-                </button>
-              </div>
+          <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-3">
+            <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
+              <h2 className="text-sm font-semibold text-[#172033]">Target Participants</h2>
+              <button
+                type="button"
+                onClick={() => onNavigate('receivers')}
+                className="text-xs font-medium text-[#2563EB] hover:underline"
+              >
+                Manage
+              </button>
             </div>
-
             {!activeRoom || !isApprovedInRoom ? (
-              <p className="text-xs leading-relaxed text-[#929A9D]">
+              <p className="text-xs text-[#64748B]">
                 {activeRoom
                   ? `Awaiting approval in room ${activeRoom.roomId} (${pairingStatus}).`
-                  : `No active paired room (${pairingStatus}). Create or join a room in Receivers & Pairing.`}
+                  : 'Create or join a room in Rooms to target participants.'}
               </p>
             ) : roomPeers.length === 0 ? (
-              <p className="text-xs leading-relaxed text-[#929A9D]">
-                Room <span className="font-mono text-[#F2F3F0]">{activeRoom.roomId}</span> has no other paired participants connected yet.
+              <p className="text-xs text-[#64748B]">
+                No other paired participants connected in room {activeRoom.roomId} yet.
               </p>
             ) : (
               <div className="space-y-2">
@@ -478,129 +436,66 @@ export function CastView({
                   <button
                     type="button"
                     onClick={() => setSelectedTarget('ALL')}
-                    className={`flex min-h-[38px] w-full items-center justify-between border px-3 text-xs font-medium ${
+                    className={`flex min-h-[38px] w-full items-center justify-between rounded-lg border px-3 text-xs font-medium ${
                       selectedTarget === 'ALL'
-                        ? 'border-[#FF7849] bg-[#131619] text-[#F2F3F0]'
-                        : 'border-[#252A2F] bg-[#131619] text-[#929A9D] hover:text-[#F2F3F0]'
+                        ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                        : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#64748B]'
                     }`}
                   >
                     <span>All Connected Participants ({connectedPeers.length})</span>
-                    <span className="font-mono text-[10px] uppercase">BROADCAST</span>
                   </button>
                 )}
-
-                <ul className="divide-y divide-[#252A2F] text-xs">
-                  {roomPeers.map((peer) => {
-                    const isSelected = selectedTarget === peer.deviceId || selectedTarget === 'ALL';
-                    const outStatus = activeOutboundTargets.find(
-                      (o) => o.targetDeviceId === peer.deviceId
-                    );
-                    const inStatus = webrtcState.incomingStreams.find(
-                      (i) => i.senderDeviceId === peer.deviceId
-                    );
-                    const peerBadge = outStatus
-                      ? webrtcPhaseBadge(outStatus.phase)
-                      : inStatus
-                        ? webrtcPhaseBadge(inStatus.phase)
-                        : null;
-
-                    return (
-                      <li key={peer.deviceId} className="flex items-center justify-between py-2.5 gap-2">
-                        <button
-                          type="button"
-                          disabled={!peer.connected}
-                          onClick={() => setSelectedTarget(peer.deviceId)}
-                          className="min-w-0 flex-1 text-left disabled:opacity-50"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`h-2 w-2 shrink-0 rounded-full ${
-                                isSelected ? 'bg-[#FF7849]' : 'bg-[#252A2F]'
-                              }`}
-                            />
-                            <span className="truncate font-medium text-[#F2F3F0]">{peer.deviceName}</span>
-                          </div>
-                          <div className="mt-0.5 pl-4 font-mono text-[11px] text-[#929A9D] tabular-metrics">
-                            {peer.roleLabel} · {peer.platform} · {peer.deviceId}
-                          </div>
-                        </button>
-                        <SignalBadge
-                          label={
-                            peerBadge
-                              ? peerBadge.label
-                              : peer.connected
-                                ? 'Paired'
-                                : 'Disconnected'
-                          }
-                          tone={
-                            peerBadge
-                              ? peerBadge.tone
-                              : peer.connected
-                                ? 'active'
-                                : 'warn'
-                          }
-                          pulse={peerBadge?.pulse}
-                        />
-                      </li>
-                    );
-                  })}
+                <ul className="divide-y divide-[#E2E8F0] text-xs">
+                  {roomPeers.map((peer) => (
+                    <li key={peer.deviceId} className="flex items-center justify-between py-2.5 gap-2">
+                      <button
+                        type="button"
+                        disabled={!peer.connected}
+                        onClick={() => setSelectedTarget(peer.deviceId)}
+                        className="min-w-0 flex-1 text-left disabled:opacity-50"
+                      >
+                        <div className="truncate font-semibold text-[#172033]">{peer.deviceName}</div>
+                        <div className="text-[11px] text-[#64748B] tabular-metrics">
+                          {peer.roleLabel} · {peer.platform}
+                        </div>
+                      </button>
+                      <SignalBadge
+                        label={peer.connected ? 'Connected' : 'Disconnected'}
+                        tone={peer.connected ? 'active' : 'warn'}
+                      />
+                    </li>
+                  ))}
                 </ul>
               </div>
             )}
           </div>
         </section>
 
-        {/* Right: Local Preview + Outbound Telemetry + Incoming Screens */}
-        <section className="min-w-0 space-y-4 lg:col-span-7" aria-label="Local Capture Preview and Incoming Screens">
+        <section className="min-w-0 space-y-4 lg:col-span-7" aria-label="Preview and Incoming">
+          <IncomingScreensPanel streams={webrtcState.incomingStreams} />
+
           <VideoSurface
-            slotLabel="OUT-01"
+            slotLabel="My Screen"
             title={
               webrtcState.isSharingLocal
                 ? activeOutboundTargets.length > 0
-                  ? `My Shared Screen → ${activeOutboundTargets.map((o) => o.targetName).join(', ')}`
-                  : 'My Shared Screen (Local Preview)'
-                : 'My Outbound Screen Preview'
+                  ? `Sharing → ${activeOutboundTargets.map((o) => o.targetName).join(', ')}`
+                  : 'Local Outbound Preview'
+                : 'Local Outbound Preview'
             }
             stream={webrtcState.localStream}
             muted
             highlight={webrtcState.isSharingLocal && webrtcState.phase === 'connected'}
-            standbyReason="Click Share My Screen and select a display, window, or tab in the browser picker to publish your screen over WebRTC."
+            standbyReason="Click Share Screen to select a display, window, or tab."
             statusBadge={
               <SignalBadge
-                label={
-                  webrtcState.isSharingLocal
-                    ? activeOutboundTargets.some((o) => o.phase === 'connected')
-                      ? 'SHARING LIVE'
-                      : 'LOCAL PREVIEW'
-                    : 'STANDBY'
-                }
-                tone={
-                  webrtcState.isSharingLocal
-                    ? activeOutboundTargets.some((o) => o.phase === 'connected')
-                      ? 'active'
-                      : 'signal'
-                    : 'standby'
-                }
+                label={webrtcState.isSharingLocal ? 'Sharing' : 'Standby'}
+                tone={webrtcState.isSharingLocal ? 'active' : 'standby'}
               />
             }
           />
 
-          <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#252A2F] pb-2">
-              <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                Outbound WebRTC Encoder Telemetry (getStats)
-              </h2>
-              <span className="font-mono text-xs text-[#929A9D] tabular-metrics">
-                Peers: {webrtcState.peerCount} · ICE: {webrtcState.iceConnectionState ?? 'idle'}
-              </span>
-            </div>
-            <TelemetryStrip telemetry={webrtcState.outboundTelemetry} />
-          </div>
-
-          <IncomingScreensPanel
-            streams={webrtcState.incomingStreams}
-            emptyMessage="No incoming participant screens active. When the other Mac shares their screen, their video stream, identity, and live getStats() metrics will appear here — even while you are sharing or after you stop your own screen."
-          />
+          <TelemetryStrip telemetry={webrtcState.outboundTelemetry} compact />
         </section>
       </div>
     </div>
