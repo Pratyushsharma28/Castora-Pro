@@ -1,13 +1,13 @@
-# Castora — 15-Phase Development Roadmap
+# Castora Pro — 15-Phase Development Roadmap
 
-This roadmap breaks Castora into **15 small, testable phases**. We do not skip ahead until the current phase builds and passes its verification checks.
+This roadmap breaks Castora Pro into **15 small, testable phases**. We do not skip ahead until the current phase builds and passes its verification checks.
 
 ---
 
 ## Status Legend
-- **Implemented:** Phase 1 documentation and draft signaling schema.
-- **Planned:** Phases 2 through 15.
-- **Tested:** None of the native builds or streaming features are tested yet.
+- **Implemented:** Phase 1 core documentation and Phase 2 `castora.v1` signaling protocol, Draft 2020-12 JSON Schema, 37 fixtures, and automated `npm run test:protocol` validator.
+- **Planned:** Phases 3 through 15 (native macOS, Android, Android TV apps, and WebRTC streaming).
+- **Tested:** Protocol schema validation (`npm run test:protocol`) passes; native builds and streaming remain **Not Yet Tested**.
 
 ---
 
@@ -36,16 +36,16 @@ Phases 7 + 8 + 9 ──► Phase 10 (WebRTC 1:1 Media + DTLS-SRTP + Adaptive Bit
 
 ## All 15 Development Phases
 
-### Phase 1: Repository Inspection & Core Documentation *(Current — Implemented)*
+### Phase 1: Repository Inspection & Core Documentation *(Completed — Implemented)*
 - **Depends on:** None
 - **Goal:** Inspect the empty repository, define the system architecture, 15-phase roadmap, testing strategy, and `.gitignore`.
 - **Deliverables:** `README.md`, `.gitignore`, `docs/PROJECT_ARCHITECTURE.md`, `docs/DEVELOPMENT_ROADMAP.md`, `docs/TESTING_STRATEGY.md`.
 - **Exit Gate:** All Phase 1 files reviewed, valid, and committed to GitHub.
 
-### Phase 2: Shared Signaling Protocol (`castora.v1`) & Test Fixtures *(Planned)*
+### Phase 2: Shared Signaling Protocol (`castora.v1`) & Test Fixtures *(Current — Implemented & Validated)*
 - **Depends on:** Phase 1
-- **Goal:** Finalize the interoperable JSON signaling contract (`castora.v1`), JSON Schema (`protocol/castora-protocol.schema.json`), and shared valid/invalid JSON test vectors for Swift and Kotlin unit tests.
-- **Exit Gate:** Schema validator passes all valid message fixtures and rejects malformed tokens, versions, and room codes.
+- **Goal:** Finalize the 16-message `castora.v1` JSON signaling contract, strict Draft 2020-12 JSON Schema (`protocol/castora-protocol.schema.json`), shared valid/invalid fixtures (`protocol/fixtures/`), automated `npm run test:protocol` validator (`scripts/validate-protocol.mjs`), and Swift/Kotlin guide (`docs/PROTOCOL_IMPLEMENTATION.md`).
+- **Exit Gate:** `npm run test:protocol` passes all 16 valid fixtures and rejects all 21 invalid fixtures for their intended reasons.
 
 ### Phase 3: Native macOS Project Bootstrap & Permissions Shell *(Planned)*
 - **Depends on:** Phase 1

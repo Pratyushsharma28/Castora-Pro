@@ -1,0 +1,14 @@
+{
+  "protocolVersion": "castora.v1",
+  "messageType": "device_discover",
+  "messageId": "msg-0002-discover",
+  "senderDeviceId": "dev-mac-pro-01",
+  "receiverDeviceId": null,
+  "roomId": null,
+  "timestamp": "2026-11-21T12:20:01.000Z",
+  "payload": {
+    "requestedRole": "receiver",
+    "requesterPlatform": "macos",
+    "filterPlatform": null
+  }
+}

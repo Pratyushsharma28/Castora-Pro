@@ -1,4 +1,4 @@
-# Castora — Project Architecture
+# Castora Pro — Project Architecture
 
 **Phase:** 1 (Architecture & Design)  
 **Status Ledger:**
@@ -8,11 +8,11 @@
 
 ---
 
-## 1. Overall Castora Architecture
+## 1. Overall Castora Pro Architecture
 
-Castora is designed as a **local-network-first peer-to-peer screen-casting system**. When your Mac, Android phone, and Android TV are on the same Wi-Fi or Ethernet network, they discover each other directly and stream video directly between devices—**no central cloud server is required**.
+Castora Pro is designed as a **local-network-first peer-to-peer screen-casting system**. When your Mac, Android phone, and Android TV are on the same Wi-Fi or Ethernet network, they discover each other directly and stream video directly between devices—**no central cloud server is required**.
 
-Castora separates work into three clean layers (planes):
+Castora Pro separates work into three clean layers (planes):
 
 1. **Discovery Plane (mDNS / DNS-SD):**  
    Devices find each other automatically on the local network using Apple **Bonjour** on macOS and **NSD (`NsdManager`)** on Android.
@@ -30,13 +30,15 @@ Castora separates work into three clean layers (planes):
             |-- 1. mDNS Browse (_castora._tcp.local.) ------->|  (Discovery)
             |<- 2. Resolve LAN IP, Port, Name, Platform ------|
             |                                                 |
-            |== 3. Open Local WebSocket (ws://ip:port) ======>|  (Signaling)
-            |-- 4. pair_request (roomCode + temp token) ----->|
-            |                                  [User Approves]|
-            |<- 5. pair_approval (approved + streamId) -------|
-            |-- 6. sdp_offer / sdp_answer / ice_candidate <-->|
-            |                                                 |
-            |== 7. WebRTC DTLS-SRTP Video (up to 1080p60) ===>|  (Media Plane)
+            |== 3. Open Local WebSocket (ws://ip:port/castora) =>|  (Signaling)
+            |-- 4. pair_request (roomId + ephemeralNonce) ---->|
+            |<- 5. pair_response (sessionId) ------------------|
+            |-- 6. connection_request ------------------------>|
+            |                                  [User Approves] |
+            |<- 7. connection_accepted (streamId) -------------|
+            |-- 8. session_offer / session_answer / ice <----->|
+            |                                                  |
+            |== 9. WebRTC DTLS-SRTP Video (up to 1080p60) ====>|  (Media Plane)
 ```
 
 ### Why Separate Native Apps Instead of One Shared UI Wrapper?
@@ -55,7 +57,7 @@ Screen capture, hardware video encoding, local discovery, and TV remote navigati
   - `Pairing/` — `CoreImage` (`CIQRCodeGenerator`) to display QR codes when acting as Receiver, plus `AVFoundation` camera or screen QR parsing / manual Room Code entry when acting as Sender.
   - `UI/` — SwiftUI Sender control window, Receiver grid/fullscreen stage (`MTLVideoView` / `RTCMTLNSVideoView`), approval sheet, and real-time stats drawer.
 - **macOS Permissions:**
-  - **Screen Recording:** Checked/requested via macOS TCC (`CGPreflightScreenCaptureAccess()` / `SCShareableContent.excludingDesktopWindows(...)`). If denied, Castora guides the user to *System Settings → Privacy & Security → Screen & System Audio Recording*.
+  - **Screen Recording:** Checked/requested via macOS TCC (`CGPreflightScreenCaptureAccess()` / `SCShareableContent.excludingDesktopWindows(...)`). If denied, Castora Pro guides the user to *System Settings → Privacy & Security → Screen & System Audio Recording*.
   - **Local Network:** Declared in `Info.plist` (`NSLocalNetworkUsageDescription` and `NSBonjourServices` containing `_castora._tcp`) as required by modern macOS privacy rules.
 
 ---
@@ -87,7 +89,7 @@ Android TV runs Android under the hood, but has very different input and viewing
   - Because TVs rarely have built-in cameras, an Android TV Receiver displays a **large scannable QR code** and a **high-contrast 6-character Room Code** so a Mac or Android phone can pair in seconds.
   - Incoming `pair_request` prompts render as a D-Pad-friendly modal (`Approve` / `Decline`, defaulting safely so accidental button mashing doesn't auto-accept unknown devices).
 - **Android TV as a Sender:**
-  - Supported where the TV OS provides `MediaProjection` consent dialogs (some locked-down TV builds restrict `MediaProjection` or lack hardware H.264 encoders—Castora detects capability at runtime and shows a clear error rather than crashing).
+  - Supported where the TV OS provides `MediaProjection` consent dialogs (some locked-down TV builds restrict `MediaProjection` or lack hardware H.264 encoders—Castora Pro detects capability at runtime and shows a clear error rather than crashing).
 
 ---
 
@@ -107,20 +109,18 @@ Android TV runs Android under the hood, but has very different input and viewing
 
 ## 6. Cross-Platform Signaling Protocol (`castora.v1`)
 
-Both platforms exchange UTF-8 JSON frames over a local WebSocket (`ws://<receiver-ip>:<port>/castora`). Every message uses a shared envelope (`version`, `type`, `messageId`, `timestampMs`, `sessionId`, `senderPeerId`, `targetPeerId`, `payload`):
+Both platforms exchange UTF-8 JSON frames over a local WebSocket (`ws://<receiver-ip>:<port>/castora`). Every message uses a shared envelope (`protocolVersion`, `messageType`, `messageId`, `senderDeviceId`, `receiverDeviceId`, `roomId`, `timestamp`, `payload`):
 
-| Message Type | Direction | Purpose |
+| Message Category | Direction | Purpose |
 | :--- | :--- | :--- |
-| `pair_request` | Sender → Receiver | Sends `roomCode`, temporary `sessionToken`, device name, platform, and max resolution/FPS/codec capabilities. |
-| `pair_approval` | Receiver → Sender | Confirms user approval (or rejection reason) and assigns `sessionId` and `assignedStreamId`. |
-| `sdp_offer` / `sdp_answer` | Bidirectional | Exchanges WebRTC SDP (codecs, DTLS fingerprint, media lines). |
-| `ice_candidate` | Bidirectional | Trickles local network ICE candidates. |
-| `stream_control` | Bidirectional | Sends `start`, `pause`, `resume`, `focus_fullscreen`, `return_to_grid`, or `stop` commands. |
-| `ping` / `pong` | Bidirectional | Detects dropped Wi-Fi sockets within seconds. |
-| `disconnect` | Bidirectional | Cleanly tears down the WebRTC peer connection and revokes session access. |
-| `error` | Bidirectional | Reports structured errors (`INVALID_TOKEN`, `APPROVAL_DECLINED`, `CAPTURE_PERMISSION_DENIED`, etc.). |
+| `device_announce` / `device_discover` | LAN / Discovery | Announces device capabilities/port or queries peers by role. |
+| `pair_request` / `pair_response` | Sender ↔ Receiver | Exchanges `roomId` and temporary `ephemeralNonce` (`qr`, `room_code`, or `manual_ip`) and assigns `sessionId`. |
+| `connection_request` / `connection_accepted` / `connection_rejected` | Sender ↔ Receiver | Triggers explicit Receiver user approval before WebRTC negotiation begins. |
+| `session_offer` / `session_answer` / `ice_candidate` | Bidirectional | Exchanges WebRTC SDP and local network ICE candidates. |
+| `stream_start` / `stream_stop` / `stream_status` | Bidirectional | Announces stream start/stop and reports layout (`grid`/`fullscreen`) and real `RTCStatsReport` stats. |
+| `heartbeat` / `disconnect` / `error` | Bidirectional | Keeps sockets monitored, terminates cleanly, or reports structured errors. |
 
-*(See `docs/SIGNALING_PROTOCOL.md` and `protocol/castora-protocol.schema.json` for exact JSON schemas.)*
+*(See `docs/SIGNALING_PROTOCOL.md`, `docs/PROTOCOL_IMPLEMENTATION.md`, and `protocol/castora-protocol.schema.json` for exact schemas.)*
 
 ---
 
@@ -133,7 +133,7 @@ Both platforms exchange UTF-8 JSON frames over a local WebSocket (`ws://<receive
   - `platform=macos|android|android-tv`
   - `port=<WebSocket Port>`
   - *(Secrets like `sessionToken` are **never** broadcast over mDNS TXT records.)*
-- **Important Android NSD Detail:** Older Android `NsdManager.resolveService()` queues callbacks sequentially (only one resolve at a time) and requires a `WifiManager.MulticastLock` on some devices to receive mDNS multicast packets reliably. Castora serializes NSD resolve calls safely on Android and manages `MulticastLock` only while actively scanning.
+- **Important Android NSD Detail:** Older Android `NsdManager.resolveService()` queues callbacks sequentially (only one resolve at a time) and requires a `WifiManager.MulticastLock` on some devices to receive mDNS multicast packets reliably. Castora Pro serializes NSD resolve calls safely on Android and manages `MulticastLock` only while actively scanning.
 
 ---
 
@@ -143,7 +143,7 @@ Pairing bridges discovery to authenticated signaling without requiring accounts 
 
 - **QR Code URI Format:**
   ```text
-  castora://pair?v=1&ip=192.168.1.42&port=49152&room=K7M9P2&token=x9F3aL8qR2mV7nP4&name=Living%20Room%20TV
+  castora://pair?v=1&ip=192.168.1.42&port=49152&room=K7M9P2&nonce=ephemeral_demo_nonce_0001&name=Living%20Room%20TV
   ```
   Scanning the QR code gives the Sender the Receiver's exact IP, port, room code, and one-time pairing token—working **even if mDNS/Bonjour multicast is blocked** on a restrictive router!
 - **Room-Code Pairing:**
@@ -162,7 +162,7 @@ Pairing bridges discovery to authenticated signaling without requiring accounts 
 3. **Encrypted Media:**  
    All video/audio packets are encrypted via **DTLS-SRTP**.
 4. **Secure Disconnection:**  
-   Either Sender or Receiver can press **Disconnect** at any time. Castora sends `disconnect`, closes the `RTCPeerConnection`, immediately stops `ScreenCaptureKit` / `MediaProjection` (removing the OS screen-recording indicator), and invalidates the peer session.
+   Either Sender or Receiver can press **Disconnect** at any time. Castora Pro sends `disconnect`, closes the `RTCPeerConnection`, immediately stops `ScreenCaptureKit` / `MediaProjection` (removing the OS screen-recording indicator), and invalidates the peer session.
 
 ---
 
@@ -179,7 +179,7 @@ Pairing bridges discovery to authenticated signaling without requiring accounts 
 
 ## 11. Performance Measurement (Real Telemetry Only)
 
-Castora **never** fabricates or estimates FPS, latency, or bitrate. Every number displayed in the stats overlay comes directly from WebRTC's official `RTCStatsReport` API (polled once per second):
+Castora Pro **never** fabricates or estimates FPS, latency, or bitrate. Every number displayed in the stats overlay comes directly from WebRTC's official `RTCStatsReport` API (polled once per second):
 
 - **FPS (Frames Per Second):** `framesPerSecond` from `outbound-rtp` (Sender) / `inbound-rtp` (Receiver).
 - **Bitrate (Mbps / kbps):** Calculated from the delta of `bytesSent` or `bytesReceived` divided by the elapsed `timestamp` between two real `RTCStatsReport` snapshots.

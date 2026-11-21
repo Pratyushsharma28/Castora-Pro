@@ -1,0 +1,14 @@
+{
+  "protocolVersion": "castora.v1",
+  "messageType": "connection_rejected",
+  "messageId": "msg-inv-0012",
+  "senderDeviceId": "dev-tv-livingroom",
+  "receiverDeviceId": "dev-phone-02",
+  "roomId": "K7M9P2",
+  "timestamp": "2026-11-21T12:20:00.000Z",
+  "payload": {
+    "sessionId": "sess-k7m9p2-002",
+    "reasonCode": "UNKNOWN_REASON",
+    "message": "Rejected for an undocumented reason."
+  }
+}

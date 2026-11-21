@@ -1,0 +1,16 @@
+{
+  "protocolVersion": "castora.v1",
+  "messageType": "ice_candidate",
+  "messageId": "msg-0010-ice",
+  "senderDeviceId": "dev-mac-pro-01",
+  "receiverDeviceId": "dev-tv-livingroom",
+  "roomId": "K7M9P2",
+  "timestamp": "2026-11-21T12:20:09.500Z",
+  "payload": {
+    "sessionId": "sess-k7m9p2-001",
+    "streamId": "stream-01",
+    "sdpMid": "0",
+    "sdpMLineIndex": 0,
+    "candidate": "candidate:842163049 1 udp 1677729535 192.168.1.25 54321 typ host"
+  }
+}

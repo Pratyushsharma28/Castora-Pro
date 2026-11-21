@@ -1,0 +1,10 @@
+{
+  "protocolVersion": "castora.v1",
+  "messageType": "screen_control_legacy",
+  "messageId": "msg-inv-0002",
+  "senderDeviceId": "dev-mac-pro-01",
+  "receiverDeviceId": "dev-tv-livingroom",
+  "roomId": "K7M9P2",
+  "timestamp": "2026-11-21T12:20:00.000Z",
+  "payload": {}
+}

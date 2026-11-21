@@ -1,9 +1,9 @@
-# Castora — Testing Strategy
+# Castora Pro — Testing Strategy
 
 > **Current Testing Status:** **Not Yet Tested.**  
-> Castora is in Phase 1 (documentation only). No unit tests, integration tests, or device tests have been executed yet, and no test results are claimed below.
+> Castora Pro is in Phase 1 (documentation only). No unit tests, integration tests, or device tests have been executed yet, and no test results are claimed below.
 
-This document defines how every layer of Castora will be tested as Phases 2–15 are implemented.
+This document defines how every layer of Castora Pro will be tested as Phases 2–15 are implemented.
 
 ---
 

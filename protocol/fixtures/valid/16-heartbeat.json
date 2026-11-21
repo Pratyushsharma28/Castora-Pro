@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "castora.v1",
+  "messageType": "heartbeat",
+  "messageId": "msg-0016-heartbeat",
+  "senderDeviceId": "dev-mac-pro-01",
+  "receiverDeviceId": "dev-tv-livingroom",
+  "roomId": "K7M9P2",
+  "timestamp": "2026-11-21T12:21:05.000Z",
+  "payload": {
+    "sequence": 12,
+    "role": "sender"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "protocolVersion": "castora.v1",
+  "messageType": "device_announce",
+  "messageId": "msg-inv-0006",
+  "senderDeviceId": "dev-tv-livingroom",
+  "receiverDeviceId": null,
+  "roomId": null,
+  "timestamp": "2026-11-21T12:20:00.000Z",
+  "payload": {
+    "deviceName": "Living Room Android TV",
+    "platform": "android-tv",
+    "role": "receiver",
+    "wsPort": "49152",
+    "capabilities": {
+      "maxWidth": 1920,
+      "maxHeight": 1080,
+      "maxFps": 60,
+      "codecs": ["H264"],
+      "supportsAudio": true
+    }
+  }
+}

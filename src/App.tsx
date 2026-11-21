@@ -9,7 +9,7 @@ import {
 } from './data/castoraBlueprint';
 
 const PHASE_1_CHECKLIST = [
-  'Inspected GitHub repository (github.com/Pratyushsharma28/Castora) and confirmed it is empty',
+  'Inspected GitHub repository (github.com/Pratyushsharma28/Castora-Pro) and verified Phase 1 baseline files',
   'Created README.md with truthful Implemented / Planned / Tested status ledger',
   'Created .gitignore covering Xcode/macOS, Android/Gradle, keystores, and workspace artifacts',
   'Created docs/PROJECT_ARCHITECTURE.md covering macOS, Android, Android TV, WebRTC, discovery, pairing, security, multi-stream, telemetry, and risks',
@@ -48,7 +48,7 @@ export default function App() {
     const cleanRoom = specRoom.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) || 'K7M9P2';
     const cleanPort = specPort.replace(/[^0-9]/g, '') || '49152';
     const cleanIp = specHostIp.trim() || '192.168.1.42';
-    const encodedName = encodeURIComponent(specName.trim() || 'Castora Receiver');
+    const encodedName = encodeURIComponent(specName.trim() || 'Castora Pro Receiver');
     return `castora://pair?v=1&ip=${cleanIp}&port=${cleanPort}&room=${cleanRoom}&token=<128bit_ephemeral_token>&name=${encodedName}`;
   }, [specHostIp, specPort, specRoom, specName]);
 
@@ -75,7 +75,7 @@ export default function App() {
             href="#overview"
             className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
           >
-            Castora
+            Castora Pro
           </a>
 
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
@@ -123,7 +123,7 @@ export default function App() {
               </h1>
 
               <p className="text-base text-slate-600 leading-relaxed max-w-2xl">
-                Castora connects native macOS, Android, and Android TV applications over local Wi-Fi or Ethernet using
+                Castora Pro connects native macOS, Android, and Android TV applications over local Wi-Fi or Ethernet using
                 Bonjour/NSD discovery, an interoperable JSON WebSocket signaling contract, and DTLS-SRTP WebRTC media
                 pipelines targeting up to 1080p at 60 FPS.
               </p>
@@ -178,7 +178,7 @@ export default function App() {
               </ul>
             </div>
             <div className="pt-3 mt-3 border-t border-slate-100 text-xs text-slate-500">
-              Target repository: github.com/Pratyushsharma28/Castora
+              Official repository: github.com/Pratyushsharma28/Castora-Pro
             </div>
           </div>
         </section>
@@ -525,7 +525,7 @@ export default function App() {
 
       <footer className="border-t border-slate-200 bg-white mt-12">
         <div className="mx-auto max-w-[1200px] px-6 py-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
-          <span>Castora · Phase 1 Architecture &amp; Protocol Specification</span>
+          <span>Castora Pro · Phase 1 Architecture &amp; Protocol Specification</span>
           <span>No streaming engine implemented in Phase 1</span>
         </div>
       </footer>

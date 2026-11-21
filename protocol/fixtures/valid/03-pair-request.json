@@ -1,0 +1,22 @@
+{
+  "protocolVersion": "castora.v1",
+  "messageType": "pair_request",
+  "messageId": "msg-0003-pair-req",
+  "senderDeviceId": "dev-mac-pro-01",
+  "receiverDeviceId": "dev-tv-livingroom",
+  "roomId": "K7M9P2",
+  "timestamp": "2026-11-21T12:20:02.000Z",
+  "payload": {
+    "pairingMethod": "qr",
+    "ephemeralNonce": "ephemeral_demo_nonce_0001",
+    "deviceName": "Studio MacBook Pro",
+    "platform": "macos",
+    "capabilities": {
+      "maxWidth": 1920,
+      "maxHeight": 1080,
+      "maxFps": 60,
+      "codecs": ["H264", "HEVC"],
+      "supportsAudio": true
+    }
+  }
+}

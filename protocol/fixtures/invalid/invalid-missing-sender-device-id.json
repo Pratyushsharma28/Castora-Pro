@@ -1,0 +1,12 @@
+{
+  "protocolVersion": "castora.v1",
+  "messageType": "heartbeat",
+  "messageId": "msg-inv-0003",
+  "receiverDeviceId": "dev-tv-livingroom",
+  "roomId": "K7M9P2",
+  "timestamp": "2026-11-21T12:20:00.000Z",
+  "payload": {
+    "sequence": 1,
+    "role": "sender"
+  }
+}

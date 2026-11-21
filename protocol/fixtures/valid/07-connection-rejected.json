@@ -1,0 +1,14 @@
+{
+  "protocolVersion": "castora.v1",
+  "messageType": "connection_rejected",
+  "messageId": "msg-0007-conn-rej",
+  "senderDeviceId": "dev-tv-livingroom",
+  "receiverDeviceId": "dev-phone-02",
+  "roomId": "K7M9P2",
+  "timestamp": "2026-11-21T12:20:07.000Z",
+  "payload": {
+    "sessionId": "sess-k7m9p2-002",
+    "reasonCode": "USER_DECLINED",
+    "message": "Receiver user declined the incoming cast request."
+  }
+}

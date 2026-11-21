@@ -1,0 +1,16 @@
+{
+  "protocolVersion": "castora.v1",
+  "messageType": "pair_response",
+  "messageId": "msg-inv-0009",
+  "senderDeviceId": "dev-tv-livingroom",
+  "receiverDeviceId": null,
+  "roomId": "K7M9P2",
+  "timestamp": "2026-11-21T12:20:00.000Z",
+  "payload": {
+    "paired": true,
+    "reason": null,
+    "receiverName": "Living Room Android TV",
+    "receiverPlatform": "android-tv",
+    "sessionId": "sess-k7m9p2-001"
+  }
+}

@@ -1,54 +1,51 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/Pratyushsharma28/Castora/protocol/castora-protocol.schema.json",
-  "title": "Castora Signaling Protocol v1.0",
-  "description": "Shared JSON signaling envelope and payload definitions for macOS and Android/Android TV Castora clients.",
+  "$id": "https://github.com/Pratyushsharma28/Castora-Pro/protocol/castora-protocol.schema.json",
+  "title": "Castora Pro Signaling Protocol (castora.v1)",
+  "description": "Strict cross-platform JSON signaling contract for macOS (Swift), Android (Kotlin), and Android TV (Kotlin) Castora Pro applications.",
   "type": "object",
+  "additionalProperties": false,
   "required": [
-    "version",
-    "type",
+    "protocolVersion",
+    "messageType",
     "messageId",
-    "timestampMs",
-    "senderPeerId",
+    "senderDeviceId",
+    "receiverDeviceId",
+    "roomId",
+    "timestamp",
     "payload"
   ],
   "properties": {
-    "version": {
-      "type": "string",
-      "const": "1.0"
+    "protocolVersion": {
+      "$ref": "#/$defs/protocolVersion"
     },
-    "type": {
-      "type": "string",
-      "enum": [
-        "pair_request",
-        "pair_approval",
-        "sdp_offer",
-        "sdp_answer",
-        "ice_candidate",
-        "stream_control",
-        "ping",
-        "pong",
-        "disconnect",
-        "error"
-      ]
+    "messageType": {
+      "$ref": "#/$defs/messageType"
     },
     "messageId": {
       "type": "string",
-      "minLength": 8
+      "minLength": 8,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$"
     },
-    "timestampMs": {
-      "type": "integer",
-      "minimum": 0
+    "senderDeviceId": {
+      "$ref": "#/$defs/deviceId"
     },
-    "sessionId": {
-      "type": "string"
+    "receiverDeviceId": {
+      "oneOf": [
+        { "$ref": "#/$defs/deviceId" },
+        { "type": "null" }
+      ]
     },
-    "senderPeerId": {
+    "roomId": {
+      "oneOf": [
+        { "$ref": "#/$defs/roomId" },
+        { "type": "null" }
+      ]
+    },
+    "timestamp": {
       "type": "string",
-      "minLength": 1
-    },
-    "targetPeerId": {
-      "type": "string"
+      "format": "date-time"
     },
     "payload": {
       "type": "object"
@@ -56,171 +53,514 @@
   },
   "allOf": [
     {
-      "if": {
-        "properties": { "type": { "const": "pair_request" } }
-      },
+      "if": { "properties": { "messageType": { "const": "device_announce" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/deviceAnnouncePayload" } } }
+    },
+    {
+      "if": { "properties": { "messageType": { "const": "device_discover" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/deviceDiscoverPayload" } } }
+    },
+    {
+      "if": { "properties": { "messageType": { "const": "pair_request" } } },
       "then": {
         "properties": {
-          "payload": {
-            "type": "object",
-            "required": ["roomCode", "sessionToken", "deviceName", "platform", "role", "capabilities"],
-            "properties": {
-              "roomCode": { "type": "string", "pattern": "^[A-Z0-9]{6}$" },
-              "sessionToken": { "type": "string", "minLength": 16 },
-              "deviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
-              "platform": { "type": "string", "enum": ["macos", "android", "android-tv"] },
-              "role": { "type": "string", "enum": ["sender", "receiver"] },
-              "capabilities": {
-                "type": "object",
-                "required": ["maxWidth", "maxHeight", "maxFps", "codecs", "supportsAudio"],
-                "properties": {
-                  "maxWidth": { "type": "integer", "minimum": 640 },
-                  "maxHeight": { "type": "integer", "minimum": 360 },
-                  "maxFps": { "type": "integer", "minimum": 15, "maximum": 120 },
-                  "codecs": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": { "type": "string", "enum": ["H264", "HEVC", "VP8", "VP9", "AV1"] }
-                  },
-                  "supportsAudio": { "type": "boolean" }
-                }
-              }
-            }
-          }
+          "receiverDeviceId": { "$ref": "#/$defs/deviceId" },
+          "roomId": { "$ref": "#/$defs/roomId" },
+          "payload": { "$ref": "#/$defs/pairRequestPayload" }
         }
       }
     },
     {
-      "if": {
-        "properties": { "type": { "const": "pair_approval" } }
-      },
+      "if": { "properties": { "messageType": { "const": "pair_response" } } },
       "then": {
         "properties": {
-          "payload": {
-            "type": "object",
-            "required": ["approved", "receiverName", "receiverPlatform"],
-            "properties": {
-              "approved": { "type": "boolean" },
-              "reason": { "type": ["string", "null"] },
-              "receiverName": { "type": "string", "minLength": 1 },
-              "receiverPlatform": { "type": "string", "enum": ["macos", "android", "android-tv"] },
-              "assignedStreamId": { "type": "string" },
-              "iceConfig": {
-                "type": "object",
-                "properties": {
-                  "iceServers": { "type": "array" }
-                }
-              }
-            }
-          }
+          "receiverDeviceId": { "$ref": "#/$defs/deviceId" },
+          "roomId": { "$ref": "#/$defs/roomId" },
+          "payload": { "$ref": "#/$defs/pairResponsePayload" }
         }
       }
     },
     {
-      "if": {
-        "properties": { "type": { "enum": ["sdp_offer", "sdp_answer"] } }
-      },
+      "if": { "properties": { "messageType": { "const": "connection_request" } } },
       "then": {
         "properties": {
-          "payload": {
-            "type": "object",
-            "required": ["streamId", "sdp"],
-            "properties": {
-              "streamId": { "type": "string", "minLength": 1 },
-              "sdp": { "type": "string", "minLength": 1 }
-            }
-          }
+          "receiverDeviceId": { "$ref": "#/$defs/deviceId" },
+          "roomId": { "$ref": "#/$defs/roomId" },
+          "payload": { "$ref": "#/$defs/connectionRequestPayload" }
         }
       }
     },
     {
-      "if": {
-        "properties": { "type": { "const": "ice_candidate" } }
-      },
+      "if": { "properties": { "messageType": { "const": "connection_accepted" } } },
       "then": {
         "properties": {
-          "payload": {
-            "type": "object",
-            "required": ["streamId", "sdpMid", "sdpMLineIndex", "candidate"],
-            "properties": {
-              "streamId": { "type": "string", "minLength": 1 },
-              "sdpMid": { "type": ["string", "null"] },
-              "sdpMLineIndex": { "type": "integer", "minimum": 0 },
-              "candidate": { "type": "string", "minLength": 1 }
-            }
-          }
+          "receiverDeviceId": { "$ref": "#/$defs/deviceId" },
+          "roomId": { "$ref": "#/$defs/roomId" },
+          "payload": { "$ref": "#/$defs/connectionAcceptedPayload" }
         }
       }
     },
     {
-      "if": {
-        "properties": { "type": { "const": "stream_control" } }
-      },
+      "if": { "properties": { "messageType": { "const": "connection_rejected" } } },
       "then": {
         "properties": {
-          "payload": {
-            "type": "object",
-            "required": ["streamId", "action"],
-            "properties": {
-              "streamId": { "type": "string", "minLength": 1 },
-              "action": {
-                "type": "string",
-                "enum": ["start", "pause", "resume", "focus_fullscreen", "return_to_grid", "stop"]
-              },
-              "targetMaxWidth": { "type": "integer", "minimum": 320 },
-              "targetMaxHeight": { "type": "integer", "minimum": 240 },
-              "targetMaxFps": { "type": "integer", "minimum": 5, "maximum": 120 }
-            }
-          }
+          "receiverDeviceId": { "$ref": "#/$defs/deviceId" },
+          "roomId": { "$ref": "#/$defs/roomId" },
+          "payload": { "$ref": "#/$defs/connectionRejectedPayload" }
         }
       }
     },
     {
-      "if": {
-        "properties": { "type": { "const": "disconnect" } }
-      },
+      "if": { "properties": { "messageType": { "const": "session_offer" } } },
       "then": {
         "properties": {
-          "payload": {
-            "type": "object",
-            "required": ["reason"],
-            "properties": {
-              "streamId": { "type": "string" },
-              "reason": { "type": "string", "minLength": 1 }
-            }
-          }
+          "receiverDeviceId": { "$ref": "#/$defs/deviceId" },
+          "roomId": { "$ref": "#/$defs/roomId" },
+          "payload": { "$ref": "#/$defs/sessionOfferPayload" }
         }
       }
     },
     {
-      "if": {
-        "properties": { "type": { "const": "error" } }
-      },
+      "if": { "properties": { "messageType": { "const": "session_answer" } } },
       "then": {
         "properties": {
-          "payload": {
-            "type": "object",
-            "required": ["code", "message", "recoverable"],
-            "properties": {
-              "code": {
-                "type": "string",
-                "enum": [
-                  "UNSUPPORTED_VERSION",
-                  "INVALID_MESSAGE",
-                  "INVALID_TOKEN",
-                  "INVALID_ROOM_CODE",
-                  "APPROVAL_DECLINED",
-                  "SESSION_FULL",
-                  "CAPTURE_PERMISSION_DENIED",
-                  "WEBRTC_NEGOTIATION_FAILED"
-                ]
-              },
-              "message": { "type": "string", "minLength": 1 },
-              "recoverable": { "type": "boolean" }
-            }
-          }
+          "receiverDeviceId": { "$ref": "#/$defs/deviceId" },
+          "roomId": { "$ref": "#/$defs/roomId" },
+          "payload": { "$ref": "#/$defs/sessionAnswerPayload" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "messageType": { "const": "ice_candidate" } } },
+      "then": {
+        "properties": {
+          "receiverDeviceId": { "$ref": "#/$defs/deviceId" },
+          "roomId": { "$ref": "#/$defs/roomId" },
+          "payload": { "$ref": "#/$defs/iceCandidatePayload" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "messageType": { "const": "stream_start" } } },
+      "then": {
+        "properties": {
+          "receiverDeviceId": { "$ref": "#/$defs/deviceId" },
+          "roomId": { "$ref": "#/$defs/roomId" },
+          "payload": { "$ref": "#/$defs/streamStartPayload" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "messageType": { "const": "stream_stop" } } },
+      "then": {
+        "properties": {
+          "receiverDeviceId": { "$ref": "#/$defs/deviceId" },
+          "roomId": { "$ref": "#/$defs/roomId" },
+          "payload": { "$ref": "#/$defs/streamStopPayload" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "messageType": { "const": "stream_status" } } },
+      "then": {
+        "properties": {
+          "receiverDeviceId": { "$ref": "#/$defs/deviceId" },
+          "roomId": { "$ref": "#/$defs/roomId" },
+          "payload": { "$ref": "#/$defs/streamStatusPayload" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "messageType": { "const": "disconnect" } } },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/$defs/disconnectPayload" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "messageType": { "const": "error" } } },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/$defs/errorPayload" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "messageType": { "const": "heartbeat" } } },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/$defs/heartbeatPayload" }
         }
       }
     }
-  ]
+  ],
+  "$defs": {
+    "protocolVersion": {
+      "type": "string",
+      "const": "castora.v1"
+    },
+    "messageType": {
+      "type": "string",
+      "enum": [
+        "device_announce",
+        "device_discover",
+        "pair_request",
+        "pair_response",
+        "connection_request",
+        "connection_accepted",
+        "connection_rejected",
+        "session_offer",
+        "session_answer",
+        "ice_candidate",
+        "stream_start",
+        "stream_stop",
+        "stream_status",
+        "disconnect",
+        "error",
+        "heartbeat"
+      ]
+    },
+    "deviceId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "roomId": {
+      "type": "string",
+      "pattern": "^[A-Z0-9]{6}$"
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "streamId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["macos", "android", "android-tv"]
+    },
+    "deviceRole": {
+      "type": "string",
+      "enum": ["sender", "receiver", "both"]
+    },
+    "videoCodec": {
+      "type": "string",
+      "enum": ["H264", "HEVC", "VP8", "VP9", "AV1"]
+    },
+    "ephemeralNonce": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxWidth", "maxHeight", "maxFps", "codecs", "supportsAudio"],
+      "properties": {
+        "maxWidth": { "type": "integer", "minimum": 640, "maximum": 7680 },
+        "maxHeight": { "type": "integer", "minimum": 360, "maximum": 4320 },
+        "maxFps": { "type": "integer", "minimum": 15, "maximum": 120 },
+        "codecs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/videoCodec" }
+        },
+        "supportsAudio": { "type": "boolean" }
+      }
+    },
+    "iceServer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["urls"],
+      "properties": {
+        "urls": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 3 }
+        }
+      }
+    },
+    "deviceAnnouncePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deviceName", "platform", "role", "wsPort", "capabilities"],
+      "properties": {
+        "deviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "platform": { "$ref": "#/$defs/platform" },
+        "role": { "$ref": "#/$defs/deviceRole" },
+        "wsPort": { "type": "integer", "minimum": 1024, "maximum": 65535 },
+        "capabilities": { "$ref": "#/$defs/capabilities" }
+      }
+    },
+    "deviceDiscoverPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestedRole", "requesterPlatform"],
+      "properties": {
+        "requestedRole": {
+          "type": "string",
+          "enum": ["sender", "receiver", "any"]
+        },
+        "requesterPlatform": { "$ref": "#/$defs/platform" },
+        "filterPlatform": {
+          "oneOf": [
+            { "$ref": "#/$defs/platform" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "pairRequestPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pairingMethod", "ephemeralNonce", "deviceName", "platform", "capabilities"],
+      "properties": {
+        "pairingMethod": {
+          "type": "string",
+          "enum": ["qr", "room_code", "manual_ip"]
+        },
+        "ephemeralNonce": { "$ref": "#/$defs/ephemeralNonce" },
+        "deviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "platform": { "$ref": "#/$defs/platform" },
+        "capabilities": { "$ref": "#/$defs/capabilities" }
+      }
+    },
+    "pairResponsePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paired", "reason", "receiverName", "receiverPlatform", "sessionId"],
+      "properties": {
+        "paired": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "receiverName": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "receiverPlatform": { "$ref": "#/$defs/platform" },
+        "sessionId": {
+          "oneOf": [
+            { "$ref": "#/$defs/sessionId" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "connectionRequestPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "streamId", "senderName", "senderPlatform", "requestedQuality"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "streamId": { "$ref": "#/$defs/streamId" },
+        "senderName": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "senderPlatform": { "$ref": "#/$defs/platform" },
+        "requestedQuality": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["targetWidth", "targetHeight", "targetFps", "preferredCodec"],
+          "properties": {
+            "targetWidth": { "type": "integer", "minimum": 640, "maximum": 3840 },
+            "targetHeight": { "type": "integer", "minimum": 360, "maximum": 2160 },
+            "targetFps": { "type": "integer", "minimum": 15, "maximum": 120 },
+            "preferredCodec": { "$ref": "#/$defs/videoCodec" }
+          }
+        }
+      }
+    },
+    "connectionAcceptedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "streamId", "assignedSlotIndex", "iceConfig"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "streamId": { "$ref": "#/$defs/streamId" },
+        "assignedSlotIndex": { "type": "integer", "minimum": 0, "maximum": 15 },
+        "iceConfig": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["iceServers"],
+          "properties": {
+            "iceServers": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/iceServer" }
+            }
+          }
+        }
+      }
+    },
+    "connectionRejectedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "reasonCode", "message"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "reasonCode": {
+          "type": "string",
+          "enum": ["USER_DECLINED", "SESSION_FULL", "CAPABILITY_MISMATCH", "TIMEOUT"]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "sessionOfferPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "streamId", "sdpType", "sdp"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "streamId": { "$ref": "#/$defs/streamId" },
+        "sdpType": { "type": "string", "const": "offer" },
+        "sdp": { "type": "string", "minLength": 10 },
+        "mediaInfo": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hasVideo", "hasAudio"],
+          "properties": {
+            "hasVideo": { "type": "boolean" },
+            "hasAudio": { "type": "boolean" },
+            "codecHint": { "$ref": "#/$defs/videoCodec" }
+          }
+        }
+      }
+    },
+    "sessionAnswerPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "streamId", "sdpType", "sdp"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "streamId": { "$ref": "#/$defs/streamId" },
+        "sdpType": { "type": "string", "const": "answer" },
+        "sdp": { "type": "string", "minLength": 10 }
+      }
+    },
+    "iceCandidatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "streamId", "sdpMid", "sdpMLineIndex", "candidate"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "streamId": { "$ref": "#/$defs/streamId" },
+        "sdpMid": { "type": ["string", "null"] },
+        "sdpMLineIndex": { "type": "integer", "minimum": 0 },
+        "candidate": { "type": "string", "minLength": 1 }
+      }
+    },
+    "streamStartPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "streamId", "width", "height", "fps", "codec"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "streamId": { "$ref": "#/$defs/streamId" },
+        "width": { "type": "integer", "minimum": 320, "maximum": 3840 },
+        "height": { "type": "integer", "minimum": 240, "maximum": 2160 },
+        "fps": { "type": "integer", "minimum": 1, "maximum": 120 },
+        "codec": { "$ref": "#/$defs/videoCodec" }
+      }
+    },
+    "streamStopPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "streamId", "reason"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "streamId": { "$ref": "#/$defs/streamId" },
+        "reason": {
+          "type": "string",
+          "enum": ["user_stopped", "receiver_closed", "capture_revoked", "network_lost"]
+        }
+      }
+    },
+    "streamStatusPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "streamId", "state", "layoutMode"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "streamId": { "$ref": "#/$defs/streamId" },
+        "state": {
+          "type": "string",
+          "enum": ["starting", "active", "paused", "degraded"]
+        },
+        "layoutMode": {
+          "type": "string",
+          "enum": ["grid", "fullscreen"]
+        },
+        "measuredStats": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fps", "bitrateKbps", "rttMs", "droppedFrames"],
+          "properties": {
+            "fps": { "type": "number", "minimum": 0 },
+            "bitrateKbps": { "type": "number", "minimum": 0 },
+            "rttMs": { "type": "number", "minimum": 0 },
+            "droppedFrames": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "disconnectPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "streamId", "reason"],
+      "properties": {
+        "sessionId": {
+          "oneOf": [
+            { "$ref": "#/$defs/sessionId" },
+            { "type": "null" }
+          ]
+        },
+        "streamId": {
+          "oneOf": [
+            { "$ref": "#/$defs/streamId" },
+            { "type": "null" }
+          ]
+        },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "errorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "recoverable", "relatedMessageId"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "UNSUPPORTED_VERSION",
+            "INVALID_MESSAGE",
+            "INVALID_NONCE",
+            "INVALID_ROOM_ID",
+            "APPROVAL_DECLINED",
+            "SESSION_FULL",
+            "CAPTURE_PERMISSION_DENIED",
+            "WEBRTC_NEGOTIATION_FAILED",
+            "INTERNAL_ERROR"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "recoverable": { "type": "boolean" },
+        "relatedMessageId": { "type": ["string", "null"] }
+      }
+    },
+    "heartbeatPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "role"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 0 },
+        "role": {
+          "type": "string",
+          "enum": ["sender", "receiver"]
+        }
+      }
+    }
+  }
 }
