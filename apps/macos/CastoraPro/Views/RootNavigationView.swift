@@ -57,8 +57,8 @@ public struct RootNavigationView: View {
             .background(CastoraTheme.canvas)
             .navigationTitle(viewModel.selectedSection.rawValue)
         }
-        .onAppear {
-            viewModel.refreshPermissionStatus()
+        .task {
+            await viewModel.refreshPermissionStatus()
         }
     }
 }

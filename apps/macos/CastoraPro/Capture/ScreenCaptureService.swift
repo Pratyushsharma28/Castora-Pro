@@ -126,9 +126,55 @@ private final class CaptureStreamDelegate: NSObject, SCStreamDelegate, SCStreamO
     }
 }
 
+public struct ScreenCaptureDisplayQueryResult: @unchecked Sendable {
+    public let descriptors: [DisplayDescriptor]
+    public let scDisplays: [CGDirectDisplayID: SCDisplay]
+
+    public init(
+        descriptors: [DisplayDescriptor],
+        scDisplays: [CGDirectDisplayID: SCDisplay] = [:]
+    ) {
+        self.descriptors = descriptors
+        self.scDisplays = scDisplays
+    }
+}
+
+public protocol DisplayContentProviding: Sendable {
+    func fetchShareableDisplays() async throws -> ScreenCaptureDisplayQueryResult
+}
+
+public struct SystemDisplayContentProvider: DisplayContentProviding {
+    public init() {}
+
+    public func fetchShareableDisplays() async throws -> ScreenCaptureDisplayQueryResult {
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false,
+            onScreenWindowsOnly: true
+        )
+
+        var displayMap: [CGDirectDisplayID: SCDisplay] = [:]
+        let mainID = CGMainDisplayID()
+
+        let descriptors = content.displays.enumerated().map { index, scDisplay in
+            displayMap[scDisplay.displayID] = scDisplay
+            let isMain = scDisplay.displayID == mainID
+            let label = isMain ? "Main Display (\(index + 1))" : "External Display \(index + 1)"
+            return DisplayDescriptor(
+                id: scDisplay.displayID,
+                name: label,
+                width: scDisplay.width,
+                height: scDisplay.height,
+                isMainDisplay: isMain
+            )
+        }
+
+        return ScreenCaptureDisplayQueryResult(descriptors: descriptors, scDisplays: displayMap)
+    }
+}
+
 @MainActor
 public final class ScreenCaptureService {
-    private let permissionChecker: ScreenRecordingPermissionChecking
+    private let contentProvider: DisplayContentProviding
     private let captureQueue = DispatchQueue(label: "com.castorapro.macos.screencapture", qos: .userInteractive)
     private let metricsTracker = CaptureMetricsTracker(rollingWindowSeconds: 2.0)
 
@@ -136,8 +182,8 @@ public final class ScreenCaptureService {
     private var activeStream: SCStream?
     private var streamDelegate: CaptureStreamDelegate?
 
-    public init(permissionChecker: ScreenRecordingPermissionChecking = SystemScreenRecordingPermissionService()) {
-        self.permissionChecker = permissionChecker
+    public init(contentProvider: DisplayContentProviding = SystemDisplayContentProvider()) {
+        self.contentProvider = contentProvider
     }
 
     public func currentCaptureMetrics() -> CaptureMetricsSnapshot {
@@ -145,48 +191,30 @@ public final class ScreenCaptureService {
     }
 
     public func enumerateDisplays() async throws -> [DisplayDescriptor] {
-        guard permissionChecker.checkStatus() == .granted else {
-            throw CaptureServiceError.permissionDenied
-        }
-
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(
-                false,
-                onScreenWindowsOnly: true
-            )
-
-            var displayMap: [CGDirectDisplayID: SCDisplay] = [:]
-            let mainID = CGMainDisplayID()
-
-            let descriptors = content.displays.enumerated().map { index, scDisplay in
-                displayMap[scDisplay.displayID] = scDisplay
-                let isMain = scDisplay.displayID == mainID
-                let label = isMain ? "Main Display (\(index + 1))" : "External Display \(index + 1)"
-                return DisplayDescriptor(
-                    id: scDisplay.displayID,
-                    name: label,
-                    width: scDisplay.width,
-                    height: scDisplay.height,
-                    isMainDisplay: isMain
-                )
-            }
-
-            guard !descriptors.isEmpty else {
+            let result = try await contentProvider.fetchShareableDisplays()
+            guard !result.descriptors.isEmpty else {
                 throw CaptureServiceError.noDisplaysFound
             }
 
-            cachedDisplays = displayMap
-            return descriptors
+            cachedDisplays = result.scDisplays
+            return result.descriptors
         } catch let error as CaptureServiceError {
             throw error
         } catch {
             let nsError = error as NSError
-            if nsError.domain == SCStreamErrorDomain {
-                if nsError.code == SCStreamError.userDeclined.rawValue {
-                    throw CaptureServiceError.permissionDenied
-                }
+            if nsError.domain == SCStreamErrorDomain && nsError.code == SCStreamError.userDeclined.rawValue {
+                throw CaptureServiceError.permissionDenied(
+                    domain: nsError.domain,
+                    code: nsError.code,
+                    detail: nsError.localizedDescription
+                )
             }
-            throw CaptureServiceError.captureStartFailed(error.localizedDescription)
+            throw CaptureServiceError.enumerationFailed(
+                domain: nsError.domain,
+                code: nsError.code,
+                detail: nsError.localizedDescription
+            )
         }
     }
 
@@ -213,10 +241,6 @@ public final class ScreenCaptureService {
         configuration: CaptureConfiguration,
         onUnexpectedStop: @escaping @MainActor (String) -> Void
     ) async throws -> (width: Int, height: Int) {
-        guard permissionChecker.checkStatus() == .granted else {
-            throw CaptureServiceError.permissionDenied
-        }
-
         guard activeStream == nil else {
             throw CaptureServiceError.alreadyCapturing
         }
@@ -253,7 +277,19 @@ public final class ScreenCaptureService {
         } catch {
             self.streamDelegate = nil
             self.activeStream = nil
-            throw CaptureServiceError.captureStartFailed(error.localizedDescription)
+            let nsError = error as NSError
+            if nsError.domain == SCStreamErrorDomain && nsError.code == SCStreamError.userDeclined.rawValue {
+                throw CaptureServiceError.permissionDenied(
+                    domain: nsError.domain,
+                    code: nsError.code,
+                    detail: nsError.localizedDescription
+                )
+            }
+            throw CaptureServiceError.captureStartFailed(
+                domain: nsError.domain,
+                code: nsError.code,
+                detail: nsError.localizedDescription
+            )
         }
     }
 

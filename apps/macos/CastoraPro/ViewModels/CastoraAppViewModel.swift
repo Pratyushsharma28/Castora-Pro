@@ -27,69 +27,74 @@ public final class CastoraAppViewModel: ObservableObject {
 
     public init(
         permissionService: ScreenRecordingPermissionChecking = SystemScreenRecordingPermissionService(),
+        contentProvider: DisplayContentProviding = SystemDisplayContentProvider(),
         identityService: DeviceIdentityService = DeviceIdentityService(),
         encoderProbe: VideoToolboxCapabilityProbe = VideoToolboxCapabilityProbe()
     ) {
         self.permissionService = permissionService
-        self.captureService = ScreenCaptureService(permissionChecker: permissionService)
+        self.captureService = ScreenCaptureService(contentProvider: contentProvider)
         self.identityService = identityService
         self.encoderProbe = encoderProbe
 
-        let initialStatus = permissionService.checkStatus()
-        self.permissionState = PermissionDiagnosticState(screenRecording: initialStatus)
+        let preflight = permissionService.checkPreflight()
+        self.permissionState = PermissionDiagnosticState(
+            screenRecording: .checking,
+            preflightGranted: preflight,
+            shareableContentAuthorized: nil,
+            lastCheckedAt: Date(),
+            lastActionMessage: "Verifying ScreenCaptureKit authorization..."
+        )
         self.deviceDisplayName = identityService.loadDeviceName()
         self.localDeviceId = identityService.loadOrCreateDeviceId()
         self.encoderCapability = encoderProbe.inspectHardwareEncoders()
     }
 
-    public func refreshPermissionStatus() {
-        let status = permissionService.checkStatus()
-        let message: String = status.isGranted
-            ? "Screen Recording permission verified."
-            : "Screen Recording permission is still not granted."
+    public func refreshPermissionStatus() async {
+        let preflight = permissionService.checkPreflight()
         permissionState = PermissionDiagnosticState(
-            screenRecording: status,
+            screenRecording: .checking,
+            preflightGranted: preflight,
+            shareableContentAuthorized: nil,
             lastCheckedAt: Date(),
-            lastActionMessage: message
+            lastActionMessage: "Querying ScreenCaptureKit shareable content..."
         )
+
+        let outcome = await permissionService.verifyAccess()
+        applyPermissionOutcome(outcome)
     }
 
-    public func requestScreenRecordingPermission() {
-        let resultingStatus = permissionService.requestPermissionPrompt()
-        let message: String
-        if resultingStatus.isGranted {
-            message = "Screen Recording permission granted."
-        } else {
-            message = "Permission not granted yet. Enable Castora Pro in System Settings → Privacy & Security → Screen Recording, then click Refresh Status."
-        }
+    public func requestScreenRecordingPermission() async {
+        let preflight = permissionService.checkPreflight()
         permissionState = PermissionDiagnosticState(
-            screenRecording: resultingStatus,
+            screenRecording: .checking,
+            preflightGranted: preflight,
+            shareableContentAuthorized: nil,
             lastCheckedAt: Date(),
-            lastActionMessage: message
+            lastActionMessage: "Requesting Screen Recording permission and verifying via ScreenCaptureKit..."
         )
+
+        let outcome = await permissionService.requestPermissionPrompt()
+        applyPermissionOutcome(outcome)
     }
 
     public func openPrivacySettings() {
         let opened = permissionService.openScreenRecordingSettings()
         let note = opened
-            ? "Opened System Settings → Privacy & Security → Screen Recording."
-            : "Unable to open System Settings automatically. Open Privacy & Security → Screen Recording manually."
+            ? "Opened System Settings → Privacy & Security → Screen Recording. After toggling access, click Refresh Status."
+            : "Unable to open System Settings automatically. Open Privacy & Security → Screen Recording manually, then click Refresh Status."
         permissionState = PermissionDiagnosticState(
-            screenRecording: permissionService.checkStatus(),
+            screenRecording: permissionState.screenRecording,
+            preflightGranted: permissionService.checkPreflight(),
+            shareableContentAuthorized: permissionState.shareableContentAuthorized,
+            errorDomain: permissionState.errorDomain,
+            errorCode: permissionState.errorCode,
+            errorDescription: permissionState.errorDescription,
             lastCheckedAt: Date(),
             lastActionMessage: note
         )
     }
 
     public func refreshDisplays() async {
-        refreshPermissionStatus()
-        guard permissionState.screenRecording.isGranted else {
-            displays = []
-            selectedDisplayID = nil
-            lastCaptureError = CaptureServiceError.permissionDenied.localizedDescription
-            return
-        }
-
         if !captureState.isCapturing {
             captureState = .enumerating
         }
@@ -106,13 +111,47 @@ public final class CastoraAppViewModel: ObservableObject {
             if !captureState.isCapturing {
                 captureState = .idle
             }
-        } catch {
+
+            let preflight = permissionService.checkPreflight()
+            let diagnostic = preflight
+                ? "ScreenCaptureKit enumerated \(found.count) display(s); CoreGraphics preflight also returned true."
+                : "ScreenCaptureKit enumerated \(found.count) display(s), confirming authorization even though CGPreflightScreenCaptureAccess() returned false."
+            permissionState = PermissionDiagnosticState(
+                screenRecording: .granted,
+                preflightGranted: preflight,
+                shareableContentAuthorized: true,
+                errorDomain: nil,
+                errorCode: nil,
+                errorDescription: nil,
+                lastCheckedAt: Date(),
+                lastActionMessage: diagnostic
+            )
+        } catch let error as CaptureServiceError {
             displays = []
             selectedDisplayID = nil
             lastCaptureError = error.localizedDescription
             if !captureState.isCapturing {
                 captureState = .failed(error.localizedDescription)
             }
+            updatePermissionStateFromCaptureError(error)
+        } catch {
+            displays = []
+            selectedDisplayID = nil
+            let nsError = error as NSError
+            lastCaptureError = error.localizedDescription
+            if !captureState.isCapturing {
+                captureState = .failed(error.localizedDescription)
+            }
+            permissionState = PermissionDiagnosticState(
+                screenRecording: .diagnosticError("\(nsError.domain) (\(nsError.code)): \(nsError.localizedDescription)"),
+                preflightGranted: permissionService.checkPreflight(),
+                shareableContentAuthorized: false,
+                errorDomain: nsError.domain,
+                errorCode: nsError.code,
+                errorDescription: nsError.localizedDescription,
+                lastCheckedAt: Date(),
+                lastActionMessage: "Display enumeration error [\(nsError.domain) (\(nsError.code))]: \(nsError.localizedDescription)"
+            )
         }
     }
 
@@ -122,19 +161,12 @@ public final class CastoraAppViewModel: ObservableObject {
     }
 
     public func startLocalCaptureTest() async {
-        refreshPermissionStatus()
-        guard permissionState.screenRecording.isGranted else {
-            lastCaptureError = CaptureServiceError.permissionDenied.localizedDescription
-            captureState = .failed(CaptureServiceError.permissionDenied.localizedDescription)
-            return
-        }
-
         if displays.isEmpty {
             await refreshDisplays()
         }
 
         guard let targetDisplay = selectedDisplay else {
-            let msg = CaptureServiceError.noDisplaysFound.localizedDescription
+            let msg = lastCaptureError ?? CaptureServiceError.noDisplaysFound.localizedDescription
             lastCaptureError = msg
             captureState = .failed(msg)
             return
@@ -165,6 +197,11 @@ public final class CastoraAppViewModel: ObservableObject {
                 targetFps: captureConfiguration.frameRatePreset.rawValue
             )
             startMetricsPolling()
+        } catch let error as CaptureServiceError {
+            stopMetricsPolling()
+            captureState = .failed(error.localizedDescription)
+            lastCaptureError = error.localizedDescription
+            updatePermissionStateFromCaptureError(error)
         } catch {
             stopMetricsPolling()
             captureState = .failed(error.localizedDescription)
@@ -178,6 +215,71 @@ public final class CastoraAppViewModel: ObservableObject {
         await captureService.stopLocalCapture()
         syncCaptureMetrics()
         captureState = .idle
+    }
+
+    private func applyPermissionOutcome(_ outcome: PermissionCheckOutcome) {
+        permissionState = PermissionDiagnosticState(
+            screenRecording: outcome.status,
+            preflightGranted: outcome.preflightGranted,
+            shareableContentAuthorized: outcome.shareableContentAuthorized,
+            errorDomain: outcome.errorDomain,
+            errorCode: outcome.errorCode,
+            errorDescription: outcome.errorDescription,
+            lastCheckedAt: Date(),
+            lastActionMessage: outcome.diagnosticMessage
+        )
+    }
+
+    private func updatePermissionStateFromCaptureError(_ error: CaptureServiceError) {
+        let preflight = permissionService.checkPreflight()
+        switch error {
+        case .permissionDenied(let domain, let code, let detail):
+            permissionState = PermissionDiagnosticState(
+                screenRecording: .deniedOrNotGranted,
+                preflightGranted: preflight,
+                shareableContentAuthorized: false,
+                errorDomain: domain,
+                errorCode: code,
+                errorDescription: detail,
+                lastCheckedAt: Date(),
+                lastActionMessage: error.localizedDescription
+            )
+        case .enumerationFailed(let domain, let code, let detail):
+            permissionState = PermissionDiagnosticState(
+                screenRecording: .diagnosticError("\(domain) (\(code)): \(detail)"),
+                preflightGranted: preflight,
+                shareableContentAuthorized: false,
+                errorDomain: domain,
+                errorCode: code,
+                errorDescription: detail,
+                lastCheckedAt: Date(),
+                lastActionMessage: error.localizedDescription
+            )
+        case .captureStartFailed(let domain, let code, let detail):
+            permissionState = PermissionDiagnosticState(
+                screenRecording: permissionState.screenRecording,
+                preflightGranted: preflight,
+                shareableContentAuthorized: permissionState.shareableContentAuthorized,
+                errorDomain: domain,
+                errorCode: code,
+                errorDescription: detail,
+                lastCheckedAt: Date(),
+                lastActionMessage: error.localizedDescription
+            )
+        case .noDisplaysFound:
+            permissionState = PermissionDiagnosticState(
+                screenRecording: .granted,
+                preflightGranted: preflight,
+                shareableContentAuthorized: true,
+                errorDomain: nil,
+                errorCode: nil,
+                errorDescription: nil,
+                lastCheckedAt: Date(),
+                lastActionMessage: "ScreenCaptureKit authorized, but returned 0 shareable displays."
+            )
+        case .selectedDisplayUnavailable, .alreadyCapturing:
+            break
+        }
     }
 
     private func startMetricsPolling() {

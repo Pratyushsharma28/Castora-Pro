@@ -95,6 +95,15 @@ public enum ScreenCaptureState: Equatable, Sendable {
         return false
     }
 
+    public var isBusy: Bool {
+        switch self {
+        case .enumerating, .starting, .stopping:
+            return true
+        case .idle, .capturing, .failed:
+            return false
+        }
+    }
+
     public var statusLabel: String {
         switch self {
         case .idle:
@@ -114,24 +123,27 @@ public enum ScreenCaptureState: Equatable, Sendable {
 }
 
 public enum CaptureServiceError: LocalizedError, Equatable, Sendable {
-    case permissionDenied
+    case permissionDenied(domain: String, code: Int, detail: String)
+    case enumerationFailed(domain: String, code: Int, detail: String)
     case noDisplaysFound
     case selectedDisplayUnavailable
     case alreadyCapturing
-    case captureStartFailed(String)
+    case captureStartFailed(domain: String, code: Int, detail: String)
 
     public var errorDescription: String? {
         switch self {
-        case .permissionDenied:
-            return "Screen Recording permission is not granted. Authorize Castora Pro in System Settings and retry."
+        case .permissionDenied(let domain, let code, let detail):
+            return "Screen Recording permission denied by ScreenCaptureKit [\(domain) (\(code))]: \(detail)"
+        case .enumerationFailed(let domain, let code, let detail):
+            return "ScreenCaptureKit display enumeration failed [\(domain) (\(code))]: \(detail)"
         case .noDisplaysFound:
             return "ScreenCaptureKit found no shareable displays."
         case .selectedDisplayUnavailable:
             return "The selected display is no longer available."
         case .alreadyCapturing:
             return "A local ScreenCaptureKit session is already running."
-        case .captureStartFailed(let detail):
-            return "ScreenCaptureKit failed to start: \(detail)"
+        case .captureStartFailed(let domain, let code, let detail):
+            return "ScreenCaptureKit failed to start [\(domain) (\(code))]: \(detail)"
         }
     }
 }

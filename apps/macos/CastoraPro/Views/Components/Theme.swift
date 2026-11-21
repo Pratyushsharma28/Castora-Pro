@@ -77,9 +77,7 @@ public struct PermissionBannerView: View {
         SurfaceCard {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
-                    Image(systemName: permissionState.screenRecording.isGranted ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
-                        .font(.title3)
-                        .foregroundStyle(permissionState.screenRecording.isGranted ? CastoraTheme.success : CastoraTheme.warning)
+                    statusIcon
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Screen Recording Permission: \(permissionState.screenRecording.title)")
@@ -90,6 +88,8 @@ public struct PermissionBannerView: View {
                             .foregroundStyle(CastoraTheme.textSecondary)
                     }
                 }
+
+                diagnosticDetailsView
 
                 if let actionMessage = permissionState.lastActionMessage {
                     Text(actionMessage)
@@ -102,6 +102,7 @@ public struct PermissionBannerView: View {
                         Button("Request Permission", action: onRequestPermission)
                             .buttonStyle(.borderedProminent)
                             .tint(CastoraTheme.accent)
+                            .disabled(permissionState.screenRecording.isChecking)
 
                         Button("Open Privacy Settings", action: onOpenSettings)
                             .buttonStyle(.bordered)
@@ -109,8 +110,63 @@ public struct PermissionBannerView: View {
 
                     Button("Refresh Status", action: onRefresh)
                         .buttonStyle(.bordered)
+                        .disabled(permissionState.screenRecording.isChecking)
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch permissionState.screenRecording {
+        case .checking:
+            ProgressView()
+                .controlSize(.small)
+        case .granted:
+            Image(systemName: "checkmark.shield.fill")
+                .font(.title3)
+                .foregroundStyle(CastoraTheme.success)
+        case .deniedOrNotGranted:
+            Image(systemName: "exclamationmark.shield.fill")
+                .font(.title3)
+                .foregroundStyle(CastoraTheme.warning)
+        case .diagnosticError:
+            Image(systemName: "xmark.shield.fill")
+                .font(.title3)
+                .foregroundStyle(CastoraTheme.danger)
+        }
+    }
+
+    @ViewBuilder
+    private var diagnosticDetailsView: some View {
+        let preflightText = permissionState.preflightGranted.map { $0 ? "true" : "false" } ?? "unknown"
+        let sckText: String = {
+            switch permissionState.shareableContentAuthorized {
+            case .some(true):
+                return "authorized"
+            case .some(false):
+                return "failed"
+            case .none:
+                return "pending"
+            }
+        }()
+
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Diagnostics · CGPreflight: \(preflightText) · ScreenCaptureKit Query: \(sckText)")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(CastoraTheme.textSecondary)
+
+            if let domain = permissionState.errorDomain, let code = permissionState.errorCode {
+                let detail = permissionState.errorDescription ?? ""
+                Text("NSError: \(domain) (code \(code)) \(detail)")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(CastoraTheme.warning)
+            }
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(CastoraTheme.surfaceElevated)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }

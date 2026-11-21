@@ -16,9 +16,17 @@ public struct CastScreenView: View {
 
             PermissionBannerView(
                 permissionState: viewModel.permissionState,
-                onRequestPermission: viewModel.requestScreenRecordingPermission,
+                onRequestPermission: {
+                    Task {
+                        await viewModel.requestScreenRecordingPermission()
+                    }
+                },
                 onOpenSettings: viewModel.openPrivacySettings,
-                onRefresh: viewModel.refreshPermissionStatus
+                onRefresh: {
+                    Task {
+                        await viewModel.refreshPermissionStatus()
+                    }
+                }
             )
 
             SurfaceCard {
@@ -47,7 +55,7 @@ public struct CastScreenView: View {
                         Text(
                             viewModel.permissionState.screenRecording.isGranted
                             ? "Click Refresh Displays to enumerate connected screens via ScreenCaptureKit."
-                            : "Grant Screen Recording permission above before enumerating displays."
+                            : "Click Refresh Displays to verify ScreenCaptureKit display access or grant permission above."
                         )
                         .font(.callout)
                         .foregroundStyle(CastoraTheme.textSecondary)
@@ -115,7 +123,7 @@ public struct CastScreenView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(CastoraTheme.accent)
-                            .disabled(!viewModel.permissionState.screenRecording.isGranted)
+                            .disabled(viewModel.captureState.isBusy)
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -179,7 +187,7 @@ public struct CastScreenView: View {
             }
         }
         .task {
-            if viewModel.permissionState.screenRecording.isGranted && viewModel.displays.isEmpty {
+            if viewModel.displays.isEmpty {
                 await viewModel.refreshDisplays()
             }
         }

@@ -72,14 +72,20 @@ What this verifies:
 - `ProtocolModelTests`: Decodes and round-trips all 16 `castora.v1` message types, checks all 16 JSON files in `protocol/fixtures/valid/` when present on disk, verifies explicit `null` encoding (`receiverDeviceId`, `roomId`, `sdpMid`), and verifies rejection of unsupported protocol versions or unknown message types.
 - `PermissionStateTests`: Verifies `CastoraAppViewModel` never pretends Screen Recording permission is granted when denied, handles Privacy Settings navigation, fails gracefully when capture is attempted without permission, and rounds VideoToolbox target dimensions to even integers.
 
-You can also compile and launch the SwiftPM executable directly:
+You can also build and sign `apps/macos/.build/CastoraPro.app` with embedded entitlements (`CastoraPro.entitlements`) and bundle ID `com.pratyushsharma.castorapro` using the repeatable packaging script:
 
 ```bash
-cd apps/macos
-swift run CastoraPro
+./scripts/build-macos-app.sh
+open "apps/macos/.build/CastoraPro.app"
 ```
 
-> **Note on TCC (macOS Privacy Permissions):** Bare SwiftPM executables without a signed `.app` bundle may behave inconsistently with macOS Screen Recording permissions across relaunches. For reliable **System Settings → Privacy & Security → Screen Recording** testing, wrap the target in an Xcode `.app` bundle (Option B).
+By default, `scripts/build-macos-app.sh` uses local ad-hoc signing (`-`). For stable TCC Screen Recording identity across rebuilds or distribution, pass an Apple Development certificate:
+
+```bash
+CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build-macos-app.sh
+```
+
+> **Note on TCC & `CGPreflightScreenCaptureAccess()`:** On macOS with ad-hoc builds, `CGPreflightScreenCaptureAccess()` can return `false` even when ScreenCaptureKit access is authorized. Castora Pro keeps `CGPreflightScreenCaptureAccess()` purely as diagnostic info and verifies real access directly through `SCShareableContent`.
 
 ---
 

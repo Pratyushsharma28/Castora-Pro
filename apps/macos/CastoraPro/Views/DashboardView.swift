@@ -16,9 +16,17 @@ public struct DashboardView: View {
 
             PermissionBannerView(
                 permissionState: viewModel.permissionState,
-                onRequestPermission: viewModel.requestScreenRecordingPermission,
+                onRequestPermission: {
+                    Task {
+                        await viewModel.requestScreenRecordingPermission()
+                    }
+                },
                 onOpenSettings: viewModel.openPrivacySettings,
-                onRefresh: viewModel.refreshPermissionStatus
+                onRefresh: {
+                    Task {
+                        await viewModel.refreshPermissionStatus()
+                    }
+                }
             )
 
             LazyVGrid(
