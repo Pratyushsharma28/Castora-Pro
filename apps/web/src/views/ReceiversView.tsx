@@ -1,51 +1,88 @@
 import { useState } from 'react';
-import { Check, QrCode, ScanLine, ShieldCheck, X } from 'lucide-react';
-import type { RoomSnapshot, SignalingSocketState } from '../services/backendClient';
+import { Check, LogOut, QrCode, ScanLine, ShieldCheck, Trash2, X } from 'lucide-react';
+import type {
+  PairingLifecycleStatus,
+  RoomSnapshot,
+  SignalingSocketState,
+} from '../services/backendClient';
 import type {
   BrowserCapabilityReport,
-  IncomingApprovalRequest,
   WebRtcConnectionPhase,
 } from '../types/studio';
-import { SignalBadge } from '../components/common/SignalBadge';
+import { SignalBadge, type SignalTone } from '../components/common/SignalBadge';
 
 interface ReceiversViewProps {
   deviceId: string;
   deviceName: string;
   capabilities: BrowserCapabilityReport;
   initialRoomCode: string;
-  incomingApprovals: IncomingApprovalRequest[];
   activePhase: WebRtcConnectionPhase;
   signalingState: SignalingSocketState;
   activeRoom: RoomSnapshot | null;
   activeRoomRole: 'host' | 'receiver' | null;
+  pairingStatus: PairingLifecycleStatus;
+  pairingDetail: string | null;
   onCreateRoom: () => Promise<RoomSnapshot>;
-  onJoinRoom: (roomId: string) => Promise<RoomSnapshot>;
+  onSubmitPairRequest: (roomId: string) => Promise<RoomSnapshot>;
+  onApproveReceiver: (receiverDeviceId: string) => Promise<RoomSnapshot>;
+  onRejectReceiver: (receiverDeviceId: string) => Promise<RoomSnapshot>;
+  onRemoveReceiver: (receiverDeviceId: string) => Promise<RoomSnapshot>;
+  onLeaveRoom: () => Promise<void>;
   onCloseRoom: () => Promise<void>;
   onLogEvent: (category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error', title: string, detail: string) => void;
 }
 
 const ROOM_CODE_PATTERN = /^[A-Z0-9]{6}$/;
 
+function statusToTone(status: PairingLifecycleStatus): SignalTone {
+  switch (status) {
+    case 'Paired':
+      return 'active';
+    case 'Request pending':
+    case 'Awaiting approval':
+      return 'signal';
+    case 'Expired':
+    case 'Disconnected':
+      return 'warn';
+    case 'Rejected':
+      return 'fault';
+    default:
+      return 'standby';
+  }
+}
+
 export function ReceiversView({
   deviceId,
   deviceName,
   capabilities,
   initialRoomCode,
-  incomingApprovals,
   activePhase,
   signalingState,
   activeRoom,
   activeRoomRole,
+  pairingStatus,
+  pairingDetail,
   onCreateRoom,
-  onJoinRoom,
+  onSubmitPairRequest,
+  onApproveReceiver,
+  onRejectReceiver,
+  onRemoveReceiver,
+  onLeaveRoom,
   onCloseRoom,
   onLogEvent,
 }: ReceiversViewProps) {
-  const [mode, setMode] = useState<'join' | 'host'>('join');
+  const [mode, setMode] = useState<'join' | 'host'>(
+    activeRoomRole === 'host' ? 'host' : 'join'
+  );
   const [roomCode, setRoomCode] = useState<string>(initialRoomCode);
   const [qrInput, setQrInput] = useState<string>('');
   const [busy, setBusy] = useState<boolean>(false);
+  const [actionId, setActionId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ tone: 'info' | 'error'; text: string } | null>(null);
+
+  const pendingRequests = activeRoom?.pendingRequests ?? [];
+  const pairedReceivers = activeRoom?.pairedReceivers ?? [];
+  const myPairedSlot = pairedReceivers.find((r) => r.deviceId === deviceId);
 
   const handleRoomInputChange = (raw: string) => {
     const cleaned = raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
@@ -66,13 +103,13 @@ export function ReceiversView({
 
     setBusy(true);
     try {
-      const joined = await onJoinRoom(roomCode);
+      const submitted = await onSubmitPairRequest(roomCode);
       setFeedback({
         tone: 'info',
-        text: `Joined room ${joined.roomId} hosted by ${joined.hostDeviceName}. WebRTC stream approval activates in Stage 3–4.`,
+        text: `Pairing request submitted to room ${submitted.roomId} (${submitted.hostDeviceName}). Awaiting host approval.`,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unable to join room';
+      const message = err instanceof Error ? err.message : 'Unable to submit pairing request';
       setFeedback({ tone: 'error', text: message });
     } finally {
       setBusy(false);
@@ -129,12 +166,49 @@ export function ReceiversView({
     setBusy(true);
     try {
       await onCloseRoom();
-      setFeedback({ tone: 'info', text: 'Room closed and signaling session detached.' });
+      setFeedback({ tone: 'info', text: 'Room closed and all receiver sessions detached.' });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to close room';
       setFeedback({ tone: 'error', text: message });
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleLeaveRoom = async () => {
+    setBusy(true);
+    try {
+      await onLeaveRoom();
+      setFeedback({ tone: 'info', text: 'Left room cleanly.' });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to leave room';
+      setFeedback({ tone: 'error', text: message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runHostDecision = async (
+    targetDeviceId: string,
+    action: 'approve' | 'reject' | 'remove'
+  ) => {
+    setActionId(targetDeviceId);
+    try {
+      if (action === 'approve') {
+        await onApproveReceiver(targetDeviceId);
+        setFeedback({ tone: 'info', text: `Approved receiver ${targetDeviceId}.` });
+      } else if (action === 'reject') {
+        await onRejectReceiver(targetDeviceId);
+        setFeedback({ tone: 'info', text: `Rejected request from ${targetDeviceId}.` });
+      } else {
+        await onRemoveReceiver(targetDeviceId);
+        setFeedback({ tone: 'info', text: `Removed paired receiver ${targetDeviceId}.` });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Action failed';
+      setFeedback({ tone: 'error', text: message });
+    } finally {
+      setActionId(null);
     }
   };
 
@@ -146,25 +220,32 @@ export function ReceiversView({
             Receivers &amp; Pairing
           </h1>
           <p className="text-xs text-[#929A9D]">
-            Touch-friendly pairing for Android phones and Mac browsers with explicit receiver approval.
+            Server-verified room codes, explicit host approval, and up to 6 paired receivers per room.
           </p>
         </div>
-        <SignalBadge
-          label={
-            activePhase === 'connected'
-              ? 'SESSION ACTIVE'
-              : activeRoom
-                ? `ROOM ${activeRoom.roomId}`
-                : signalingState === 'connected'
-                  ? 'SIGNALING ONLINE'
-                  : 'STANDBY'
-          }
-          tone={
-            activePhase === 'connected' || signalingState === 'connected'
-              ? 'active'
-              : 'standby'
-          }
-        />
+        <div className="flex items-center gap-3">
+          <SignalBadge
+            label={pairingStatus}
+            tone={statusToTone(pairingStatus)}
+            pulse={pairingStatus === 'Request pending' || pairingStatus === 'Awaiting approval'}
+          />
+          <SignalBadge
+            label={
+              activePhase === 'connected'
+                ? 'STREAM LIVE'
+                : activeRoom
+                  ? `ROOM ${activeRoom.roomId}`
+                  : signalingState === 'connected'
+                    ? 'WS ONLINE'
+                    : 'STANDBY'
+            }
+            tone={
+              activePhase === 'connected' || signalingState === 'connected'
+                ? 'active'
+                : 'standby'
+            }
+          />
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
@@ -216,17 +297,30 @@ export function ReceiversView({
                     value={roomCode}
                     onChange={(e) => handleRoomInputChange(e.target.value)}
                     placeholder="ABC123"
-                    className="mt-1.5 h-12 w-full border border-[#252A2F] bg-[#131619] px-3 font-mono text-lg font-semibold tracking-[0.28em] text-[#F2F3F0] placeholder:text-[#929A9D]/40 focus:border-[#FF7849] focus:outline-none tabular-metrics"
+                    disabled={Boolean(activeRoom && activeRoomRole === 'receiver')}
+                    className="mt-1.5 h-12 w-full border border-[#252A2F] bg-[#131619] px-3 font-mono text-lg font-semibold tracking-[0.28em] text-[#F2F3F0] placeholder:text-[#929A9D]/40 focus:border-[#FF7849] focus:outline-none tabular-metrics disabled:opacity-60"
                   />
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="inline-flex min-h-[44px] w-full items-center justify-center bg-[#FF7849] px-4 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
-                >
-                  {busy ? 'Joining Room...' : 'Join Room'}
-                </button>
+                {activeRoom && activeRoomRole === 'receiver' ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={handleLeaveRoom}
+                    className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 border border-[#EF4444]/60 bg-[#131619] px-4 text-xs font-semibold text-[#EF4444] hover:bg-[#EF4444]/10 disabled:opacity-50"
+                  >
+                    <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>{busy ? 'Leaving Room...' : `Leave Room ${activeRoom.roomId}`}</span>
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={busy || activeRoomRole === 'host'}
+                    className="inline-flex min-h-[44px] w-full items-center justify-center bg-[#FF7849] px-4 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
+                  >
+                    {busy ? 'Submitting Request...' : 'Submit Pairing Request'}
+                  </button>
+                )}
 
                 <div className="border-t border-[#252A2F] pt-3 space-y-2">
                   <div className="flex items-center justify-between text-[11px] text-[#929A9D]">
@@ -268,7 +362,7 @@ export function ReceiversView({
                       </p>
                       <p className="mt-1 text-xs text-[#929A9D] tabular-metrics">
                         Expires {new Date(activeRoom.expiresAt).toLocaleTimeString()} ·{' '}
-                        {activeRoom.activeReceiverCount} / {activeRoom.maxReceivers} receivers
+                        {activeRoom.activeReceiverCount} connected / {activeRoom.pairedReceiverCount} paired (max {activeRoom.maxReceivers})
                       </p>
                     </>
                   ) : (
@@ -277,7 +371,7 @@ export function ReceiversView({
                         Create Ephemeral Signaling Room
                       </p>
                       <p className="mt-1 max-w-xs text-xs leading-relaxed text-[#929A9D]">
-                        Generates a server-verified 6-character room code with automatic TTL expiration. QR image rendering activates in Stage 3.
+                        Generates a server-verified 6-character room code with automatic TTL expiration and host approval controls.
                       </p>
                     </>
                   )}
@@ -295,7 +389,7 @@ export function ReceiversView({
                 ) : (
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || activeRoomRole === 'receiver'}
                     onClick={handleCreateRoom}
                     className="inline-flex min-h-[44px] w-full items-center justify-center bg-[#FF7849] px-4 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
                   >
@@ -322,7 +416,7 @@ export function ReceiversView({
           {/* Receiver Identity */}
           <div className="border border-[#252A2F] bg-[#191D20] p-4">
             <h2 className="border-b border-[#252A2F] pb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-              Receiver Identity
+              Local Endpoint Identity
             </h2>
             <dl className="mt-3 space-y-2 text-xs">
               <div className="flex items-center justify-between gap-2">
@@ -347,8 +441,57 @@ export function ReceiversView({
           </div>
         </section>
 
-        {/* Right: Incoming Approval Queue & Active Session Control */}
-        <section className="space-y-4 lg:col-span-7" aria-label="Receiver Approval Queue">
+        {/* Right: Host Approval Queue & Paired Receivers OR Receiver Pairing Status */}
+        <section className="space-y-4 lg:col-span-7" aria-label="Approval Queue and Pairing Status">
+          {/* Receiver Pairing Status Card (always shown when acting as receiver or when status is Rejected/Expired/Disconnected) */}
+          {(activeRoomRole === 'receiver' ||
+            pairingStatus === 'Rejected' ||
+            pairingStatus === 'Expired' ||
+            pairingStatus === 'Disconnected' ||
+            pairingStatus === 'Request pending' ||
+            pairingStatus === 'Awaiting approval') && (
+            <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-3">
+              <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
+                <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
+                  Receiver Pairing Status
+                </h2>
+                <SignalBadge
+                  label={pairingStatus}
+                  tone={statusToTone(pairingStatus)}
+                  pulse={pairingStatus === 'Request pending' || pairingStatus === 'Awaiting approval'}
+                />
+              </div>
+              <p className="text-xs leading-relaxed text-[#F2F3F0]">
+                {pairingDetail ?? 'Ready to pair with a host room code.'}
+              </p>
+              {activeRoom && activeRoomRole === 'receiver' && (
+                <dl className="grid grid-cols-2 gap-2 border-t border-[#252A2F] pt-3 text-xs sm:grid-cols-4">
+                  <div>
+                    <dt className="text-[10px] uppercase tracking-[0.08em] text-[#929A9D]">Room</dt>
+                    <dd className="mt-0.5 font-mono text-[#F2F3F0] tabular-metrics">{activeRoom.roomId}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-[10px] uppercase tracking-[0.08em] text-[#929A9D]">Host</dt>
+                    <dd className="mt-0.5 truncate text-[#F2F3F0]">{activeRoom.hostDeviceName}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-[10px] uppercase tracking-[0.08em] text-[#929A9D]">Assigned Slot</dt>
+                    <dd className="mt-0.5 font-mono text-[#F2F3F0] tabular-metrics">
+                      {myPairedSlot ? `SLOT ${String(myPairedSlot.assignedSlotIndex + 1).padStart(2, '0')}` : 'Pending'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[10px] uppercase tracking-[0.08em] text-[#929A9D]">Expires</dt>
+                    <dd className="mt-0.5 font-mono text-[#F2F3F0] tabular-metrics">
+                      {new Date(activeRoom.expiresAt).toLocaleTimeString()}
+                    </dd>
+                  </div>
+                </dl>
+              )}
+            </div>
+          )}
+
+          {/* Host Incoming Approval Queue */}
           <div className="border border-[#252A2F] bg-[#191D20] p-4">
             <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
               <div className="flex items-center gap-2">
@@ -358,74 +501,117 @@ export function ReceiversView({
                 </h2>
               </div>
               <span className="font-mono text-xs text-[#929A9D] tabular-metrics">
-                {incomingApprovals.length} pending
+                {pendingRequests.length} pending
               </span>
             </div>
 
-            {incomingApprovals.length === 0 ? (
+            {pendingRequests.length === 0 ? (
               <div className="py-6">
                 <div className="hidden sm:grid grid-cols-4 border-b border-[#252A2F] pb-2 text-[10px] uppercase tracking-[0.08em] text-[#929A9D]">
-                  <span>Sender</span>
+                  <span>Receiver</span>
                   <span>Platform</span>
-                  <span>Requested Quality</span>
+                  <span>Status</span>
                   <span className="text-right">Action</span>
                 </div>
                 <p className="mt-4 text-xs leading-relaxed text-[#929A9D]">
-                  No incoming cast requests. Receivers never auto-accept streams — every sender must be explicitly approved here before WebRTC media tracks attach.
+                  No incoming pairing requests. Receivers never auto-pair — every device joining a room code must be explicitly approved by the host before pairing completes.
                 </p>
               </div>
             ) : (
               <div className="mt-3 divide-y divide-[#252A2F]">
-                {incomingApprovals.map((req) => (
+                {pendingRequests.map((req) => (
                   <div
-                    key={req.sessionId}
+                    key={req.deviceId}
                     className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
                   >
                     <div className="space-y-0.5 text-xs">
-                      <div className="font-medium text-[#F2F3F0]">{req.senderName}</div>
+                      <div className="font-medium text-[#F2F3F0]">{req.deviceName}</div>
                       <div className="font-mono text-[#929A9D] tabular-metrics">
-                        {req.senderPlatform} · {req.requestedWidth}×{req.requestedHeight} @{' '}
-                        {req.requestedFps} FPS ({req.preferredCodec})
+                        {req.platform} · {req.deviceId} · Awaiting approval
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        className="inline-flex min-h-[44px] items-center gap-1.5 bg-[#8BD7B0] px-3 text-xs font-semibold text-[#101214]"
-                      >
-                        <Check className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Approve</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="inline-flex min-h-[44px] items-center gap-1.5 border border-[#252A2F] bg-[#131619] px-3 text-xs font-medium text-[#F2F3F0]"
-                      >
-                        <X className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Reject</span>
-                      </button>
-                    </div>
+                    {activeRoomRole === 'host' && (
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={actionId === req.deviceId}
+                          onClick={() => runHostDecision(req.deviceId, 'approve')}
+                          className="inline-flex min-h-[44px] items-center gap-1.5 bg-[#8BD7B0] px-3 text-xs font-semibold text-[#101214] hover:opacity-90 disabled:opacity-50"
+                        >
+                          <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Approve</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={actionId === req.deviceId}
+                          onClick={() => runHostDecision(req.deviceId, 'reject')}
+                          className="inline-flex min-h-[44px] items-center gap-1.5 border border-[#252A2F] bg-[#131619] px-3 text-xs font-medium text-[#F2F3F0] hover:border-[#EF4444] disabled:opacity-50"
+                        >
+                          <X className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Reject</span>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
             )}
           </div>
 
+          {/* Host / Room Paired Receivers Roster */}
           <div className="border border-[#252A2F] bg-[#191D20] p-4">
             <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                Active Inbound Stream
+                Paired Receivers
               </h2>
-              <button
-                type="button"
-                disabled={activePhase !== 'connected'}
-                className="min-h-[36px] border border-[#252A2F] bg-[#131619] px-3 text-xs font-medium text-[#929A9D] disabled:opacity-45"
-              >
-                Disconnect
-              </button>
+              <span className="font-mono text-xs text-[#929A9D] tabular-metrics">
+                {activeRoom ? `${activeRoom.activeReceiverCount} connected / ${pairedReceivers.length} paired` : '0 / 6'}
+              </span>
             </div>
-            <p className="mt-3 text-xs leading-relaxed text-[#929A9D]">
-              Inbound stream playback, live decoded FPS, resolution, RTT, and instant fullscreen view activate here once a sender is approved in Stage 3–4.
-            </p>
+
+            {pairedReceivers.length === 0 ? (
+              <p className="mt-3 text-xs leading-relaxed text-[#929A9D]">
+                No paired receivers in this room yet. Approved receivers appear here with assigned slots (up to 6) and individual disconnect controls.
+              </p>
+            ) : (
+              <ul className="mt-3 divide-y divide-[#252A2F]">
+                {pairedReceivers.map((rx) => (
+                  <li
+                    key={rx.deviceId}
+                    className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="space-y-0.5 text-xs">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[11px] text-[#929A9D] tabular-metrics">
+                          SLOT {String(rx.assignedSlotIndex + 1).padStart(2, '0')}
+                        </span>
+                        <span className="font-medium text-[#F2F3F0]">{rx.deviceName}</span>
+                      </div>
+                      <div className="font-mono text-[11px] text-[#929A9D] tabular-metrics">
+                        {rx.platform} · {rx.deviceId}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <SignalBadge
+                        label={rx.connected ? 'Paired' : 'Disconnected'}
+                        tone={rx.connected ? 'active' : 'warn'}
+                      />
+                      {activeRoomRole === 'host' && (
+                        <button
+                          type="button"
+                          disabled={actionId === rx.deviceId}
+                          onClick={() => runHostDecision(rx.deviceId, 'remove')}
+                          className="inline-flex min-h-[36px] items-center gap-1.5 border border-[#252A2F] bg-[#131619] px-3 text-xs font-medium text-[#F2F3F0] hover:border-[#EF4444] hover:text-[#EF4444] disabled:opacity-50"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Remove</span>
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </section>
       </div>

@@ -8,12 +8,14 @@ import {
   validateCastoraEnvelope,
   type CastoraEnvelope,
 } from './protocolValidator.ts';
-import type { RoomManager } from './roomManager.ts';
+import { toRoomStatePayload, type RoomManager } from './roomManager.ts';
 import type { SlidingWindowRateLimiter } from './security.ts';
 import type {
   CastoraDeviceRole,
   CastoraPlatform,
   DeviceCapabilities,
+  PairingMethod,
+  PublicRoomSnapshot,
 } from './types.ts';
 
 const WS_PATH = '/castora';
@@ -51,9 +53,32 @@ function extractBearerOrQueryToken(req: IncomingMessage): string | undefined {
   return undefined;
 }
 
-function sendJson(ws: WebSocket, payload: unknown): void {
+export function sendJson(ws: WebSocket, payload: unknown): void {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(payload));
+  }
+}
+
+export function broadcastRoomState(
+  roomManager: RoomManager,
+  snapshot: PublicRoomSnapshot,
+  extraSockets: WebSocket[] = []
+): void {
+  const targets = new Set<WebSocket>([
+    ...roomManager.getRoomMemberSockets(snapshot.roomId),
+    ...extraSockets,
+  ]);
+  const envelope = createServerEnvelope({
+    messageType: 'room_state',
+    receiverDeviceId: null,
+    roomId: snapshot.roomId,
+    payload: toRoomStatePayload(snapshot),
+  });
+  const encoded = JSON.stringify(envelope);
+  for (const sock of targets) {
+    if (sock.readyState === WebSocket.OPEN) {
+      sock.send(encoded);
+    }
   }
 }
 
@@ -214,19 +239,24 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
 
     ws.on('close', () => {
       const cleanup = roomManager.handleDisconnect(ws);
-      if (cleanup.disconnectedDeviceId && cleanup.peerSockets.length > 0) {
-        const notice = createServerEnvelope({
-          messageType: 'disconnect',
-          receiverDeviceId: null,
-          roomId: cleanup.roomId,
-          payload: {
-            sessionId: null,
-            streamId: null,
-            reason: `Peer ${cleanup.disconnectedDeviceId} disconnected`,
-          },
-        });
-        for (const peerSocket of cleanup.peerSockets) {
-          sendJson(peerSocket, notice);
+      if (cleanup.disconnectedDeviceId) {
+        for (const item of cleanup.updatedRooms) {
+          const notice = createServerEnvelope({
+            messageType: 'disconnect',
+            receiverDeviceId: null,
+            roomId: item.room.roomId,
+            payload: {
+              sessionId: null,
+              streamId: null,
+              reason: item.wasHost
+                ? 'Host disconnected'
+                : `Peer ${cleanup.disconnectedDeviceId} disconnected`,
+            },
+          });
+          for (const peerSocket of item.peerSockets) {
+            sendJson(peerSocket, notice);
+          }
+          broadcastRoomState(roomManager, item.room, item.peerSockets);
         }
       }
     });
@@ -252,7 +282,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
         };
 
         meta.boundDeviceId = envelope.senderDeviceId;
-        const registered = roomManager.registerDevice({
+        const result = roomManager.registerDevice({
           socket: ws,
           remoteAddress: meta.remoteAddress,
           deviceId: envelope.senderDeviceId,
@@ -269,8 +299,8 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
           ws,
           createServerEnvelope({
             messageType: 'device_announce',
-            receiverDeviceId: registered.deviceId,
-            roomId: registered.roomId,
+            receiverDeviceId: result.device.deviceId,
+            roomId: result.device.roomId,
             payload: {
               deviceName: 'Castora Signaling Server',
               platform: 'macos',
@@ -286,6 +316,10 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
             },
           })
         );
+
+        if (result.authenticatedRoom) {
+          broadcastRoomState(roomManager, result.authenticatedRoom, [ws]);
+        }
         return;
       }
 
@@ -319,7 +353,6 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
           );
         }
 
-        // Send a server heartbeat acknowledgment so requester knows discovery completed cleanly
         sendJson(
           ws,
           createServerEnvelope({
@@ -336,7 +369,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
       }
 
       case 'pair_request': {
-        const rateCheck = roomRateLimiter.consume(`ws:${meta.remoteAddress}`);
+        const rateCheck = roomRateLimiter.consume(`ws-pair:${meta.remoteAddress}`);
         if (!rateCheck.allowed) {
           sendJson(
             ws,
@@ -367,15 +400,77 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
           return;
         }
 
-        const roomLookup = roomManager.getRoom(envelope.roomId);
-        if (!roomLookup.ok) {
+        const payload = envelope.payload as {
+          pairingMethod: PairingMethod;
+          deviceName: string;
+          platform: CastoraPlatform;
+        };
+
+        const submitResult = roomManager.submitPairRequest({
+          roomId: envelope.roomId,
+          receiverDeviceId: envelope.senderDeviceId,
+          deviceName: payload.deviceName,
+          platform: payload.platform,
+          pairingMethod: payload.pairingMethod,
+        });
+
+        if (!submitResult.ok) {
           sendJson(
             ws,
             createErrorEnvelope({
               receiverDeviceId: envelope.senderDeviceId,
               roomId: envelope.roomId,
-              code: 'INVALID_ROOM_ID',
-              message: roomLookup.message,
+              code:
+                submitResult.code === 'ROOM_FULL'
+                  ? 'SESSION_FULL'
+                  : submitResult.code === 'DUPLICATE_PAIR_REQUEST' ||
+                      submitResult.code === 'ALREADY_PAIRED'
+                    ? 'INVALID_MESSAGE'
+                    : 'INVALID_ROOM_ID',
+              message: submitResult.message,
+              recoverable: true,
+              relatedMessageId: envelope.messageId,
+            })
+          );
+          return;
+        }
+
+        meta.boundDeviceId = envelope.senderDeviceId;
+        meta.token = submitResult.memberToken;
+
+        const hostDev = roomManager.getDeviceById(submitResult.room.hostDeviceId);
+        if (hostDev && hostDev.socket.readyState === WebSocket.OPEN) {
+          sendJson(hostDev.socket, envelope);
+        }
+
+        broadcastRoomState(roomManager, submitResult.room, [ws]);
+        return;
+      }
+
+      case 'pair_response': {
+        if (!envelope.roomId || !envelope.receiverDeviceId) {
+          sendJson(
+            ws,
+            createErrorEnvelope({
+              receiverDeviceId: envelope.senderDeviceId,
+              roomId: envelope.roomId,
+              code: 'INVALID_MESSAGE',
+              message: 'pair_response requires roomId and target receiverDeviceId',
+              recoverable: true,
+              relatedMessageId: envelope.messageId,
+            })
+          );
+          return;
+        }
+
+        if (!meta.token || !roomManager.isAuthorizedHost(envelope.roomId, envelope.senderDeviceId, meta.token)) {
+          sendJson(
+            ws,
+            createErrorEnvelope({
+              receiverDeviceId: envelope.senderDeviceId,
+              roomId: envelope.roomId,
+              code: 'APPROVAL_DECLINED',
+              message: 'Unauthorized: valid host token required for pairing approval or rejection',
               recoverable: true,
               relatedMessageId: envelope.messageId,
             })
@@ -384,52 +479,60 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
         }
 
         const payload = envelope.payload as {
-          deviceName: string;
-          platform: CastoraPlatform;
+          paired: boolean;
+          reason: string | null;
         };
 
-        const joinOutcome = roomManager.joinRoom({
-          roomId: envelope.roomId,
-          receiverDeviceId: envelope.senderDeviceId,
-          deviceName: payload.deviceName,
-          platform: payload.platform,
-        });
-
-        if (!joinOutcome.ok) {
-          sendJson(
-            ws,
-            createErrorEnvelope({
-              receiverDeviceId: envelope.senderDeviceId,
-              roomId: envelope.roomId,
-              code: joinOutcome.code === 'ROOM_FULL' ? 'SESSION_FULL' : 'INVALID_ROOM_ID',
-              message: joinOutcome.message,
-              recoverable: true,
-              relatedMessageId: envelope.messageId,
-            })
-          );
-          return;
-        }
-
-        const targetDevice = envelope.receiverDeviceId
-          ? roomManager.getDeviceById(envelope.receiverDeviceId)
-          : roomManager.getDeviceById(roomLookup.room.hostDeviceId);
-
-        if (targetDevice && targetDevice.socket.readyState === WebSocket.OPEN) {
-          sendJson(targetDevice.socket, envelope);
-        }
-
-        sendJson(
-          ws,
-          createServerEnvelope({
-            messageType: 'heartbeat',
-            receiverDeviceId: envelope.senderDeviceId,
+        if (payload.paired) {
+          const approval = roomManager.approvePairRequest({
             roomId: envelope.roomId,
-            payload: {
-              sequence: joinOutcome.assignedSlotIndex,
-              role: 'receiver',
-            },
-          })
-        );
+            receiverDeviceId: envelope.receiverDeviceId,
+            hostToken: meta.token,
+          });
+          if (!approval.ok) {
+            sendJson(
+              ws,
+              createErrorEnvelope({
+                receiverDeviceId: envelope.senderDeviceId,
+                roomId: envelope.roomId,
+                code: approval.code === 'ROOM_FULL' ? 'SESSION_FULL' : 'INVALID_MESSAGE',
+                message: approval.message,
+                recoverable: true,
+                relatedMessageId: envelope.messageId,
+              })
+            );
+            return;
+          }
+          if (approval.receiverSocket) {
+            sendJson(approval.receiverSocket, envelope);
+          }
+          broadcastRoomState(roomManager, approval.room, [ws]);
+        } else {
+          const rejection = roomManager.rejectPairRequest({
+            roomId: envelope.roomId,
+            receiverDeviceId: envelope.receiverDeviceId,
+            hostToken: meta.token,
+            reason: payload.reason ?? undefined,
+          });
+          if (!rejection.ok) {
+            sendJson(
+              ws,
+              createErrorEnvelope({
+                receiverDeviceId: envelope.senderDeviceId,
+                roomId: envelope.roomId,
+                code: 'INVALID_MESSAGE',
+                message: rejection.message,
+                recoverable: true,
+                relatedMessageId: envelope.messageId,
+              })
+            );
+            return;
+          }
+          if (rejection.receiverSocket) {
+            sendJson(rejection.receiverSocket, envelope);
+          }
+          broadcastRoomState(roomManager, rejection.room, [ws]);
+        }
         return;
       }
 
@@ -452,11 +555,87 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
       }
 
       case 'disconnect': {
+        // Host removing a specific receiver via WS disconnect frame
+        if (
+          envelope.roomId &&
+          envelope.receiverDeviceId &&
+          envelope.receiverDeviceId !== envelope.senderDeviceId
+        ) {
+          if (!meta.token || !roomManager.isAuthorizedHost(envelope.roomId, envelope.senderDeviceId, meta.token)) {
+            sendJson(
+              ws,
+              createErrorEnvelope({
+                receiverDeviceId: envelope.senderDeviceId,
+                roomId: envelope.roomId,
+                code: 'APPROVAL_DECLINED',
+                message: 'Unauthorized: only the room host may remove paired receivers',
+                recoverable: true,
+                relatedMessageId: envelope.messageId,
+              })
+            );
+            return;
+          }
+          const removed = roomManager.removePairedReceiver({
+            roomId: envelope.roomId,
+            receiverDeviceId: envelope.receiverDeviceId,
+            hostToken: meta.token,
+          });
+          if (!removed.ok) {
+            sendJson(
+              ws,
+              createErrorEnvelope({
+                receiverDeviceId: envelope.senderDeviceId,
+                roomId: envelope.roomId,
+                code: 'INVALID_MESSAGE',
+                message: removed.message,
+                recoverable: true,
+                relatedMessageId: envelope.messageId,
+              })
+            );
+            return;
+          }
+          if (removed.removedSocket) {
+            sendJson(
+              removed.removedSocket,
+              createServerEnvelope({
+                messageType: 'disconnect',
+                receiverDeviceId: removed.removedDeviceId,
+                roomId: envelope.roomId,
+                payload: {
+                  sessionId: null,
+                  streamId: null,
+                  reason: 'Removed by host',
+                },
+              })
+            );
+          }
+          broadcastRoomState(
+            roomManager,
+            removed.room,
+            removed.removedSocket ? [removed.removedSocket, ws] : [ws]
+          );
+          return;
+        }
+
+        // Member explicitly leaving their room via WS disconnect
+        if (envelope.roomId && meta.token) {
+          const left = roomManager.leaveRoom({
+            roomId: envelope.roomId,
+            deviceId: envelope.senderDeviceId,
+            memberToken: meta.token,
+          });
+          if (left.ok) {
+            broadcastRoomState(roomManager, left.room, [ws]);
+            return;
+          }
+        }
+
         const cleanup = roomManager.handleDisconnect(ws);
-        if (cleanup.peerSockets.length > 0) {
-          for (const peerSocket of cleanup.peerSockets) {
+        for (const item of cleanup.updatedRooms) {
+          for (const peerSocket of item.peerSockets) {
             sendJson(peerSocket, envelope);
           }
+          broadcastRoomState(roomManager, item.room, item.peerSockets);
         }
         return;
       }
@@ -470,7 +649,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
             receiverDeviceId: envelope.senderDeviceId,
             roomId: envelope.roomId,
             code: 'WEBRTC_NEGOTIATION_FAILED',
-            message: 'WebRTC SDP/ICE negotiation is not enabled in Stage 2 signaling foundation',
+            message: 'WebRTC SDP/ICE negotiation activates in Stage 4',
             recoverable: true,
             relatedMessageId: envelope.messageId,
           })
@@ -479,7 +658,6 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
       }
 
       default: {
-        // Relay other validated room-scoped control envelopes only between verified room members
         if (
           !envelope.roomId ||
           !roomManager.verifyRoomPeerAccess(
@@ -494,7 +672,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
               receiverDeviceId: envelope.senderDeviceId,
               roomId: envelope.roomId,
               code: 'INVALID_ROOM_ID',
-              message: 'Sender and receiver must belong to an active room',
+              message: 'Sender and receiver must belong to an active paired room',
               recoverable: true,
               relatedMessageId: envelope.messageId,
             })

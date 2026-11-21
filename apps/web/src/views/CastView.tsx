@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { AlertTriangle, MonitorPlay, Square, Volume2, VolumeX } from 'lucide-react';
+import type { PairingLifecycleStatus, RoomSnapshot } from '../services/backendClient';
 import type {
   BrowserCapabilityReport,
   CapturePreferences,
@@ -8,6 +9,7 @@ import type {
   FrameRateTarget,
   ResolutionPresetId,
   StreamTelemetrySnapshot,
+  StudioDestination,
 } from '../types/studio';
 import { SignalBadge } from '../components/common/SignalBadge';
 import { TelemetryStrip } from '../components/common/TelemetryStrip';
@@ -19,7 +21,10 @@ interface CastViewProps {
   onUpdatePreferences: (next: CapturePreferences) => void;
   localStream: MediaStream | null;
   receivers: ConnectedReceiverSlot[];
+  activeRoom: RoomSnapshot | null;
+  pairingStatus: PairingLifecycleStatus;
   programTelemetry: StreamTelemetrySnapshot;
+  onNavigate: (destination: StudioDestination) => void;
   onLogEvent: (category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error', title: string, detail: string) => void;
 }
 
@@ -45,12 +50,17 @@ export function CastView({
   onUpdatePreferences,
   localStream,
   receivers,
+  activeRoom,
+  pairingStatus,
   programTelemetry,
+  onNavigate,
   onLogEvent,
 }: CastViewProps) {
   const [stageNotice, setStageNotice] = useState<string | null>(null);
 
   const canCapture = capabilities.isSecureContext && capabilities.supportsDisplayMedia;
+  const pairedReceivers = activeRoom?.pairedReceivers ?? [];
+  const connectedCount = pairedReceivers.filter((r) => r.connected).length;
 
   const handleRequestStartCapture = () => {
     if (!capabilities.isSecureContext) {
@@ -68,12 +78,14 @@ export function CastView({
       return;
     }
     const msg =
-      'Stage 1 UI ready: live screen capture & multi-peer RTCPeerConnection transmission activate in Stage 4 after Stage 2 WebSocket signaling is connected.';
+      activeRoom && pairedReceivers.length > 0
+        ? `Room ${activeRoom.roomId} has ${connectedCount} connected paired receiver(s) ready. Live screen capture & WebRTC SDP/ICE streaming activate in Stage 4.`
+        : 'Stage 3 pairing active. Create a room and approve receivers in the Receivers tab; live getDisplayMedia() + WebRTC streaming activate in Stage 4.';
     setStageNotice(msg);
     onLogEvent(
       'ui',
       'Cast Studio capture readiness checked',
-      `Configured ${preferences.resolution} @ ${preferences.targetFps} FPS target (${preferences.codecPreference}). Waiting for Stage 2–4 transport.`
+      `Configured ${preferences.resolution} @ ${preferences.targetFps} FPS target (${preferences.codecPreference}). Room=${activeRoom?.roomId ?? 'none'}, Pairing=${pairingStatus}.`
     );
   };
 
@@ -85,7 +97,7 @@ export function CastView({
             Cast Studio
           </h1>
           <p className="text-xs text-[#929A9D]">
-            Configure sender capture targets, inspect browser encode readiness, and monitor outbound fan-out.
+            Configure sender capture targets, inspect browser encode readiness, and monitor paired outbound receivers.
           </p>
         </div>
         <SignalBadge
@@ -281,27 +293,48 @@ export function CastView({
             )}
           </div>
 
-          {/* Target Receiver Selection Empty State */}
-          <div className="border border-[#252A2F] bg-[#191D20] p-4">
+          {/* Target Receiver Roster */}
+          <div className="border border-[#252A2F] bg-[#191D20] p-4 space-y-3">
             <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                Target Receivers
+                Paired Target Receivers
               </h2>
-              <span className="font-mono text-xs text-[#929A9D] tabular-metrics">
-                {receivers.length} / 6
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="font-mono text-xs text-[#929A9D] tabular-metrics">
+                  {connectedCount} / {activeRoom?.maxReceivers ?? 6}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('receivers')}
+                  className="text-[11px] font-medium text-[#FF7849] hover:underline"
+                >
+                  Manage
+                </button>
+              </div>
             </div>
 
-            {receivers.length === 0 ? (
-              <p className="mt-3 text-xs leading-relaxed text-[#929A9D]">
-                0 receivers joined. Paired Mac and Android browsers will appear here for per-device stream approval once Stage 2–3 room signaling is active.
+            {!activeRoom ? (
+              <p className="text-xs leading-relaxed text-[#929A9D]">
+                No active room. Create a room and approve receivers in Receivers &amp; Pairing to populate real paired targets here.
+              </p>
+            ) : pairedReceivers.length === 0 ? (
+              <p className="text-xs leading-relaxed text-[#929A9D]">
+                Room <span className="font-mono text-[#F2F3F0]">{activeRoom.roomId}</span> has 0 paired receivers ({activeRoom.pendingCount} awaiting approval).
               </p>
             ) : (
-              <ul className="mt-3 divide-y divide-[#252A2F] text-xs">
-                {receivers.map((slot) => (
-                  <li key={slot.receiverDeviceId} className="flex items-center justify-between py-2">
-                    <span className="text-[#F2F3F0]">{slot.deviceName}</span>
-                    <span className="font-mono text-[#929A9D]">{slot.connectionState}</span>
+              <ul className="divide-y divide-[#252A2F] text-xs">
+                {pairedReceivers.map((rx) => (
+                  <li key={rx.deviceId} className="flex items-center justify-between py-2 gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate font-medium text-[#F2F3F0]">{rx.deviceName}</div>
+                      <div className="font-mono text-[11px] text-[#929A9D] tabular-metrics">
+                        SLOT {String(rx.assignedSlotIndex + 1).padStart(2, '0')} · {rx.platform}
+                      </div>
+                    </div>
+                    <SignalBadge
+                      label={rx.connected ? 'Paired' : 'Disconnected'}
+                      tone={rx.connected ? 'active' : 'warn'}
+                    />
                   </li>
                 ))}
               </ul>
@@ -316,7 +349,7 @@ export function CastView({
             title="Local Screen Capture Preview"
             stream={localStream}
             muted
-            standbyReason="Capture pipeline is in standby. Real frames from getDisplayMedia() will render here with measured Capture FPS vs Encoded FPS."
+            standbyReason="Capture pipeline is in standby. Real frames from getDisplayMedia() will render here with measured Capture FPS vs Encoded FPS in Stage 4."
             statusBadge={
               <SignalBadge
                 label={localStream ? 'CAPTURING' : 'STANDBY'}
@@ -331,12 +364,12 @@ export function CastView({
                 Encoder & Outbound Workload
               </h2>
               <span className="font-mono text-xs text-[#929A9D] tabular-metrics">
-                {receivers.length} active outbound peer{receivers.length === 1 ? '' : 's'}
+                {receivers.length} active outbound stream{receivers.length === 1 ? '' : 's'}
               </span>
             </div>
             <TelemetryStrip telemetry={programTelemetry} />
             <p className="text-[11px] leading-relaxed text-[#929A9D]">
-              Stage 1 architecture supports progressive fan-out validation (1 → 2 → 3 → 6 receivers) with future simulcast / SFU escalation if multi-peer CPU encode limits are reached.
+              Stage 3 pairing verifies up to 6 authorized receivers per room; Stage 4 enables progressive stream fan-out (1 → 2 → 3 → 6) with live encoder measurement.
             </p>
           </div>
         </section>

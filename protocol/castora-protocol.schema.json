@@ -193,6 +193,15 @@
           "payload": { "$ref": "#/$defs/heartbeatPayload" }
         }
       }
+    },
+    {
+      "if": { "properties": { "messageType": { "const": "room_state" } } },
+      "then": {
+        "properties": {
+          "roomId": { "$ref": "#/$defs/roomId" },
+          "payload": { "$ref": "#/$defs/roomStatePayload" }
+        }
+      }
     }
   ],
   "$defs": {
@@ -218,7 +227,8 @@
         "stream_status",
         "disconnect",
         "error",
-        "heartbeat"
+        "heartbeat",
+        "room_state"
       ]
     },
     "deviceId": {
@@ -559,6 +569,67 @@
         "role": {
           "type": "string",
           "enum": ["sender", "receiver"]
+        }
+      }
+    },
+    "roomStatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "hostDeviceId",
+        "hostDeviceName",
+        "hostPlatform",
+        "hostConnected",
+        "expiresAt",
+        "maxReceivers",
+        "pendingRequests",
+        "pairedReceivers"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["active", "closed", "expired"]
+        },
+        "hostDeviceId": { "$ref": "#/$defs/deviceId" },
+        "hostDeviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "hostPlatform": { "$ref": "#/$defs/platform" },
+        "hostConnected": { "type": "boolean" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "maxReceivers": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "pendingRequests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["deviceId", "deviceName", "platform", "pairingMethod", "connected", "requestedAt", "sessionId"],
+            "properties": {
+              "deviceId": { "$ref": "#/$defs/deviceId" },
+              "deviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "platform": { "$ref": "#/$defs/platform" },
+              "pairingMethod": { "type": "string", "enum": ["qr", "room_code", "manual_ip"] },
+              "connected": { "type": "boolean" },
+              "requestedAt": { "type": "string", "format": "date-time" },
+              "sessionId": { "$ref": "#/$defs/sessionId" }
+            }
+          }
+        },
+        "pairedReceivers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["deviceId", "deviceName", "platform", "connected", "assignedSlotIndex", "pairedAt", "sessionId"],
+            "properties": {
+              "deviceId": { "$ref": "#/$defs/deviceId" },
+              "deviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "platform": { "$ref": "#/$defs/platform" },
+              "connected": { "type": "boolean" },
+              "assignedSlotIndex": { "type": "integer", "minimum": 0, "maximum": 15 },
+              "pairedAt": { "type": "string", "format": "date-time" },
+              "sessionId": { "$ref": "#/$defs/sessionId" }
+            }
+          }
         }
       }
     }

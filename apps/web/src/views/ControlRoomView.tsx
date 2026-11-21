@@ -1,6 +1,7 @@
 import { ArrowRight, Cast, RefreshCw, ShieldAlert, Smartphone } from 'lucide-react';
 import type {
   BackendHealthResponse,
+  PairingLifecycleStatus,
   RoomSnapshot,
   SignalingSocketState,
 } from '../services/backendClient';
@@ -12,7 +13,7 @@ import type {
   StreamTelemetrySnapshot,
   StudioDestination,
 } from '../types/studio';
-import { SignalBadge } from '../components/common/SignalBadge';
+import { SignalBadge, type SignalTone } from '../components/common/SignalBadge';
 import { TelemetryStrip } from '../components/common/TelemetryStrip';
 import { VideoSurface } from '../components/common/VideoSurface';
 
@@ -29,11 +30,29 @@ interface ControlRoomViewProps {
   backendError: string | null;
   signalingState: SignalingSocketState;
   activeRoom: RoomSnapshot | null;
+  pairingStatus: PairingLifecycleStatus;
   onReconnectBackend: () => void;
   onNavigate: (destination: StudioDestination) => void;
 }
 
 const MAX_INITIAL_RECEIVERS = 6;
+
+function pairingTone(status: PairingLifecycleStatus): SignalTone {
+  switch (status) {
+    case 'Paired':
+      return 'active';
+    case 'Request pending':
+    case 'Awaiting approval':
+      return 'signal';
+    case 'Expired':
+    case 'Disconnected':
+      return 'warn';
+    case 'Rejected':
+      return 'fault';
+    default:
+      return 'standby';
+  }
+}
 
 export function ControlRoomView({
   deviceId,
@@ -48,10 +67,13 @@ export function ControlRoomView({
   backendError,
   signalingState,
   activeRoom,
+  pairingStatus,
   onReconnectBackend,
   onNavigate,
 }: ControlRoomViewProps) {
-  const activeCount = receivers.filter((r) => r.connectionState === 'connected').length;
+  const pairedReceivers = activeRoom?.pairedReceivers ?? [];
+  const connectedPairedCount = pairedReceivers.filter((r) => r.connected).length;
+  const capacityCount = activeRoom ? connectedPairedCount : receivers.filter((r) => r.connectionState === 'connected').length;
 
   return (
     <div className="space-y-6">
@@ -104,7 +126,7 @@ export function ControlRoomView({
             title={localStream ? `${deviceName} — Local Program` : 'Master Program Monitor'}
             stream={localStream}
             muted
-            standbyReason="No local screen capture or inbound receiver feed is active. Start a cast session from Cast Studio or join a room as a receiver."
+            standbyReason="No local screen capture or inbound receiver feed is active. Pair devices in Receivers or configure capture targets in Cast Studio."
             statusBadge={
               <SignalBadge
                 label={localStream ? 'STREAMING' : 'IDLE'}
@@ -127,7 +149,7 @@ export function ControlRoomView({
                   className="inline-flex min-h-[40px] items-center gap-2 border border-[#252A2F] bg-[#191D20] px-4 text-xs font-medium text-[#F2F3F0] hover:border-[#FF7849]"
                 >
                   <Smartphone className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Join as Receiver</span>
+                  <span>Receivers &amp; Pairing</span>
                 </button>
               </>
             }
@@ -146,7 +168,7 @@ export function ControlRoomView({
 
         {/* Right: Master Control Rail */}
         <aside className="space-y-4 lg:col-span-4" aria-label="Master Control Rail">
-          {/* Session Status */}
+          {/* Backend & Pairing Status */}
           <div className="border border-[#252A2F] bg-[#191D20] p-4">
             <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
@@ -198,9 +220,9 @@ export function ControlRoomView({
                 </dd>
               </div>
               <div className="flex items-center justify-between gap-2">
-                <dt className="text-[#929A9D]">Signaling Channel</dt>
-                <dd className="font-mono text-[#F2F3F0]">
-                  {signalingState === 'connected' ? '/castora (Connected)' : `/castora (${signalingState})`}
+                <dt className="text-[#929A9D]">Pairing State</dt>
+                <dd>
+                  <SignalBadge label={pairingStatus} tone={pairingTone(pairingStatus)} />
                 </dd>
               </div>
               <div className="flex items-center justify-between gap-2">
@@ -209,6 +231,14 @@ export function ControlRoomView({
                   {activeRoom ? activeRoom.roomId : 'None'}
                 </dd>
               </div>
+              {activeRoom && (
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-[#929A9D]">Room Expires</dt>
+                  <dd className="font-mono text-[#F2F3F0] tabular-metrics">
+                    {new Date(activeRoom.expiresAt).toLocaleTimeString()}
+                  </dd>
+                </div>
+              )}
               <div className="flex items-center justify-between gap-2">
                 <dt className="text-[#929A9D]">Server Devices / Rooms</dt>
                 <dd className="font-mono text-[#F2F3F0] tabular-metrics">
@@ -216,10 +246,6 @@ export function ControlRoomView({
                     ? `${backendHealth.activeDevices} dev · ${backendHealth.activeRooms} rm`
                     : '—'}
                 </dd>
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <dt className="text-[#929A9D]">Protocol Contract</dt>
-                <dd className="font-mono text-[#F2F3F0]">castora.v1</dd>
               </div>
               <div className="flex items-center justify-between gap-2">
                 <dt className="text-[#929A9D]">Secure Context</dt>
@@ -271,44 +297,53 @@ export function ControlRoomView({
             </dl>
           </div>
 
-          {/* Receiver Capacity Meter (0 / 6) */}
+          {/* Receiver Capacity Meter (0..6) */}
           <div className="border border-[#252A2F] bg-[#191D20] p-4">
             <div className="flex items-center justify-between">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
-                Receiver Capacity
+                Paired Receivers
               </h2>
               <span className="font-mono text-xs font-semibold text-[#F2F3F0] tabular-metrics">
-                {activeCount} / {MAX_INITIAL_RECEIVERS}
+                {capacityCount} / {MAX_INITIAL_RECEIVERS}
               </span>
             </div>
 
             <div
               className="mt-3 grid grid-cols-6 gap-1.5"
-              aria-label={`Receiver capacity ${activeCount} of ${MAX_INITIAL_RECEIVERS} active`}
+              aria-label={`Paired receivers ${capacityCount} of ${MAX_INITIAL_RECEIVERS} connected`}
             >
               {Array.from({ length: MAX_INITIAL_RECEIVERS }, (_, idx) => {
-                const slot = receivers[idx];
-                const isConnected = slot?.connectionState === 'connected';
+                const slot = pairedReceivers.find((r) => r.assignedSlotIndex === idx);
+                const isConnected = Boolean(slot?.connected);
+                const isDisconnectedPaired = Boolean(slot && !slot.connected);
                 return (
                   <div
                     key={idx}
                     className={`h-2.5 border ${
                       isConnected
                         ? 'border-[#8BD7B0] bg-[#8BD7B0]'
-                        : 'border-[#252A2F] bg-[#131619]'
+                        : isDisconnectedPaired
+                          ? 'border-[#F59E0B] bg-[#F59E0B]/40'
+                          : 'border-[#252A2F] bg-[#131619]'
                     }`}
-                    title={slot ? `${slot.deviceName} (${slot.connectionState})` : `Slot ${idx + 1}: Empty`}
+                    title={
+                      slot
+                        ? `${slot.deviceName} (${slot.connected ? 'Paired & Connected' : 'Disconnected'})`
+                        : `Slot ${idx + 1}: Available`
+                    }
                   />
                 );
               })}
             </div>
 
             <p className="mt-2.5 text-[11px] leading-relaxed text-[#929A9D]">
-              Progressive scaling target: 1 → 2 → 3 → 6 verified receivers based on live encode headroom.
+              {activeRoom
+                ? `${activeRoom.pendingCount} pending approval · ${activeRoom.pairedReceiverCount} paired in room ${activeRoom.roomId}.`
+                : 'No active room. Create or join a room in Receivers to pair up to 6 devices.'}
             </p>
           </div>
 
-          {/* Live Stream Health & Recent Sessions */}
+          {/* Recent Sessions */}
           <div className="border border-[#252A2F] bg-[#191D20] p-4">
             <div className="flex items-center justify-between border-b border-[#252A2F] pb-2.5">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#F2F3F0]">
@@ -325,7 +360,7 @@ export function ControlRoomView({
 
             {recentSessions.length === 0 ? (
               <p className="mt-3 text-xs leading-relaxed text-[#929A9D]">
-                No completed sessions in this runtime yet. Real WebRTC sessions and measured FPS summaries will appear here once Stage 2–4 transport is active.
+                No completed media sessions in this runtime yet. Real WebRTC sessions and measured FPS summaries will appear here once Stage 4 transport is active.
               </p>
             ) : (
               <ul className="mt-3 divide-y divide-[#252A2F] text-xs">

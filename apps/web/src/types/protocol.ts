@@ -24,7 +24,8 @@ export type CastoraMessageType =
   | 'stream_status'
   | 'disconnect'
   | 'error'
-  | 'heartbeat';
+  | 'heartbeat'
+  | 'room_state';
 
 export interface CastoraEnvelope<TPayload = Record<string, unknown>> {
   protocolVersion: typeof CASTORA_PROTOCOL_VERSION;

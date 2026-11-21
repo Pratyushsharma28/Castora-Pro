@@ -34,6 +34,7 @@ const EXPECTED_INVALID_PATTERNS = {
   'invalid-disconnect-missing-reason.json': "must have required property 'reason'",
   'invalid-error-unknown-code.json': '/payload/code',
   'invalid-heartbeat-negative-sequence.json': '/payload/sequence',
+  'invalid-room-state-missing-status.json': "must have required property 'status'",
 };
 
 function readJsonFile(filePath) {

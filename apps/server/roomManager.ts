@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type { WebSocket } from 'ws';
 import {
   generateRoomCode,
@@ -10,9 +11,11 @@ import type {
   CastoraPlatform,
   CastoraRoom,
   DeviceCapabilities,
+  PairedReceiverMember,
+  PairingMethod,
+  PendingPairRequest,
   PublicRoomSnapshot,
   RegisteredDevice,
-  RoomMember,
 } from './types.ts';
 
 export const MAX_RECEIVERS_PER_ROOM = 6;
@@ -25,24 +28,74 @@ export type RoomOperationErrorCode =
   | 'ROOM_NOT_FOUND'
   | 'ROOM_EXPIRED'
   | 'ROOM_FULL'
+  | 'ALREADY_PAIRED'
+  | 'DUPLICATE_PAIR_REQUEST'
+  | 'REQUEST_NOT_FOUND'
+  | 'RECEIVER_NOT_FOUND'
   | 'UNAUTHORIZED';
-
-export type RoomJoinResult =
-  | {
-      ok: true;
-      room: PublicRoomSnapshot;
-      memberToken: string;
-      assignedSlotIndex: number;
-    }
-  | {
-      ok: false;
-      code: RoomOperationErrorCode;
-      message: string;
-    };
 
 export type RoomLookupResult =
   | { ok: true; room: PublicRoomSnapshot }
   | { ok: false; code: RoomOperationErrorCode; message: string };
+
+export type SubmitPairRequestResult =
+  | {
+      ok: true;
+      room: PublicRoomSnapshot;
+      memberToken: string;
+      sessionId: string;
+      requestStatus: 'pending_approval';
+    }
+  | { ok: false; code: RoomOperationErrorCode; message: string };
+
+export type ApprovePairResult =
+  | {
+      ok: true;
+      room: PublicRoomSnapshot;
+      approved: PairedReceiverMember;
+      receiverSocket: WebSocket | null;
+    }
+  | { ok: false; code: RoomOperationErrorCode; message: string };
+
+export type RejectPairResult =
+  | {
+      ok: true;
+      room: PublicRoomSnapshot;
+      rejected: PendingPairRequest;
+      reason: string;
+      receiverSocket: WebSocket | null;
+    }
+  | { ok: false; code: RoomOperationErrorCode; message: string };
+
+export type RemoveReceiverResult =
+  | {
+      ok: true;
+      room: PublicRoomSnapshot;
+      removedDeviceId: string;
+      removedSocket: WebSocket | null;
+    }
+  | { ok: false; code: RoomOperationErrorCode; message: string };
+
+export type LeaveRoomResult =
+  | {
+      ok: true;
+      room: PublicRoomSnapshot;
+    }
+  | { ok: false; code: RoomOperationErrorCode; message: string };
+
+export function toRoomStatePayload(snapshot: PublicRoomSnapshot): Record<string, unknown> {
+  return {
+    status: snapshot.status,
+    hostDeviceId: snapshot.hostDeviceId,
+    hostDeviceName: snapshot.hostDeviceName,
+    hostPlatform: snapshot.hostPlatform,
+    hostConnected: snapshot.hostConnected,
+    expiresAt: snapshot.expiresAt,
+    maxReceivers: snapshot.maxReceivers,
+    pendingRequests: snapshot.pendingRequests,
+    pairedReceivers: snapshot.pairedReceivers,
+  };
+}
 
 export class RoomManager {
   private readonly devices = new Map<string, RegisteredDevice>();
@@ -74,39 +127,64 @@ export class RoomManager {
     return Boolean(dev && this.isSocketOpen(dev.socket));
   }
 
-  private toPublicSnapshot(room: CastoraRoom): PublicRoomSnapshot {
-    const members = Array.from(room.members.values()).map((member) => ({
-      deviceId: member.deviceId,
-      deviceName: member.deviceName,
-      platform: member.platform,
-      role: member.role,
-      connected: member.connected && this.hasOpenSocket(member.deviceId),
-      assignedSlotIndex: member.assignedSlotIndex,
+  private getOpenSocket(deviceId: string): WebSocket | null {
+    const dev = this.devices.get(deviceId);
+    return dev && this.isSocketOpen(dev.socket) ? dev.socket : null;
+  }
+
+  private toPublicSnapshot(
+    room: CastoraRoom,
+    status: 'active' | 'closed' | 'expired' = 'active'
+  ): PublicRoomSnapshot {
+    const hostConnected =
+      status === 'active' && room.hostConnected && this.hasOpenSocket(room.hostDeviceId);
+
+    const pendingRequests = Array.from(room.pendingRequests.values()).map((req) => ({
+      deviceId: req.deviceId,
+      deviceName: req.deviceName,
+      platform: req.platform,
+      pairingMethod: req.pairingMethod,
+      connected: status === 'active' && req.connected && this.hasOpenSocket(req.deviceId),
+      requestedAt: new Date(req.requestedAt).toISOString(),
+      sessionId: req.sessionId,
     }));
 
-    const activeReceiverCount = members.filter(
-      (member) => member.role === 'receiver' && member.connected
-    ).length;
+    const pairedReceivers = Array.from(room.pairedReceivers.values())
+      .sort((a, b) => a.assignedSlotIndex - b.assignedSlotIndex)
+      .map((member) => ({
+        deviceId: member.deviceId,
+        deviceName: member.deviceName,
+        platform: member.platform,
+        connected: status === 'active' && member.connected && this.hasOpenSocket(member.deviceId),
+        assignedSlotIndex: member.assignedSlotIndex,
+        pairedAt: new Date(member.pairedAt).toISOString(),
+        sessionId: member.sessionId,
+      }));
+
+    const activeReceiverCount = pairedReceivers.filter((r) => r.connected).length;
 
     return {
       roomId: room.roomId,
+      status,
       hostDeviceId: room.hostDeviceId,
       hostDeviceName: room.hostDeviceName,
       hostPlatform: room.hostPlatform,
+      hostConnected,
       createdAt: new Date(room.createdAt).toISOString(),
       expiresAt: new Date(room.expiresAt).toISOString(),
       maxReceivers: room.maxReceivers,
       activeReceiverCount,
-      members,
+      pairedReceiverCount: pairedReceivers.length,
+      pendingCount: pendingRequests.length,
+      pendingRequests,
+      pairedReceivers,
     };
   }
 
   private findNextSlotIndex(room: CastoraRoom): number | null {
     const used = new Set<number>();
-    for (const member of room.members.values()) {
-      if (member.role === 'receiver' && member.assignedSlotIndex !== null) {
-        used.add(member.assignedSlotIndex);
-      }
+    for (const member of room.pairedReceivers.values()) {
+      used.add(member.assignedSlotIndex);
     }
     for (let idx = 0; idx < room.maxReceivers; idx += 1) {
       if (!used.has(idx)) {
@@ -114,6 +192,38 @@ export class RoomManager {
       }
     }
     return null;
+  }
+
+  private getActiveRoomOrError(roomId: string):
+    | { ok: true; room: CastoraRoom }
+    | { ok: false; code: RoomOperationErrorCode; message: string } {
+    if (!/^[A-Z0-9]{6}$/.test(roomId)) {
+      return {
+        ok: false,
+        code: 'INVALID_ROOM_ID',
+        message: 'Room ID must be 6 uppercase alphanumeric characters',
+      };
+    }
+
+    const room = this.rooms.get(roomId);
+    if (!room) {
+      return {
+        ok: false,
+        code: 'ROOM_NOT_FOUND',
+        message: 'Room does not exist',
+      };
+    }
+
+    if (Date.now() >= room.expiresAt) {
+      this.rooms.delete(roomId);
+      return {
+        ok: false,
+        code: 'ROOM_EXPIRED',
+        message: 'Room has expired',
+      };
+    }
+
+    return { ok: true, room };
   }
 
   registerDevice(params: {
@@ -127,7 +237,11 @@ export class RoomManager {
     capabilities: DeviceCapabilities;
     roomId: string | null;
     token?: string;
-  }): RegisteredDevice {
+  }): {
+    device: RegisteredDevice;
+    authenticatedRoom: PublicRoomSnapshot | null;
+    authenticatedRole: 'host' | 'pending' | 'paired' | null;
+  } {
     const now = Date.now();
     const existing = this.devices.get(params.deviceId);
     if (existing && existing.socket !== params.socket) {
@@ -135,14 +249,34 @@ export class RoomManager {
     }
 
     let verifiedRoomId: string | null = null;
-    if (params.roomId) {
-      const room = this.rooms.get(params.roomId);
-      if (room && room.expiresAt > now) {
-        const member = room.members.get(params.deviceId);
-        if (member && (!params.token || verifyToken(params.token, member.tokenHash))) {
-          member.connected = true;
-          member.lastSeenAt = now;
+    let authenticatedRole: 'host' | 'pending' | 'paired' | null = null;
+
+    if (params.roomId && params.token) {
+      const lookup = this.getActiveRoomOrError(params.roomId);
+      if (lookup.ok) {
+        const room = lookup.room;
+        if (
+          params.deviceId === room.hostDeviceId &&
+          verifyToken(params.token, room.hostTokenHash)
+        ) {
+          room.hostConnected = true;
           verifiedRoomId = room.roomId;
+          authenticatedRole = 'host';
+        } else {
+          const paired = room.pairedReceivers.get(params.deviceId);
+          if (paired && verifyToken(params.token, paired.tokenHash)) {
+            paired.connected = true;
+            paired.lastSeenAt = now;
+            verifiedRoomId = room.roomId;
+            authenticatedRole = 'paired';
+          } else {
+            const pending = room.pendingRequests.get(params.deviceId);
+            if (pending && verifyToken(params.token, pending.tokenHash)) {
+              pending.connected = true;
+              verifiedRoomId = room.roomId;
+              authenticatedRole = 'pending';
+            }
+          }
         }
       }
     }
@@ -163,7 +297,22 @@ export class RoomManager {
 
     this.devices.set(params.deviceId, record);
     this.socketToDeviceId.set(params.socket, params.deviceId);
-    return record;
+
+    const authenticatedRoom =
+      verifiedRoomId && this.rooms.has(verifiedRoomId)
+        ? this.toPublicSnapshot(this.rooms.get(verifiedRoomId)!)
+        : null;
+
+    return { device: record, authenticatedRoom, authenticatedRole };
+  }
+
+  isAuthorizedHost(roomId: string, deviceId: string, rawToken?: string): boolean {
+    const lookup = this.getActiveRoomOrError(roomId);
+    if (!lookup.ok) return false;
+    const room = lookup.room;
+    if (room.hostDeviceId !== deviceId) return false;
+    if (!rawToken) return false;
+    return verifyToken(rawToken, room.hostTokenHash);
   }
 
   getDeviceBySocket(socket: WebSocket): RegisteredDevice | undefined {
@@ -207,10 +356,18 @@ export class RoomManager {
     if (device.roomId) {
       const room = this.rooms.get(device.roomId);
       if (room && room.expiresAt > now) {
-        const member = room.members.get(device.deviceId);
-        if (member) {
-          member.lastSeenAt = now;
-          member.connected = true;
+        if (room.hostDeviceId === device.deviceId) {
+          room.hostConnected = true;
+        } else {
+          const paired = room.pairedReceivers.get(device.deviceId);
+          if (paired) {
+            paired.lastSeenAt = now;
+            paired.connected = true;
+          }
+          const pending = room.pendingRequests.get(device.deviceId);
+          if (pending) {
+            pending.connected = true;
+          }
         }
       }
     }
@@ -240,29 +397,19 @@ export class RoomManager {
     const hostTokenHash = hashToken(hostToken);
     const hostSocketConnected = this.hasOpenSocket(params.hostDeviceId);
 
-    const hostMember: RoomMember = {
-      deviceId: params.hostDeviceId,
-      deviceName: params.hostDeviceName,
-      platform: params.hostPlatform,
-      role: 'host',
-      tokenHash: hostTokenHash,
-      connected: hostSocketConnected,
-      joinedAt: now,
-      lastSeenAt: now,
-      assignedSlotIndex: null,
-    };
-
     const room: CastoraRoom = {
       roomId,
       hostDeviceId: params.hostDeviceId,
       hostDeviceName: params.hostDeviceName,
       hostPlatform: params.hostPlatform,
       hostTokenHash,
+      hostConnected: hostSocketConnected,
       createdAt: now,
       expiresAt: now + ttl,
       ttlMs: ttl,
       maxReceivers: MAX_RECEIVERS_PER_ROOM,
-      members: new Map([[params.hostDeviceId, hostMember]]),
+      pendingRequests: new Map(),
+      pairedReceivers: new Map(),
     };
 
     this.rooms.set(roomId, room);
@@ -279,104 +426,75 @@ export class RoomManager {
   }
 
   getRoom(roomId: string): RoomLookupResult {
-    if (!/^[A-Z0-9]{6}$/.test(roomId)) {
-      return {
-        ok: false,
-        code: 'INVALID_ROOM_ID',
-        message: 'Room ID must be 6 uppercase alphanumeric characters',
-      };
+    const lookup = this.getActiveRoomOrError(roomId);
+    if (!lookup.ok) {
+      return lookup;
     }
-
-    const room = this.rooms.get(roomId);
-    if (!room) {
-      return {
-        ok: false,
-        code: 'ROOM_NOT_FOUND',
-        message: 'Room not found',
-      };
-    }
-
-    if (Date.now() >= room.expiresAt) {
-      this.rooms.delete(roomId);
-      return {
-        ok: false,
-        code: 'ROOM_EXPIRED',
-        message: 'Room has expired',
-      };
-    }
-
     return {
       ok: true,
-      room: this.toPublicSnapshot(room),
+      room: this.toPublicSnapshot(lookup.room),
     };
   }
 
-  joinRoom(params: {
+  submitPairRequest(params: {
     roomId: string;
     receiverDeviceId: string;
     deviceName: string;
     platform: CastoraPlatform;
-  }): RoomJoinResult {
-    if (!/^[A-Z0-9]{6}$/.test(params.roomId)) {
-      return {
-        ok: false,
-        code: 'INVALID_ROOM_ID',
-        message: 'Room ID must be 6 uppercase alphanumeric characters',
-      };
-    }
+    pairingMethod?: PairingMethod;
+  }): SubmitPairRequestResult {
+    const lookup = this.getActiveRoomOrError(params.roomId);
+    if (!lookup.ok) return lookup;
 
+    const room = lookup.room;
     const now = Date.now();
-    const room = this.rooms.get(params.roomId);
-    if (!room) {
-      return {
-        ok: false,
-        code: 'ROOM_NOT_FOUND',
-        message: 'Room does not exist',
-      };
-    }
 
-    if (now >= room.expiresAt) {
-      this.rooms.delete(params.roomId);
-      return {
-        ok: false,
-        code: 'ROOM_EXPIRED',
-        message: 'Room has expired',
-      };
-    }
-
-    const existingMember = room.members.get(params.receiverDeviceId);
-    if (existingMember && existingMember.role === 'host') {
+    if (params.receiverDeviceId === room.hostDeviceId) {
       return {
         ok: false,
         code: 'UNAUTHORIZED',
-        message: 'Host device cannot join its own room as a receiver',
+        message: 'Host device cannot submit a receiver pairing request to its own room',
       };
     }
 
-    const slotIndex =
-      existingMember?.assignedSlotIndex ?? this.findNextSlotIndex(room);
-    if (slotIndex === null) {
+    if (room.pairedReceivers.has(params.receiverDeviceId)) {
+      return {
+        ok: false,
+        code: 'ALREADY_PAIRED',
+        message: 'This device is already paired in the room',
+      };
+    }
+
+    if (room.pendingRequests.has(params.receiverDeviceId)) {
+      return {
+        ok: false,
+        code: 'DUPLICATE_PAIR_REQUEST',
+        message: 'A pairing request for this device is already awaiting host approval',
+      };
+    }
+
+    if (room.pairedReceivers.size >= room.maxReceivers) {
       return {
         ok: false,
         code: 'ROOM_FULL',
-        message: `Room already has the maximum of ${room.maxReceivers} receivers`,
+        message: `Room already has the maximum of ${room.maxReceivers} paired receivers`,
       };
     }
 
     const memberToken = generateSessionToken();
-    const member: RoomMember = {
+    const sessionId = `sess-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+    const pending: PendingPairRequest = {
       deviceId: params.receiverDeviceId,
       deviceName: params.deviceName,
       platform: params.platform,
-      role: 'receiver',
+      pairingMethod: params.pairingMethod ?? 'room_code',
       tokenHash: hashToken(memberToken),
       connected: this.hasOpenSocket(params.receiverDeviceId),
-      joinedAt: existingMember?.joinedAt ?? now,
-      lastSeenAt: now,
-      assignedSlotIndex: slotIndex,
+      requestedAt: now,
+      sessionId,
     };
 
-    room.members.set(params.receiverDeviceId, member);
+    room.pendingRequests.set(params.receiverDeviceId, pending);
 
     const dev = this.devices.get(params.receiverDeviceId);
     if (dev && this.isSocketOpen(dev.socket)) {
@@ -387,7 +505,201 @@ export class RoomManager {
       ok: true,
       room: this.toPublicSnapshot(room),
       memberToken,
+      sessionId,
+      requestStatus: 'pending_approval',
+    };
+  }
+
+  approvePairRequest(params: {
+    roomId: string;
+    receiverDeviceId: string;
+    hostToken: string;
+  }): ApprovePairResult {
+    const lookup = this.getActiveRoomOrError(params.roomId);
+    if (!lookup.ok) return lookup;
+
+    const room = lookup.room;
+    if (!verifyToken(params.hostToken, room.hostTokenHash)) {
+      return {
+        ok: false,
+        code: 'UNAUTHORIZED',
+        message: 'Unauthorized: valid host token required to approve receivers',
+      };
+    }
+
+    if (room.pairedReceivers.has(params.receiverDeviceId)) {
+      return {
+        ok: false,
+        code: 'ALREADY_PAIRED',
+        message: 'Receiver is already paired',
+      };
+    }
+
+    const pending = room.pendingRequests.get(params.receiverDeviceId);
+    if (!pending) {
+      return {
+        ok: false,
+        code: 'REQUEST_NOT_FOUND',
+        message: 'No pending pairing request found for this receiver',
+      };
+    }
+
+    if (room.pairedReceivers.size >= room.maxReceivers) {
+      return {
+        ok: false,
+        code: 'ROOM_FULL',
+        message: `Room capacity reached (${room.maxReceivers} paired receivers maximum)`,
+      };
+    }
+
+    const slotIndex = this.findNextSlotIndex(room);
+    if (slotIndex === null) {
+      return {
+        ok: false,
+        code: 'ROOM_FULL',
+        message: `Room capacity reached (${room.maxReceivers} paired receivers maximum)`,
+      };
+    }
+
+    const now = Date.now();
+    room.pendingRequests.delete(params.receiverDeviceId);
+
+    const paired: PairedReceiverMember = {
+      deviceId: pending.deviceId,
+      deviceName: pending.deviceName,
+      platform: pending.platform,
+      tokenHash: pending.tokenHash,
+      connected: this.hasOpenSocket(pending.deviceId),
       assignedSlotIndex: slotIndex,
+      pairedAt: now,
+      lastSeenAt: now,
+      sessionId: pending.sessionId,
+    };
+
+    room.pairedReceivers.set(paired.deviceId, paired);
+
+    return {
+      ok: true,
+      room: this.toPublicSnapshot(room),
+      approved: paired,
+      receiverSocket: this.getOpenSocket(paired.deviceId),
+    };
+  }
+
+  rejectPairRequest(params: {
+    roomId: string;
+    receiverDeviceId: string;
+    hostToken: string;
+    reason?: string;
+  }): RejectPairResult {
+    const lookup = this.getActiveRoomOrError(params.roomId);
+    if (!lookup.ok) return lookup;
+
+    const room = lookup.room;
+    if (!verifyToken(params.hostToken, room.hostTokenHash)) {
+      return {
+        ok: false,
+        code: 'UNAUTHORIZED',
+        message: 'Unauthorized: valid host token required to reject receivers',
+      };
+    }
+
+    const pending = room.pendingRequests.get(params.receiverDeviceId);
+    if (!pending) {
+      return {
+        ok: false,
+        code: 'REQUEST_NOT_FOUND',
+        message: 'No pending pairing request found for this receiver',
+      };
+    }
+
+    room.pendingRequests.delete(params.receiverDeviceId);
+    const dev = this.devices.get(params.receiverDeviceId);
+    if (dev && dev.roomId === room.roomId) {
+      dev.roomId = null;
+    }
+
+    return {
+      ok: true,
+      room: this.toPublicSnapshot(room),
+      rejected: pending,
+      reason: params.reason?.trim().slice(0, 128) || 'Host declined pairing request',
+      receiverSocket: this.getOpenSocket(pending.deviceId),
+    };
+  }
+
+  removePairedReceiver(params: {
+    roomId: string;
+    receiverDeviceId: string;
+    hostToken: string;
+  }): RemoveReceiverResult {
+    const lookup = this.getActiveRoomOrError(params.roomId);
+    if (!lookup.ok) return lookup;
+
+    const room = lookup.room;
+    if (!verifyToken(params.hostToken, room.hostTokenHash)) {
+      return {
+        ok: false,
+        code: 'UNAUTHORIZED',
+        message: 'Unauthorized: valid host token required to remove a receiver',
+      };
+    }
+
+    const paired = room.pairedReceivers.get(params.receiverDeviceId);
+    if (!paired) {
+      return {
+        ok: false,
+        code: 'RECEIVER_NOT_FOUND',
+        message: 'Receiver is not paired in this room',
+      };
+    }
+
+    room.pairedReceivers.delete(params.receiverDeviceId);
+    const dev = this.devices.get(params.receiverDeviceId);
+    if (dev && dev.roomId === room.roomId) {
+      dev.roomId = null;
+    }
+
+    return {
+      ok: true,
+      room: this.toPublicSnapshot(room),
+      removedDeviceId: params.receiverDeviceId,
+      removedSocket: this.getOpenSocket(params.receiverDeviceId),
+    };
+  }
+
+  leaveRoom(params: {
+    roomId: string;
+    deviceId: string;
+    memberToken: string;
+  }): LeaveRoomResult {
+    const lookup = this.getActiveRoomOrError(params.roomId);
+    if (!lookup.ok) return lookup;
+
+    const room = lookup.room;
+    const paired = room.pairedReceivers.get(params.deviceId);
+    const pending = room.pendingRequests.get(params.deviceId);
+
+    const tokenHash = paired?.tokenHash ?? pending?.tokenHash;
+    if (!tokenHash || !verifyToken(params.memberToken, tokenHash)) {
+      return {
+        ok: false,
+        code: 'UNAUTHORIZED',
+        message: 'Unauthorized: valid receiver token required to leave room',
+      };
+    }
+
+    room.pairedReceivers.delete(params.deviceId);
+    room.pendingRequests.delete(params.deviceId);
+
+    const dev = this.devices.get(params.deviceId);
+    if (dev && dev.roomId === room.roomId) {
+      dev.roomId = null;
+    }
+
+    return {
+      ok: true,
+      room: this.toPublicSnapshot(room),
     };
   }
 
@@ -395,6 +707,7 @@ export class RoomManager {
     ok: boolean;
     code?: RoomOperationErrorCode;
     message?: string;
+    closedSnapshot?: PublicRoomSnapshot;
     affectedSockets: WebSocket[];
   } {
     const room = this.rooms.get(roomId);
@@ -405,53 +718,74 @@ export class RoomManager {
       return { ok: false, code: 'UNAUTHORIZED', message: 'Invalid host token', affectedSockets: [] };
     }
 
-    const affectedSockets: WebSocket[] = [];
-    for (const member of room.members.values()) {
-      const dev = this.devices.get(member.deviceId);
-      if (dev) {
-        if (dev.roomId === roomId) {
-          dev.roomId = null;
-        }
-        if (this.isSocketOpen(dev.socket)) {
-          affectedSockets.push(dev.socket);
-        }
+    const closedSnapshot = this.toPublicSnapshot(room, 'closed');
+    const affectedSockets = this.getAllRoomSockets(room);
+
+    for (const sock of affectedSockets) {
+      const dev = this.getDeviceBySocket(sock);
+      if (dev && dev.roomId === roomId) {
+        dev.roomId = null;
       }
     }
+
     this.rooms.delete(roomId);
-    return { ok: true, affectedSockets };
+    return { ok: true, closedSnapshot, affectedSockets };
+  }
+
+  private getAllRoomSockets(room: CastoraRoom, excludeDeviceId?: string): WebSocket[] {
+    const sockets: WebSocket[] = [];
+    const seen = new Set<WebSocket>();
+
+    const candidateIds = [
+      room.hostDeviceId,
+      ...Array.from(room.pendingRequests.keys()),
+      ...Array.from(room.pairedReceivers.keys()),
+    ];
+
+    for (const id of candidateIds) {
+      if (excludeDeviceId && id === excludeDeviceId) continue;
+      const sock = this.getOpenSocket(id);
+      if (sock && !seen.has(sock)) {
+        seen.add(sock);
+        sockets.push(sock);
+      }
+    }
+
+    return sockets;
   }
 
   getRoomMemberSockets(roomId: string, excludeDeviceId?: string): WebSocket[] {
     const room = this.rooms.get(roomId);
     if (!room || Date.now() >= room.expiresAt) return [];
-    const sockets: WebSocket[] = [];
-    for (const member of room.members.values()) {
-      if (excludeDeviceId && member.deviceId === excludeDeviceId) continue;
-      const dev = this.devices.get(member.deviceId);
-      if (dev && this.isSocketOpen(dev.socket)) {
-        sockets.push(dev.socket);
-      }
-    }
-    return sockets;
+    return this.getAllRoomSockets(room, excludeDeviceId);
   }
 
   verifyRoomPeerAccess(roomId: string, senderDeviceId: string, targetDeviceId: string | null): boolean {
     const room = this.rooms.get(roomId);
     if (!room || Date.now() >= room.expiresAt) return false;
-    if (!room.members.has(senderDeviceId)) return false;
-    if (targetDeviceId && !room.members.has(targetDeviceId)) return false;
+    const isSenderInRoom =
+      room.hostDeviceId === senderDeviceId || room.pairedReceivers.has(senderDeviceId);
+    if (!isSenderInRoom) return false;
+    if (targetDeviceId) {
+      const isTargetInRoom =
+        room.hostDeviceId === targetDeviceId || room.pairedReceivers.has(targetDeviceId);
+      if (!isTargetInRoom) return false;
+    }
     return true;
   }
 
   handleDisconnect(socket: WebSocket): {
     disconnectedDeviceId: string | null;
-    roomId: string | null;
-    peerSockets: WebSocket[];
+    updatedRooms: Array<{
+      room: PublicRoomSnapshot;
+      peerSockets: WebSocket[];
+      wasHost: boolean;
+    }>;
   } {
     const deviceId = this.socketToDeviceId.get(socket) ?? null;
     this.socketToDeviceId.delete(socket);
     if (!deviceId) {
-      return { disconnectedDeviceId: null, roomId: null, peerSockets: [] };
+      return { disconnectedDeviceId: null, updatedRooms: [] };
     }
 
     const device = this.devices.get(deviceId);
@@ -459,52 +793,75 @@ export class RoomManager {
       this.devices.delete(deviceId);
     }
 
-    const roomId = device?.roomId ?? null;
-    const peerSockets: WebSocket[] = [];
+    const now = Date.now();
+    const updatedRooms: Array<{
+      room: PublicRoomSnapshot;
+      peerSockets: WebSocket[];
+      wasHost: boolean;
+    }> = [];
 
     for (const room of this.rooms.values()) {
-      const member = room.members.get(deviceId);
-      if (!member) continue;
-      if (member.role === 'receiver') {
-        room.members.delete(deviceId);
-      } else {
-        member.connected = false;
+      if (room.expiresAt <= now) continue;
+
+      let touched = false;
+      let wasHost = false;
+
+      if (room.hostDeviceId === deviceId) {
+        room.hostConnected = false;
+        touched = true;
+        wasHost = true;
       }
-      for (const peer of room.members.values()) {
-        if (peer.deviceId === deviceId) continue;
-        const peerDev = this.devices.get(peer.deviceId);
-        if (peerDev && this.isSocketOpen(peerDev.socket)) {
-          peerSockets.push(peerDev.socket);
-        }
+
+      const paired = room.pairedReceivers.get(deviceId);
+      if (paired) {
+        paired.connected = false;
+        touched = true;
+      }
+
+      const pending = room.pendingRequests.get(deviceId);
+      if (pending) {
+        pending.connected = false;
+        touched = true;
+      }
+
+      if (touched) {
+        updatedRooms.push({
+          room: this.toPublicSnapshot(room),
+          peerSockets: this.getAllRoomSockets(room, deviceId),
+          wasHost,
+        });
       }
     }
 
-    return { disconnectedDeviceId: deviceId, roomId, peerSockets };
+    return { disconnectedDeviceId: deviceId, updatedRooms };
   }
 
   sweepExpiredRooms(now = Date.now()): Array<{
     roomId: string;
+    snapshot: PublicRoomSnapshot;
     sockets: WebSocket[];
   }> {
-    const expired: Array<{ roomId: string; sockets: WebSocket[] }> = [];
+    const expired: Array<{
+      roomId: string;
+      snapshot: PublicRoomSnapshot;
+      sockets: WebSocket[];
+    }> = [];
+
     for (const [roomId, room] of this.rooms.entries()) {
       if (room.expiresAt <= now) {
-        const sockets: WebSocket[] = [];
-        for (const member of room.members.values()) {
-          const dev = this.devices.get(member.deviceId);
-          if (dev) {
-            if (dev.roomId === roomId) {
-              dev.roomId = null;
-            }
-            if (this.isSocketOpen(dev.socket)) {
-              sockets.push(dev.socket);
-            }
+        const snapshot = this.toPublicSnapshot(room, 'expired');
+        const sockets = this.getAllRoomSockets(room);
+        for (const sock of sockets) {
+          const dev = this.getDeviceBySocket(sock);
+          if (dev && dev.roomId === roomId) {
+            dev.roomId = null;
           }
         }
         this.rooms.delete(roomId);
-        expired.push({ roomId, sockets });
+        expired.push({ roomId, snapshot, sockets });
       }
     }
+
     return expired;
   }
 

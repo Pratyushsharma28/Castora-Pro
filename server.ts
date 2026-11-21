@@ -5,18 +5,27 @@ import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
 import { createServerEnvelope } from './apps/server/protocolValidator.ts';
-import { RoomManager } from './apps/server/roomManager.ts';
+import { RoomManager, toRoomStatePayload } from './apps/server/roomManager.ts';
 import { SlidingWindowRateLimiter } from './apps/server/security.ts';
-import { attachSignalingGateway } from './apps/server/signalingGateway.ts';
-import type { BackendHealthStatus, CastoraPlatform } from './apps/server/types.ts';
+import {
+  attachSignalingGateway,
+  broadcastRoomState,
+  sendJson,
+} from './apps/server/signalingGateway.ts';
+import type {
+  BackendHealthStatus,
+  CastoraPlatform,
+  PairingMethod,
+} from './apps/server/types.ts';
 
 dotenv.config();
 
 const DEFAULT_PORT = Number(process.env.PORT ?? 3000) || 3000;
-const EXPIRY_SWEEP_INTERVAL_MS = 5_000;
+const EXPIRY_SWEEP_INTERVAL_MS = 2_000;
 const ROOM_CODE_REGEX = /^[A-Z0-9]{6}$/;
 const DEVICE_ID_REGEX = /^[A-Za-z0-9._-]{3,64}$/;
 const ALLOWED_PLATFORMS = new Set<CastoraPlatform>(['macos', 'android', 'android-tv']);
+const ALLOWED_PAIRING_METHODS = new Set<PairingMethod>(['qr', 'room_code', 'manual_ip']);
 
 export interface CastoraServerOptions {
   port?: number;
@@ -51,6 +60,35 @@ function resolveTlsCredentials(): { cert: Buffer; key: Buffer } | null {
 
 function getClientIp(req: Request): string {
   return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function extractBearerToken(req: Request): string {
+  const auth = req.headers.authorization;
+  if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
+    return auth.slice(7).trim();
+  }
+  return '';
+}
+
+function mapRoomErrorStatus(code?: string): number {
+  switch (code) {
+    case 'INVALID_ROOM_ID':
+      return 400;
+    case 'UNAUTHORIZED':
+      return 403;
+    case 'ROOM_NOT_FOUND':
+    case 'REQUEST_NOT_FOUND':
+    case 'RECEIVER_NOT_FOUND':
+      return 404;
+    case 'ROOM_FULL':
+    case 'ALREADY_PAIRED':
+    case 'DUPLICATE_PAIR_REQUEST':
+      return 409;
+    case 'ROOM_EXPIRED':
+      return 410;
+    default:
+      return 400;
+  }
 }
 
 export async function startCastoraServer(options: CastoraServerOptions = {}) {
@@ -176,7 +214,7 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
 
     const lookup = roomManager.getRoom(roomId);
     if (!lookup.ok) {
-      res.status(lookup.code === 'ROOM_EXPIRED' ? 410 : 404).json({
+      res.status(mapRoomErrorStatus(lookup.code)).json({
         error: lookup.code,
         message: lookup.message,
       });
@@ -186,14 +224,14 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
     res.status(200).json({ room: lookup.room });
   });
 
-  app.post('/api/rooms/:roomId/join', (req: Request, res: Response) => {
+  const handleSubmitPairRequest = (req: Request, res: Response) => {
     const clientIp = getClientIp(req);
-    const rate = roomRateLimiter.consume(`http-join:${clientIp}`);
+    const rate = roomRateLimiter.consume(`http-pair:${clientIp}`);
     if (!rate.allowed) {
       res.setHeader('Retry-After', Math.ceil(rate.retryAfterMs / 1000).toString());
       res.status(429).json({
         error: 'RATE_LIMITED',
-        message: 'Too many room join attempts. Try again later.',
+        message: 'Too many pairing requests. Try again later.',
       });
       return;
     }
@@ -203,6 +241,7 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       receiverDeviceId?: unknown;
       deviceName?: unknown;
       platform?: unknown;
+      pairingMethod?: unknown;
     };
 
     const receiverDeviceId =
@@ -213,6 +252,11 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       typeof body?.platform === 'string' && ALLOWED_PLATFORMS.has(body.platform as CastoraPlatform)
         ? (body.platform as CastoraPlatform)
         : null;
+    const pairingMethod =
+      typeof body?.pairingMethod === 'string' &&
+      ALLOWED_PAIRING_METHODS.has(body.pairingMethod as PairingMethod)
+        ? (body.pairingMethod as PairingMethod)
+        : 'room_code';
 
     if (!ROOM_CODE_REGEX.test(roomId)) {
       res.status(400).json({
@@ -230,47 +274,245 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       return;
     }
 
-    const joined = roomManager.joinRoom({
+    const submitted = roomManager.submitPairRequest({
       roomId,
       receiverDeviceId,
       deviceName,
       platform,
+      pairingMethod,
     });
 
-    if (!joined.ok) {
-      const status =
-        joined.code === 'ROOM_FULL'
-          ? 409
-          : joined.code === 'ROOM_EXPIRED'
-            ? 410
-            : joined.code === 'UNAUTHORIZED'
-              ? 403
-              : 404;
-      res.status(status).json({
-        error: joined.code,
-        message: joined.message,
+    if (!submitted.ok) {
+      res.status(mapRoomErrorStatus(submitted.code)).json({
+        error: submitted.code,
+        message: submitted.message,
       });
       return;
     }
 
+    broadcastRoomState(roomManager, submitted.room);
+
     // Security: never log memberToken
     res.status(200).json({
-      room: joined.room,
-      memberToken: joined.memberToken,
-      assignedSlotIndex: joined.assignedSlotIndex,
+      room: submitted.room,
+      memberToken: submitted.memberToken,
+      sessionId: submitted.sessionId,
+      requestStatus: submitted.requestStatus,
     });
+  };
+
+  app.post('/api/rooms/:roomId/pair-requests', handleSubmitPairRequest);
+  app.post('/api/rooms/:roomId/join', handleSubmitPairRequest);
+
+  app.post('/api/rooms/:roomId/pair-requests/:receiverDeviceId/approve', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const receiverDeviceId = String(req.params.receiverDeviceId ?? '').trim();
+    const hostToken = extractBearerToken(req);
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !DEVICE_ID_REGEX.test(receiverDeviceId) || !hostToken) {
+      res.status(hostToken ? 400 : 403).json({
+        error: hostToken ? 'INVALID_REQUEST' : 'UNAUTHORIZED',
+        message: hostToken
+          ? 'Valid roomId and receiverDeviceId required'
+          : 'Authorization Bearer host token required',
+      });
+      return;
+    }
+
+    const approval = roomManager.approvePairRequest({
+      roomId,
+      receiverDeviceId,
+      hostToken,
+    });
+
+    if (!approval.ok) {
+      res.status(mapRoomErrorStatus(approval.code)).json({
+        error: approval.code,
+        message: approval.message,
+      });
+      return;
+    }
+
+    if (approval.receiverSocket) {
+      sendJson(
+        approval.receiverSocket,
+        createServerEnvelope({
+          messageType: 'pair_response',
+          senderDeviceId: approval.room.hostDeviceId,
+          receiverDeviceId: approval.approved.deviceId,
+          roomId,
+          payload: {
+            paired: true,
+            reason: null,
+            receiverName: approval.approved.deviceName,
+            receiverPlatform: approval.approved.platform,
+            sessionId: approval.approved.sessionId,
+          },
+        })
+      );
+    }
+
+    broadcastRoomState(roomManager, approval.room);
+
+    res.status(200).json({
+      room: approval.room,
+      assignedSlotIndex: approval.approved.assignedSlotIndex,
+      sessionId: approval.approved.sessionId,
+    });
+  });
+
+  app.post('/api/rooms/:roomId/pair-requests/:receiverDeviceId/reject', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const receiverDeviceId = String(req.params.receiverDeviceId ?? '').trim();
+    const hostToken = extractBearerToken(req);
+    const body = req.body as { reason?: unknown } | undefined;
+    const reason = typeof body?.reason === 'string' ? body.reason : undefined;
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !DEVICE_ID_REGEX.test(receiverDeviceId) || !hostToken) {
+      res.status(hostToken ? 400 : 403).json({
+        error: hostToken ? 'INVALID_REQUEST' : 'UNAUTHORIZED',
+        message: hostToken
+          ? 'Valid roomId and receiverDeviceId required'
+          : 'Authorization Bearer host token required',
+      });
+      return;
+    }
+
+    const rejection = roomManager.rejectPairRequest({
+      roomId,
+      receiverDeviceId,
+      hostToken,
+      reason,
+    });
+
+    if (!rejection.ok) {
+      res.status(mapRoomErrorStatus(rejection.code)).json({
+        error: rejection.code,
+        message: rejection.message,
+      });
+      return;
+    }
+
+    if (rejection.receiverSocket) {
+      sendJson(
+        rejection.receiverSocket,
+        createServerEnvelope({
+          messageType: 'pair_response',
+          senderDeviceId: rejection.room.hostDeviceId,
+          receiverDeviceId: rejection.rejected.deviceId,
+          roomId,
+          payload: {
+            paired: false,
+            reason: rejection.reason,
+            receiverName: rejection.rejected.deviceName,
+            receiverPlatform: rejection.rejected.platform,
+            sessionId: null,
+          },
+        })
+      );
+    }
+
+    broadcastRoomState(
+      roomManager,
+      rejection.room,
+      rejection.receiverSocket ? [rejection.receiverSocket] : []
+    );
+
+    res.status(200).json({ room: rejection.room });
+  });
+
+  app.delete('/api/rooms/:roomId/receivers/:receiverDeviceId', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const receiverDeviceId = String(req.params.receiverDeviceId ?? '').trim();
+    const hostToken = extractBearerToken(req);
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !DEVICE_ID_REGEX.test(receiverDeviceId) || !hostToken) {
+      res.status(hostToken ? 400 : 403).json({
+        error: hostToken ? 'INVALID_REQUEST' : 'UNAUTHORIZED',
+        message: hostToken
+          ? 'Valid roomId and receiverDeviceId required'
+          : 'Authorization Bearer host token required',
+      });
+      return;
+    }
+
+    const removed = roomManager.removePairedReceiver({
+      roomId,
+      receiverDeviceId,
+      hostToken,
+    });
+
+    if (!removed.ok) {
+      res.status(mapRoomErrorStatus(removed.code)).json({
+        error: removed.code,
+        message: removed.message,
+      });
+      return;
+    }
+
+    if (removed.removedSocket) {
+      sendJson(
+        removed.removedSocket,
+        createServerEnvelope({
+          messageType: 'disconnect',
+          receiverDeviceId: removed.removedDeviceId,
+          roomId,
+          payload: {
+            sessionId: null,
+            streamId: null,
+            reason: 'Removed by host',
+          },
+        })
+      );
+    }
+
+    broadcastRoomState(
+      roomManager,
+      removed.room,
+      removed.removedSocket ? [removed.removedSocket] : []
+    );
+
+    res.status(200).json({ room: removed.room, removedDeviceId: removed.removedDeviceId });
+  });
+
+  app.post('/api/rooms/:roomId/leave', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const memberToken = extractBearerToken(req);
+    const body = req.body as { deviceId?: unknown } | undefined;
+    const deviceId = typeof body?.deviceId === 'string' ? body.deviceId.trim() : '';
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !DEVICE_ID_REGEX.test(deviceId) || !memberToken) {
+      res.status(memberToken ? 400 : 403).json({
+        error: memberToken ? 'INVALID_REQUEST' : 'UNAUTHORIZED',
+        message: 'Valid roomId, deviceId, and Bearer member token required',
+      });
+      return;
+    }
+
+    const left = roomManager.leaveRoom({
+      roomId,
+      deviceId,
+      memberToken,
+    });
+
+    if (!left.ok) {
+      res.status(mapRoomErrorStatus(left.code)).json({
+        error: left.code,
+        message: left.message,
+      });
+      return;
+    }
+
+    broadcastRoomState(roomManager, left.room);
+    res.status(200).json({ left: true, roomId });
   });
 
   app.delete('/api/rooms/:roomId', (req: Request, res: Response) => {
     const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
-    const auth = req.headers.authorization;
-    const token =
-      typeof auth === 'string' && auth.startsWith('Bearer ')
-        ? auth.slice(7).trim()
-        : '';
+    const token = extractBearerToken(req);
 
     if (!ROOM_CODE_REGEX.test(roomId) || !token) {
-      res.status(401).json({
+      res.status(403).json({
         error: 'UNAUTHORIZED',
         message: 'Valid roomId and Bearer host token required',
       });
@@ -279,27 +521,44 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
 
     const result = roomManager.closeRoom(roomId, token);
     if (!result.ok) {
-      res.status(result.code === 'UNAUTHORIZED' ? 403 : 404).json({
+      res.status(mapRoomErrorStatus(result.code)).json({
         error: result.code,
         message: result.message,
       });
       return;
     }
 
-    const closedNotice = createServerEnvelope({
-      messageType: 'disconnect',
-      receiverDeviceId: null,
-      roomId,
-      payload: {
-        sessionId: null,
-        streamId: null,
-        reason: 'Room closed by host',
-      },
-    });
-    const encoded = JSON.stringify(closedNotice);
+    if (result.closedSnapshot) {
+      const stateNotice = JSON.stringify(
+        createServerEnvelope({
+          messageType: 'room_state',
+          receiverDeviceId: null,
+          roomId,
+          payload: toRoomStatePayload(result.closedSnapshot),
+        })
+      );
+      for (const sock of result.affectedSockets) {
+        if (sock.readyState === 1) {
+          sock.send(stateNotice);
+        }
+      }
+    }
+
+    const closedNotice = JSON.stringify(
+      createServerEnvelope({
+        messageType: 'disconnect',
+        receiverDeviceId: null,
+        roomId,
+        payload: {
+          sessionId: null,
+          streamId: null,
+          reason: 'Room closed by host',
+        },
+      })
+    );
     for (const sock of result.affectedSockets) {
       if (sock.readyState === 1) {
-        sock.send(encoded);
+        sock.send(closedNotice);
       }
     }
 
@@ -342,7 +601,15 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
     const now = Date.now();
     const expiredRooms = roomManager.sweepExpiredRooms(now);
     for (const item of expiredRooms) {
-      const notice = JSON.stringify(
+      const stateNotice = JSON.stringify(
+        createServerEnvelope({
+          messageType: 'room_state',
+          receiverDeviceId: null,
+          roomId: item.roomId,
+          payload: toRoomStatePayload(item.snapshot),
+        })
+      );
+      const disconnectNotice = JSON.stringify(
         createServerEnvelope({
           messageType: 'disconnect',
           receiverDeviceId: null,
@@ -356,7 +623,8 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       );
       for (const sock of item.sockets) {
         if (sock.readyState === 1) {
-          sock.send(notice);
+          sock.send(stateNotice);
+          sock.send(disconnectNotice);
         }
       }
     }

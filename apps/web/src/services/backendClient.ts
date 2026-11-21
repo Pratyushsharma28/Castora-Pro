@@ -2,11 +2,21 @@ import {
   CASTORA_PROTOCOL_VERSION,
   type CastoraEnvelope,
   type CastoraMessageType,
+  type CastoraPairingMethod,
   type CastoraPlatform,
   type DeviceCapabilities,
 } from '../types/protocol';
 
 export type SignalingSocketState = 'disconnected' | 'connecting' | 'connected' | 'error';
+
+export type PairingLifecycleStatus =
+  | 'Available'
+  | 'Request pending'
+  | 'Awaiting approval'
+  | 'Paired'
+  | 'Disconnected'
+  | 'Rejected'
+  | 'Expired';
 
 export interface BackendHealthResponse {
   status: 'ok';
@@ -22,25 +32,41 @@ export interface BackendHealthResponse {
   timestamp: string;
 }
 
-export interface RoomMemberInfo {
+export interface PendingRequestInfo {
   deviceId: string;
   deviceName: string;
   platform: CastoraPlatform;
-  role: 'host' | 'receiver';
+  pairingMethod: CastoraPairingMethod;
   connected: boolean;
-  assignedSlotIndex: number | null;
+  requestedAt: string;
+  sessionId: string;
+}
+
+export interface PairedReceiverInfo {
+  deviceId: string;
+  deviceName: string;
+  platform: CastoraPlatform;
+  connected: boolean;
+  assignedSlotIndex: number;
+  pairedAt: string;
+  sessionId: string;
 }
 
 export interface RoomSnapshot {
   roomId: string;
+  status: 'active' | 'closed' | 'expired';
   hostDeviceId: string;
   hostDeviceName: string;
   hostPlatform: CastoraPlatform;
-  createdAt: string;
+  hostConnected: boolean;
+  createdAt?: string;
   expiresAt: string;
   maxReceivers: number;
   activeReceiverCount: number;
-  members: RoomMemberInfo[];
+  pairedReceiverCount: number;
+  pendingCount: number;
+  pendingRequests: PendingRequestInfo[];
+  pairedReceivers: PairedReceiverInfo[];
 }
 
 export interface CreateRoomResponse {
@@ -48,10 +74,11 @@ export interface CreateRoomResponse {
   hostToken: string;
 }
 
-export interface JoinRoomResponse {
+export interface SubmitPairRequestResponse {
   room: RoomSnapshot;
   memberToken: string;
-  assignedSlotIndex: number;
+  sessionId: string;
+  requestStatus: 'pending_approval';
 }
 
 function createMessageId(): string {
@@ -90,26 +117,119 @@ export async function createBackendRoom(params: {
   return data;
 }
 
-export async function joinBackendRoom(params: {
+export async function submitBackendPairRequest(params: {
   roomId: string;
   receiverDeviceId: string;
   deviceName: string;
   platform: CastoraPlatform;
-}): Promise<JoinRoomResponse> {
-  const response = await fetch(`/api/rooms/${encodeURIComponent(params.roomId)}/join`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      receiverDeviceId: params.receiverDeviceId,
-      deviceName: params.deviceName,
-      platform: params.platform,
-    }),
-  });
-  const data = (await response.json()) as JoinRoomResponse & { message?: string };
+  pairingMethod?: CastoraPairingMethod;
+}): Promise<SubmitPairRequestResponse> {
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/pair-requests`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        receiverDeviceId: params.receiverDeviceId,
+        deviceName: params.deviceName,
+        platform: params.platform,
+        pairingMethod: params.pairingMethod ?? 'room_code',
+      }),
+    }
+  );
+  const data = (await response.json()) as SubmitPairRequestResponse & { message?: string };
   if (!response.ok) {
-    throw new Error(data.message ?? `Failed to join room (HTTP ${response.status})`);
+    throw new Error(data.message ?? `Failed to submit pairing request (HTTP ${response.status})`);
   }
   return data;
+}
+
+export async function approveBackendPairRequest(params: {
+  roomId: string;
+  receiverDeviceId: string;
+  hostToken: string;
+}): Promise<RoomSnapshot> {
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/pair-requests/${encodeURIComponent(params.receiverDeviceId)}/approve`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${params.hostToken}`,
+      },
+    }
+  );
+  const data = (await response.json()) as { room?: RoomSnapshot; message?: string };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Approval failed (HTTP ${response.status})`);
+  }
+  return data.room;
+}
+
+export async function rejectBackendPairRequest(params: {
+  roomId: string;
+  receiverDeviceId: string;
+  hostToken: string;
+  reason?: string;
+}): Promise<RoomSnapshot> {
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/pair-requests/${encodeURIComponent(params.receiverDeviceId)}/reject`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.hostToken}`,
+      },
+      body: JSON.stringify({ reason: params.reason }),
+    }
+  );
+  const data = (await response.json()) as { room?: RoomSnapshot; message?: string };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Rejection failed (HTTP ${response.status})`);
+  }
+  return data.room;
+}
+
+export async function removeBackendReceiver(params: {
+  roomId: string;
+  receiverDeviceId: string;
+  hostToken: string;
+}): Promise<RoomSnapshot> {
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/receivers/${encodeURIComponent(params.receiverDeviceId)}`,
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${params.hostToken}`,
+      },
+    }
+  );
+  const data = (await response.json()) as { room?: RoomSnapshot; message?: string };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Receiver removal failed (HTTP ${response.status})`);
+  }
+  return data.room;
+}
+
+export async function leaveBackendRoom(params: {
+  roomId: string;
+  deviceId: string;
+  memberToken: string;
+}): Promise<void> {
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/leave`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.memberToken}`,
+      },
+      body: JSON.stringify({ deviceId: params.deviceId }),
+    }
+  );
+  if (!response.ok) {
+    const data = (await response.json().catch(() => ({}))) as { message?: string };
+    throw new Error(data.message ?? `Failed to leave room (HTTP ${response.status})`);
+  }
 }
 
 export async function fetchBackendRoom(roomId: string): Promise<RoomSnapshot> {

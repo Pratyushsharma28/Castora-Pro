@@ -3,11 +3,16 @@ import { MobileReceiverBar } from './components/layout/MobileReceiverBar';
 import { TopControlBar } from './components/layout/TopControlBar';
 import {
   CastoraSignalingClient,
+  approveBackendPairRequest,
   closeBackendRoom,
   createBackendRoom,
   fetchBackendHealth,
-  joinBackendRoom,
+  leaveBackendRoom,
+  rejectBackendPairRequest,
+  removeBackendReceiver,
+  submitBackendPairRequest,
   type BackendHealthResponse,
+  type PairingLifecycleStatus,
   type RoomSnapshot,
   type SignalingSocketState,
 } from './services/backendClient';
@@ -23,7 +28,6 @@ import type {
   BrowserCapabilityReport,
   CapturePreferences,
   ConnectedReceiverSlot,
-  IncomingApprovalRequest,
   MultiViewLayout,
   NetworkPreferences,
   SessionSummaryRecord,
@@ -82,6 +86,34 @@ function toProtocolCapabilities(
   };
 }
 
+function parseRoomSnapshotFromEnvelope(
+  roomId: string,
+  payload: Record<string, unknown>
+): RoomSnapshot {
+  const pendingRequests = Array.isArray(payload.pendingRequests)
+    ? (payload.pendingRequests as RoomSnapshot['pendingRequests'])
+    : [];
+  const pairedReceivers = Array.isArray(payload.pairedReceivers)
+    ? (payload.pairedReceivers as RoomSnapshot['pairedReceivers'])
+    : [];
+
+  return {
+    roomId,
+    status: (payload.status as RoomSnapshot['status']) ?? 'active',
+    hostDeviceId: String(payload.hostDeviceId ?? ''),
+    hostDeviceName: String(payload.hostDeviceName ?? ''),
+    hostPlatform: (payload.hostPlatform as RoomSnapshot['hostPlatform']) ?? 'macos',
+    hostConnected: Boolean(payload.hostConnected),
+    expiresAt: String(payload.expiresAt ?? ''),
+    maxReceivers: Number(payload.maxReceivers ?? 6),
+    activeReceiverCount: pairedReceivers.filter((r) => r.connected).length,
+    pairedReceiverCount: pairedReceivers.length,
+    pendingCount: pendingRequests.length,
+    pendingRequests,
+    pairedReceivers,
+  };
+}
+
 export function App() {
   const [capabilities, setCapabilities] = useState<BrowserCapabilityReport>(() =>
     probeBrowserCapabilities()
@@ -110,17 +142,21 @@ export function App() {
     turnCredential: '',
   });
 
-  // Honest Stage 2 backend state: zero fake connected devices or streaming metrics
+  // Authoritative Stage 3 pairing & backend state (tokens held in memory only)
   const [backendHealth, setBackendHealth] = useState<BackendHealthResponse | null>(null);
   const [backendError, setBackendError] = useState<string | null>(null);
   const [signalingState, setSignalingState] = useState<SignalingSocketState>('disconnected');
   const [activeRoom, setActiveRoom] = useState<RoomSnapshot | null>(null);
   const [activeRoomRole, setActiveRoomRole] = useState<'host' | 'receiver' | null>(null);
+  const [pairingStatus, setPairingStatus] = useState<PairingLifecycleStatus>('Available');
+  const [pairingDetail, setPairingDetail] = useState<string | null>(null);
+
   const roomTokenRef = useRef<string | null>(null);
+  const activeRoomIdRef = useRef<string | null>(null);
+  const activeRoomRoleRef = useRef<'host' | 'receiver' | null>(null);
   const signalingClientRef = useRef<CastoraSignalingClient | null>(null);
 
   const [receivers] = useState<ConnectedReceiverSlot[]>([]);
-  const [incomingApprovals] = useState<IncomingApprovalRequest[]>([]);
   const [recentSessions] = useState<SessionSummaryRecord[]>([]);
   const [localStream] = useState<MediaStream | null>(null);
 
@@ -139,7 +175,7 @@ export function App() {
         id: 'boot-ui-2',
         timestamp: now,
         category: 'signaling',
-        title: 'Initializing Stage 2 backend connection',
+        title: 'Initializing Castora Pro signaling connection',
         detail: 'Checking GET /api/health and connecting WebSocket /castora...',
       },
     ];
@@ -177,6 +213,84 @@ export function App() {
     }
   }, []);
 
+  const syncReceiverLifecycleFromSnapshot = useCallback(
+    (snapshot: RoomSnapshot) => {
+      if (
+        !activeRoomRoleRef.current ||
+        activeRoomIdRef.current !== snapshot.roomId
+      ) {
+        return;
+      }
+
+      if (snapshot.status === 'expired') {
+        roomTokenRef.current = null;
+        activeRoomIdRef.current = null;
+        activeRoomRoleRef.current = null;
+        setActiveRoom(null);
+        setActiveRoomRole(null);
+        setPairingStatus('Expired');
+        setPairingDetail(`Room ${snapshot.roomId} expired.`);
+        return;
+      }
+
+      if (snapshot.status === 'closed') {
+        roomTokenRef.current = null;
+        activeRoomIdRef.current = null;
+        activeRoomRoleRef.current = null;
+        setActiveRoom(null);
+        setActiveRoomRole(null);
+        setPairingStatus('Disconnected');
+        setPairingDetail(`Room ${snapshot.roomId} was closed by the host.`);
+        return;
+      }
+
+      setActiveRoom(snapshot);
+
+      if (activeRoomRoleRef.current === 'host') {
+        if (snapshot.pairedReceiverCount > 0) {
+          setPairingStatus('Paired');
+          setPairingDetail(
+            `${snapshot.activeReceiverCount} connected · ${snapshot.pairedReceiverCount}/${snapshot.maxReceivers} paired.`
+          );
+        } else if (snapshot.pendingCount > 0) {
+          setPairingStatus('Awaiting approval');
+          setPairingDetail(`${snapshot.pendingCount} pairing request awaiting host approval.`);
+        } else {
+          setPairingStatus('Available');
+          setPairingDetail(`Room ${snapshot.roomId} active. Waiting for receiver requests.`);
+        }
+        return;
+      }
+
+      if (activeRoomRoleRef.current === 'receiver') {
+        const isPaired = snapshot.pairedReceivers.some((r) => r.deviceId === deviceId);
+        const isPending = snapshot.pendingRequests.some((r) => r.deviceId === deviceId);
+
+        if (isPaired) {
+          if (!snapshot.hostConnected) {
+            setPairingStatus('Disconnected');
+            setPairingDetail('Host disconnected temporarily. Waiting for host reconnect or room expiry.');
+          } else {
+            setPairingStatus('Paired');
+            setPairingDetail(`Paired with ${snapshot.hostDeviceName} in room ${snapshot.roomId}.`);
+          }
+        } else if (isPending) {
+          setPairingStatus('Awaiting approval');
+          setPairingDetail(`Request pending approval from ${snapshot.hostDeviceName}.`);
+        } else {
+          roomTokenRef.current = null;
+          activeRoomIdRef.current = null;
+          activeRoomRoleRef.current = null;
+          setActiveRoom(null);
+          setActiveRoomRole(null);
+          setPairingStatus('Disconnected');
+          setPairingDetail('Removed from room.');
+        }
+      }
+    },
+    [deviceId]
+  );
+
   const connectSignaling = useCallback(
     (roomId: string | null, token: string | null) => {
       if (!signalingClientRef.current) {
@@ -199,9 +313,44 @@ export function App() {
               logEvent('error', 'Signaling socket error', detail ?? 'Unable to connect to /castora.');
             } else if (nextState === 'disconnected') {
               logEvent('signaling', 'Signaling socket disconnected', detail ?? 'Socket closed.');
+              if (activeRoomIdRef.current) {
+                setPairingStatus('Disconnected');
+                setPairingDetail('Signaling connection lost. Click reconnect to restore room state.');
+              }
             }
           },
           onEnvelope: (envelope) => {
+            if (envelope.messageType === 'room_state' && envelope.roomId) {
+              const snapshot = parseRoomSnapshotFromEnvelope(envelope.roomId, envelope.payload);
+              syncReceiverLifecycleFromSnapshot(snapshot);
+              void refreshHealth();
+              return;
+            }
+
+            if (envelope.messageType === 'pair_response') {
+              const payload = envelope.payload as {
+                paired?: boolean;
+                reason?: string | null;
+                sessionId?: string | null;
+              };
+              if (payload.paired) {
+                setPairingStatus('Paired');
+                setPairingDetail('Host approved pairing request.');
+                logEvent('signaling', 'Pairing approved by host', `Room ${envelope.roomId ?? ''}`);
+              } else {
+                roomTokenRef.current = null;
+                activeRoomIdRef.current = null;
+                activeRoomRoleRef.current = null;
+                setActiveRoom(null);
+                setActiveRoomRole(null);
+                setPairingStatus('Rejected');
+                setPairingDetail(payload.reason ?? 'Host declined pairing request.');
+                logEvent('signaling', 'Pairing rejected by host', payload.reason ?? 'Declined');
+              }
+              void refreshHealth();
+              return;
+            }
+
             if (envelope.messageType === 'error') {
               const payload = envelope.payload as { code?: string; message?: string };
               logEvent(
@@ -211,16 +360,31 @@ export function App() {
               );
               return;
             }
+
             if (envelope.messageType === 'disconnect') {
               const payload = envelope.payload as { reason?: string };
-              logEvent('signaling', 'Server disconnect notice', payload.reason ?? 'Disconnected');
-              if (
-                payload.reason === 'Room expired' ||
-                payload.reason === 'Room closed by host'
-              ) {
+              const reason = payload.reason ?? 'Disconnected';
+              logEvent('signaling', 'Server disconnect notice', reason);
+
+              if (reason === 'Room expired') {
                 roomTokenRef.current = null;
+                activeRoomIdRef.current = null;
+                activeRoomRoleRef.current = null;
                 setActiveRoom(null);
                 setActiveRoomRole(null);
+                setPairingStatus('Expired');
+                setPairingDetail('Room expired on server.');
+              } else if (reason === 'Room closed by host' || reason === 'Removed by host') {
+                roomTokenRef.current = null;
+                activeRoomIdRef.current = null;
+                activeRoomRoleRef.current = null;
+                setActiveRoom(null);
+                setActiveRoomRole(null);
+                setPairingStatus('Disconnected');
+                setPairingDetail(reason);
+              } else if (reason === 'Host disconnected') {
+                setPairingStatus('Disconnected');
+                setPairingDetail('Host disconnected. Waiting for host reconnection or room expiry.');
               }
               void refreshHealth();
             }
@@ -228,7 +392,15 @@ export function App() {
         },
       });
     },
-    [capabilities, deviceId, deviceName, logEvent, preferences, refreshHealth]
+    [
+      capabilities,
+      deviceId,
+      deviceName,
+      logEvent,
+      preferences,
+      refreshHealth,
+      syncReceiverLifecycleFromSnapshot,
+    ]
   );
 
   useEffect(() => {
@@ -240,7 +412,7 @@ export function App() {
 
     return () => {
       window.clearInterval(healthTimer);
-      signalingClientRef.current?.disconnect(true, deviceId, null);
+      signalingClientRef.current?.disconnect(false);
     };
     // Initial boot connection on mount; explicit reconnects use handleReconnectBackend
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -248,8 +420,8 @@ export function App() {
 
   const handleReconnectBackend = useCallback(() => {
     void refreshHealth();
-    connectSignaling(activeRoom?.roomId ?? null, roomTokenRef.current);
-  }, [activeRoom?.roomId, connectSignaling, refreshHealth]);
+    connectSignaling(activeRoomIdRef.current, roomTokenRef.current);
+  }, [connectSignaling, refreshHealth]);
 
   const handleCreateRoom = useCallback(async () => {
     const created = await createBackendRoom({
@@ -258,8 +430,12 @@ export function App() {
       hostPlatform: capabilities.detectedPlatform,
     });
     roomTokenRef.current = created.hostToken;
+    activeRoomIdRef.current = created.room.roomId;
+    activeRoomRoleRef.current = 'host';
     setActiveRoom(created.room);
     setActiveRoomRole('host');
+    setPairingStatus('Available');
+    setPairingDetail(`Room ${created.room.roomId} active. Waiting for receiver pairing requests.`);
     connectSignaling(created.room.roomId, created.hostToken);
     logEvent(
       'signaling',
@@ -270,36 +446,133 @@ export function App() {
     return created.room;
   }, [capabilities.detectedPlatform, connectSignaling, deviceId, deviceName, logEvent, refreshHealth]);
 
-  const handleJoinRoom = useCallback(
+  const handleSubmitPairRequest = useCallback(
     async (roomId: string) => {
-      const joined = await joinBackendRoom({
-        roomId,
-        receiverDeviceId: deviceId,
-        deviceName,
-        platform: capabilities.detectedPlatform,
-      });
-      roomTokenRef.current = joined.memberToken;
-      setActiveRoom(joined.room);
-      setActiveRoomRole('receiver');
-      connectSignaling(joined.room.roomId, joined.memberToken);
-      logEvent(
-        'signaling',
-        `Joined room ${joined.room.roomId}`,
-        `Assigned slot ${joined.assignedSlotIndex + 1}; host: ${joined.room.hostDeviceName}.`
-      );
-      void refreshHealth();
-      return joined.room;
+      setPairingStatus('Request pending');
+      setPairingDetail(`Submitting pairing request for room ${roomId}...`);
+      try {
+        const submitted = await submitBackendPairRequest({
+          roomId,
+          receiverDeviceId: deviceId,
+          deviceName,
+          platform: capabilities.detectedPlatform,
+          pairingMethod: 'room_code',
+        });
+        roomTokenRef.current = submitted.memberToken;
+        activeRoomIdRef.current = submitted.room.roomId;
+        activeRoomRoleRef.current = 'receiver';
+        setActiveRoom(submitted.room);
+        setActiveRoomRole('receiver');
+        setPairingStatus('Awaiting approval');
+        setPairingDetail(`Waiting for ${submitted.room.hostDeviceName} to approve pairing.`);
+        connectSignaling(submitted.room.roomId, submitted.memberToken);
+        logEvent(
+          'signaling',
+          `Pairing request submitted (${submitted.room.roomId})`,
+          `Awaiting host approval from ${submitted.room.hostDeviceName}.`
+        );
+        void refreshHealth();
+        return submitted.room;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Unable to submit pairing request';
+        if (msg.toLowerCase().includes('expired')) {
+          setPairingStatus('Expired');
+        } else {
+          setPairingStatus('Available');
+        }
+        setPairingDetail(msg);
+        throw err;
+      }
     },
     [capabilities.detectedPlatform, connectSignaling, deviceId, deviceName, logEvent, refreshHealth]
   );
+
+  const handleApproveReceiver = useCallback(
+    async (receiverDeviceId: string) => {
+      if (!activeRoom || !roomTokenRef.current) {
+        throw new Error('Host session token unavailable');
+      }
+      const updated = await approveBackendPairRequest({
+        roomId: activeRoom.roomId,
+        receiverDeviceId,
+        hostToken: roomTokenRef.current,
+      });
+      syncReceiverLifecycleFromSnapshot(updated);
+      logEvent('signaling', `Approved receiver ${receiverDeviceId}`, `Paired in room ${updated.roomId}.`);
+      void refreshHealth();
+      return updated;
+    },
+    [activeRoom, logEvent, refreshHealth, syncReceiverLifecycleFromSnapshot]
+  );
+
+  const handleRejectReceiver = useCallback(
+    async (receiverDeviceId: string) => {
+      if (!activeRoom || !roomTokenRef.current) {
+        throw new Error('Host session token unavailable');
+      }
+      const updated = await rejectBackendPairRequest({
+        roomId: activeRoom.roomId,
+        receiverDeviceId,
+        hostToken: roomTokenRef.current,
+        reason: 'Host declined pairing request',
+      });
+      syncReceiverLifecycleFromSnapshot(updated);
+      logEvent('signaling', `Rejected receiver ${receiverDeviceId}`, `Removed pending request from ${updated.roomId}.`);
+      void refreshHealth();
+      return updated;
+    },
+    [activeRoom, logEvent, refreshHealth, syncReceiverLifecycleFromSnapshot]
+  );
+
+  const handleRemoveReceiver = useCallback(
+    async (receiverDeviceId: string) => {
+      if (!activeRoom || !roomTokenRef.current) {
+        throw new Error('Host session token unavailable');
+      }
+      const updated = await removeBackendReceiver({
+        roomId: activeRoom.roomId,
+        receiverDeviceId,
+        hostToken: roomTokenRef.current,
+      });
+      syncReceiverLifecycleFromSnapshot(updated);
+      logEvent('signaling', `Removed paired receiver ${receiverDeviceId}`, `Freed receiver slot in room ${updated.roomId}.`);
+      void refreshHealth();
+      return updated;
+    },
+    [activeRoom, logEvent, refreshHealth, syncReceiverLifecycleFromSnapshot]
+  );
+
+  const handleLeaveRoom = useCallback(async () => {
+    if (!activeRoom || !roomTokenRef.current) return;
+    const roomId = activeRoom.roomId;
+    await leaveBackendRoom({
+      roomId,
+      deviceId,
+      memberToken: roomTokenRef.current,
+    });
+    roomTokenRef.current = null;
+    activeRoomIdRef.current = null;
+    activeRoomRoleRef.current = null;
+    setActiveRoom(null);
+    setActiveRoomRole(null);
+    setPairingStatus('Available');
+    setPairingDetail(`Left room ${roomId}.`);
+    connectSignaling(null, null);
+    logEvent('signaling', `Left room ${roomId}`, 'Receiver membership cleared.');
+    void refreshHealth();
+  }, [activeRoom, connectSignaling, deviceId, logEvent, refreshHealth]);
 
   const handleCloseRoom = useCallback(async () => {
     if (!activeRoom || !roomTokenRef.current) return;
     const roomId = activeRoom.roomId;
     await closeBackendRoom(roomId, roomTokenRef.current);
     roomTokenRef.current = null;
+    activeRoomIdRef.current = null;
+    activeRoomRoleRef.current = null;
     setActiveRoom(null);
     setActiveRoomRole(null);
+    setPairingStatus('Available');
+    setPairingDetail(`Room ${roomId} closed.`);
     connectSignaling(null, null);
     logEvent('signaling', `Closed room ${roomId}`, 'Room removed from server.');
     void refreshHealth();
@@ -362,6 +635,7 @@ export function App() {
             backendError={backendError}
             signalingState={signalingState}
             activeRoom={activeRoom}
+            pairingStatus={pairingStatus}
             onReconnectBackend={handleReconnectBackend}
             onNavigate={setDestination}
           />
@@ -374,7 +648,10 @@ export function App() {
             onUpdatePreferences={setPreferences}
             localStream={localStream}
             receivers={receivers}
+            activeRoom={activeRoom}
+            pairingStatus={pairingStatus}
             programTelemetry={programTelemetry}
+            onNavigate={setDestination}
             onLogEvent={logEvent}
           />
         )}
@@ -385,13 +662,18 @@ export function App() {
             deviceName={deviceName}
             capabilities={capabilities}
             initialRoomCode={initialRoute.roomCode}
-            incomingApprovals={incomingApprovals}
             activePhase="idle"
             signalingState={signalingState}
             activeRoom={activeRoom}
             activeRoomRole={activeRoomRole}
+            pairingStatus={pairingStatus}
+            pairingDetail={pairingDetail}
             onCreateRoom={handleCreateRoom}
-            onJoinRoom={handleJoinRoom}
+            onSubmitPairRequest={handleSubmitPairRequest}
+            onApproveReceiver={handleApproveReceiver}
+            onRejectReceiver={handleRejectReceiver}
+            onRemoveReceiver={handleRemoveReceiver}
+            onLeaveRoom={handleLeaveRoom}
             onCloseRoom={handleCloseRoom}
             onLogEvent={logEvent}
           />

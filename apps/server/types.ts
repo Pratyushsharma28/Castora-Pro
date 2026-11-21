@@ -3,6 +3,7 @@ import type { WebSocket } from 'ws';
 export type CastoraPlatform = 'macos' | 'android' | 'android-tv';
 export type CastoraDeviceRole = 'sender' | 'receiver' | 'both';
 export type CastoraVideoCodec = 'H264' | 'HEVC' | 'VP8' | 'VP9' | 'AV1';
+export type PairingMethod = 'qr' | 'room_code' | 'manual_ip';
 
 export interface DeviceCapabilities {
   maxWidth: number;
@@ -26,16 +27,27 @@ export interface RegisteredDevice {
   roomId: string | null;
 }
 
-export interface RoomMember {
+export interface PendingPairRequest {
   deviceId: string;
   deviceName: string;
   platform: CastoraPlatform;
-  role: 'host' | 'receiver';
+  pairingMethod: PairingMethod;
   tokenHash: string;
   connected: boolean;
-  joinedAt: number;
+  requestedAt: number;
+  sessionId: string;
+}
+
+export interface PairedReceiverMember {
+  deviceId: string;
+  deviceName: string;
+  platform: CastoraPlatform;
+  tokenHash: string;
+  connected: boolean;
+  assignedSlotIndex: number;
+  pairedAt: number;
   lastSeenAt: number;
-  assignedSlotIndex: number | null;
+  sessionId: string;
 }
 
 export interface CastoraRoom {
@@ -44,30 +56,50 @@ export interface CastoraRoom {
   hostDeviceName: string;
   hostPlatform: CastoraPlatform;
   hostTokenHash: string;
+  hostConnected: boolean;
   createdAt: number;
   expiresAt: number;
   ttlMs: number;
   maxReceivers: number;
-  members: Map<string, RoomMember>;
+  pendingRequests: Map<string, PendingPairRequest>;
+  pairedReceivers: Map<string, PairedReceiverMember>;
+}
+
+export interface PublicPendingRequest {
+  deviceId: string;
+  deviceName: string;
+  platform: CastoraPlatform;
+  pairingMethod: PairingMethod;
+  connected: boolean;
+  requestedAt: string;
+  sessionId: string;
+}
+
+export interface PublicPairedReceiver {
+  deviceId: string;
+  deviceName: string;
+  platform: CastoraPlatform;
+  connected: boolean;
+  assignedSlotIndex: number;
+  pairedAt: string;
+  sessionId: string;
 }
 
 export interface PublicRoomSnapshot {
   roomId: string;
+  status: 'active' | 'closed' | 'expired';
   hostDeviceId: string;
   hostDeviceName: string;
   hostPlatform: CastoraPlatform;
+  hostConnected: boolean;
   createdAt: string;
   expiresAt: string;
   maxReceivers: number;
   activeReceiverCount: number;
-  members: Array<{
-    deviceId: string;
-    deviceName: string;
-    platform: CastoraPlatform;
-    role: 'host' | 'receiver';
-    connected: boolean;
-    assignedSlotIndex: number | null;
-  }>;
+  pairedReceiverCount: number;
+  pendingCount: number;
+  pendingRequests: PublicPendingRequest[];
+  pairedReceivers: PublicPairedReceiver[];
 }
 
 export interface BackendHealthStatus {
