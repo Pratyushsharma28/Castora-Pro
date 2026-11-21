@@ -52,8 +52,11 @@ export function IncomingScreensPanel({
         : 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3';
 
   return (
-    <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 sm:p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3">
+    <div className="castora-panel-fs-host rounded-xl border border-[#E2E8F0] bg-white p-4 sm:p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
+      <div
+        data-castora-chrome
+        className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3"
+      >
         <div className="flex items-center gap-2">
           <Monitor className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
           <h2 className="text-sm font-semibold text-[#172033]">Incoming Screens</h2>
@@ -132,6 +135,7 @@ export function IncomingScreensPanel({
                 {entry.errorMessage && (
                   <div
                     role="alert"
+                    data-castora-chrome
                     className="rounded-lg border border-[#DC2626]/30 bg-[#FEF2F2] px-3 py-2 text-xs text-[#DC2626]"
                   >
                     {entry.errorMessage}
@@ -139,7 +143,9 @@ export function IncomingScreensPanel({
                 )}
 
                 {!hideTelemetry && (
-                  <TelemetryStrip telemetry={entry.telemetry} compact={compactTelemetry} />
+                  <div data-castora-chrome>
+                    <TelemetryStrip telemetry={entry.telemetry} compact={compactTelemetry} />
+                  </div>
                 )}
               </div>
             );

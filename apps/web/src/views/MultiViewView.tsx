@@ -480,7 +480,10 @@ export function MultiViewView({
   return (
     <div className="space-y-5">
       {/* Unified Screen-Sharing Control Bar */}
-      <div className="flex flex-col gap-3 rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] lg:flex-row lg:items-center lg:justify-between">
+      <div
+        data-castora-chrome
+        className="flex flex-col gap-3 rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] lg:flex-row lg:items-center lg:justify-between"
+      >
         <div>
           <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="font-display text-lg font-semibold tracking-tight text-[#172033]">
@@ -862,8 +865,8 @@ export function MultiViewView({
         ref={wallRef}
         className={
           isWallFullscreen
-            ? 'h-screen w-screen overflow-y-auto bg-[#F5F7FB] p-4 sm:p-6'
-            : 'min-w-0'
+            ? 'castora-panel-fs-host h-screen w-screen overflow-y-auto bg-[#F5F7FB] p-4 sm:p-6'
+            : 'castora-panel-fs-host min-w-0'
         }
       >
         {layout === 'auto' && normalizedSlots.length === 0 ? (
@@ -926,7 +929,10 @@ export function MultiViewView({
 
       {/* Compact Outbound Status Strip when sharing & drawer collapsed */}
       {webrtcState?.isSharingLocal && !showSharePanel && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#2563EB]/30 bg-[#EFF6FF] px-4 py-3">
+        <div
+          data-castora-chrome
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#2563EB]/30 bg-[#EFF6FF] px-4 py-3"
+        >
           <div className="flex items-center gap-3 text-sm">
             <SignalBadge label="Sharing your screen" tone="active" />
             <span className="text-xs text-[#64748B]">

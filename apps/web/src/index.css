@@ -62,3 +62,77 @@
   max-height: none !important;
   margin: 0 !important;
 }
+
+/* Immersive video-only fullscreen container & pure black backdrop */
+.castora-video-fs:fullscreen,
+.castora-video-fs:-webkit-full-screen {
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: #000000 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  overflow: hidden !important;
+}
+
+.castora-video-fs:fullscreen::backdrop,
+.castora-video-fs:-webkit-full-screen::backdrop {
+  background: #000000 !important;
+}
+
+.castora-video-fs:fullscreen video,
+.castora-video-fs:-webkit-full-screen video {
+  position: static !important;
+  inset: auto !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: 100vw !important;
+  max-height: 100vh !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  object-fit: contain !important;
+  background: #000000 !important;
+  display: block !important;
+}
+
+/* Strip surrounding card constraints & hide non-video Castora Pro UI while a stream is fullscreen */
+html:has(.castora-video-fs:fullscreen) body,
+html:has(.castora-video-fs:-webkit-full-screen) body {
+  background: #000000 !important;
+  overflow: hidden !important;
+}
+
+body:has(.castora-video-fs:fullscreen) header,
+body:has(.castora-video-fs:-webkit-full-screen) header,
+body:has(.castora-video-fs:fullscreen) nav,
+body:has(.castora-video-fs:-webkit-full-screen) nav,
+body:has(.castora-video-fs:fullscreen) [data-castora-chrome],
+body:has(.castora-video-fs:-webkit-full-screen) [data-castora-chrome],
+body:has(.castora-video-fs:fullscreen) [data-castora-card-header],
+body:has(.castora-video-fs:-webkit-full-screen) [data-castora-card-header],
+body:has(.castora-video-fs:fullscreen) [data-castora-card-footer],
+body:has(.castora-video-fs:-webkit-full-screen) [data-castora-card-footer] {
+  display: none !important;
+}
+
+.castora-surface-card:has(.castora-video-fs:fullscreen),
+.castora-surface-card:has(.castora-video-fs:-webkit-full-screen),
+.castora-panel-fs-host:has(.castora-video-fs:fullscreen),
+.castora-panel-fs-host:has(.castora-video-fs:-webkit-full-screen) {
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: #000000 !important;
+}
