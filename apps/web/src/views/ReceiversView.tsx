@@ -8,11 +8,8 @@ import {
   MonitorPlay,
   Plus,
   QrCode,
-  ShieldCheck,
+  RefreshCw,
   Square,
-  Trash2,
-  Users,
-  X,
 } from 'lucide-react';
 import type {
   PairingLifecycleStatus,
@@ -22,9 +19,11 @@ import type {
 import type { WebRtcSessionSnapshot } from '../services/webrtcSignalingBridge';
 import type {
   BrowserCapabilityReport,
+  CapturePreferences,
   StudioDestination,
   WebRtcConnectionPhase,
 } from '../types/studio';
+import { DeviceManagerPanel } from '../components/common/DeviceManagerPanel';
 import { IncomingScreensPanel } from '../components/common/IncomingScreensPanel';
 import { SignalBadge, type SignalTone } from '../components/common/SignalBadge';
 
@@ -32,6 +31,7 @@ interface ReceiversViewProps {
   deviceId: string;
   deviceName: string;
   capabilities: BrowserCapabilityReport;
+  preferences: CapturePreferences;
   initialRoomCode: string;
   activePhase: WebRtcConnectionPhase;
   signalingState: SignalingSocketState;
@@ -40,15 +40,31 @@ interface ReceiversViewProps {
   pairingStatus: PairingLifecycleStatus;
   pairingDetail: string | null;
   webrtcState: WebRtcSessionSnapshot;
+  mutedByPeerId: Record<string, boolean>;
   onCreateRoom: () => Promise<RoomSnapshot>;
   onSubmitPairRequest: (roomId: string) => Promise<RoomSnapshot>;
   onApproveReceiver: (receiverDeviceId: string) => Promise<RoomSnapshot>;
   onRejectReceiver: (receiverDeviceId: string) => Promise<RoomSnapshot>;
   onRemoveReceiver: (receiverDeviceId: string) => Promise<RoomSnapshot>;
+  onRenameDevice: (targetDeviceId: string, newName: string) => Promise<void>;
+  onStopDeviceStream: (
+    targetDeviceId: string,
+    mode: 'outbound-to-peer' | 'participant-room-stream'
+  ) => Promise<void>;
+  onReconnectDevice: (targetDeviceId: string) => Promise<void>;
+  onToggleMutePeer: (peerDeviceId: string) => void;
+  onToggleAdaptiveLock: (
+    targetDeviceId: string,
+    isSelf: boolean,
+    nextLocked: boolean
+  ) => Promise<void>;
+  onRefreshDevices: () => Promise<void>;
   onLeaveRoom: () => Promise<void>;
   onCloseRoom: () => Promise<void>;
   onStartSharing: (targetSelection: string | string[] | null) => Promise<void>;
   onStopSharing: () => void;
+  onReconnectBackend?: () => void;
+  onRetryPeer?: (peerDeviceId: string) => void;
   onNavigate: (destination: StudioDestination) => void;
   onLogEvent: (
     category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error',
@@ -80,6 +96,7 @@ export function ReceiversView({
   deviceId,
   deviceName,
   capabilities,
+  preferences,
   initialRoomCode,
   signalingState,
   activeRoom,
@@ -87,15 +104,24 @@ export function ReceiversView({
   pairingStatus,
   pairingDetail,
   webrtcState,
+  mutedByPeerId,
   onCreateRoom,
   onSubmitPairRequest,
   onApproveReceiver,
   onRejectReceiver,
   onRemoveReceiver,
+  onRenameDevice,
+  onStopDeviceStream,
+  onReconnectDevice,
+  onToggleMutePeer,
+  onToggleAdaptiveLock,
+  onRefreshDevices,
   onLeaveRoom,
   onCloseRoom,
   onStartSharing,
   onStopSharing,
+  onReconnectBackend,
+  onRetryPeer,
   onNavigate,
   onLogEvent,
 }: ReceiversViewProps) {
@@ -106,11 +132,9 @@ export function ReceiversView({
   const [qrInput, setQrInput] = useState<string>('');
   const [busy, setBusy] = useState<boolean>(false);
   const [shareBusy, setShareBusy] = useState<boolean>(false);
-  const [actionId, setActionId] = useState<string | null>(null);
   const [copiedType, setCopiedType] = useState<'code' | 'link' | null>(null);
   const [feedback, setFeedback] = useState<{ tone: 'info' | 'error'; text: string } | null>(null);
 
-  const pendingRequests = activeRoom?.pendingRequests ?? [];
   const pairedReceivers = activeRoom?.pairedReceivers ?? [];
   const myPairedSlot = pairedReceivers.find((r) => r.deviceId === deviceId);
   const isApprovedMember =
@@ -254,30 +278,6 @@ export function ReceiversView({
     }
   };
 
-  const runHostDecision = async (
-    targetDeviceId: string,
-    action: 'approve' | 'reject' | 'remove'
-  ) => {
-    setActionId(targetDeviceId);
-    try {
-      if (action === 'approve') {
-        await onApproveReceiver(targetDeviceId);
-        setFeedback({ tone: 'info', text: `Approved participant ${targetDeviceId}.` });
-      } else if (action === 'reject') {
-        await onRejectReceiver(targetDeviceId);
-        setFeedback({ tone: 'info', text: `Rejected request from ${targetDeviceId}.` });
-      } else {
-        await onRemoveReceiver(targetDeviceId);
-        setFeedback({ tone: 'info', text: `Removed participant ${targetDeviceId}.` });
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Action failed';
-      setFeedback({ tone: 'error', text: message });
-    } finally {
-      setActionId(null);
-    }
-  };
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -297,9 +297,32 @@ export function ReceiversView({
             pulse={pairingStatus === 'Request pending' || pairingStatus === 'Awaiting approval'}
           />
           <SignalBadge
-            label={signalingState === 'connected' ? 'Server Online' : 'Offline'}
-            tone={signalingState === 'connected' ? 'active' : 'standby'}
+            label={
+              signalingState === 'connected'
+                ? 'Server Online'
+                : signalingState === 'connecting'
+                  ? 'Reconnecting'
+                  : 'Offline'
+            }
+            tone={
+              signalingState === 'connected'
+                ? 'active'
+                : signalingState === 'connecting'
+                  ? 'warn'
+                  : 'standby'
+            }
+            pulse={signalingState === 'connecting'}
           />
+          {(signalingState === 'disconnected' || signalingState === 'error') && onReconnectBackend && (
+            <button
+              type="button"
+              onClick={onReconnectBackend}
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+            >
+              <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Reconnect</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -626,6 +649,10 @@ export function ReceiversView({
                 <dd className="font-mono text-[#172033] tabular-metrics">{deviceId}</dd>
               </div>
               <div className="flex items-center justify-between gap-2">
+                <dt className="text-[#64748B]">Device Type</dt>
+                <dd className="text-[#172033]">{capabilities.detectedDeviceType}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
                 <dt className="text-[#64748B]">Platform</dt>
                 <dd className="text-[#172033]">{capabilities.detectedPlatform}</dd>
               </div>
@@ -633,177 +660,37 @@ export function ReceiversView({
           </div>
         </section>
 
-        {/* Right: Approval Queue, Participant List, Incoming Screens */}
+        {/* Right: Device Manager (Approvals, Roster, Naming, Per-Device Controls) & Incoming Screens */}
         <section className="min-w-0 space-y-6 lg:col-span-7" aria-label="Participants and Approvals">
-          {/* Approval Queue */}
-          {(activeRoomRole === 'host' || pendingRequests.length > 0) && (
-            <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-              <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-3">
-                <div className="flex items-center gap-2">
-                  <ShieldCheck className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
-                  <h2 className="text-sm font-semibold text-[#172033]">
-                    Approval Requests
-                  </h2>
-                </div>
-                <span className="text-xs text-[#64748B] tabular-metrics">
-                  {pendingRequests.length} pending
-                </span>
-              </div>
-
-              {pendingRequests.length === 0 ? (
-                <p className="mt-3 text-xs leading-relaxed text-[#64748B]">
-                  No pending requests. Participants entering your room code appear here for explicit approval before joining.
-                </p>
-              ) : (
-                <ul className="mt-3 divide-y divide-[#E2E8F0]">
-                  {pendingRequests.map((req) => (
-                    <li
-                      key={req.deviceId}
-                      className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
-                    >
-                      <div className="min-w-0 space-y-0.5">
-                        <div className="truncate text-sm font-semibold text-[#172033]">
-                          {req.deviceName}
-                        </div>
-                        <div className="text-xs text-[#64748B] tabular-metrics">
-                          {req.platform} · {req.deviceId}
-                        </div>
-                      </div>
-                      {activeRoomRole === 'host' && (
-                        <div className="flex items-center gap-2 shrink-0">
-                          <button
-                            type="button"
-                            disabled={actionId === req.deviceId}
-                            onClick={() => runHostDecision(req.deviceId, 'approve')}
-                            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg bg-[#16A34A] px-3.5 text-xs font-semibold text-white hover:bg-[#15803D] disabled:opacity-50"
-                          >
-                            <Check className="h-3.5 w-3.5" aria-hidden="true" />
-                            <span>Approve</span>
-                          </button>
-                          <button
-                            type="button"
-                            disabled={actionId === req.deviceId}
-                            onClick={() => runHostDecision(req.deviceId, 'reject')}
-                            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-3.5 text-xs font-medium text-[#172033] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-50"
-                          >
-                            <X className="h-3.5 w-3.5" aria-hidden="true" />
-                            <span>Reject</span>
-                          </button>
-                        </div>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-
-          {/* Participant Roster */}
-          <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3">
-              <div className="flex items-center gap-2">
-                <Users className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
-                <h2 className="text-sm font-semibold text-[#172033]">
-                  Participant List
-                </h2>
-              </div>
-              <span className="text-xs text-[#64748B] tabular-metrics">
-                {activeRoom
-                  ? `${activeRoom.activeReceiverCount} / ${activeRoom.maxReceivers} receiver slots connected`
-                  : '0 / 6 slots'}
-              </span>
-            </div>
-
-            {!activeRoom ? (
-              <p className="mt-3 text-xs leading-relaxed text-[#64748B]">
-                Create a room or join with a code to view connected participants and manage room access.
-              </p>
-            ) : (
-              <ul className="mt-2 divide-y divide-[#E2E8F0]">
-                {/* Host Entry */}
-                <li className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0 space-y-0.5">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-[#172033] truncate">
-                        {activeRoom.hostDeviceName}
-                        {activeRoom.hostDeviceId === deviceId ? ' (You)' : ''}
-                      </span>
-                      <span className="text-xs font-medium text-[#2563EB]">Host</span>
-                    </div>
-                    <div className="text-xs text-[#64748B] tabular-metrics">
-                      {activeRoom.hostPlatform} · {activeRoom.hostDeviceId}
-                    </div>
-                  </div>
-                  <SignalBadge
-                    label={activeRoom.hostConnected ? 'Connected' : 'Disconnected'}
-                    tone={activeRoom.hostConnected ? 'active' : 'warn'}
-                  />
-                </li>
-
-                {pairedReceivers.length === 0 ? (
-                  <li className="py-4 text-xs text-[#64748B]">
-                    No paired participants yet. Share room code{' '}
-                    <span className="font-mono font-semibold text-[#172033]">{activeRoom.roomId}</span>{' '}
-                    so others can request access.
-                  </li>
-                ) : (
-                  pairedReceivers.map((rx) => {
-                    const isSharingToMe = webrtcState.incomingStreams.some(
-                      (s) => s.senderDeviceId === rx.deviceId && s.stream !== null
-                    );
-                    return (
-                      <li
-                        key={rx.deviceId}
-                        className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between"
-                      >
-                        <div className="min-w-0 space-y-0.5">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-xs text-[#64748B] tabular-metrics">
-                              Slot {rx.assignedSlotIndex + 1}
-                            </span>
-                            <span aria-hidden="true" className="text-[#CBD5E1]">
-                              ·
-                            </span>
-                            <span className="truncate text-sm font-semibold text-[#172033]">
-                              {rx.deviceName}
-                              {rx.deviceId === deviceId ? ' (You)' : ''}
-                            </span>
-                          </div>
-                          <div className="text-xs text-[#64748B] tabular-metrics">
-                            {rx.platform} · {rx.deviceId}
-                            {isSharingToMe && ' · Sharing screen'}
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-3 shrink-0">
-                          <SignalBadge
-                            label={rx.connected ? 'Connected' : 'Disconnected'}
-                            tone={rx.connected ? 'active' : 'warn'}
-                          />
-                          {activeRoomRole === 'host' && (
-                            <button
-                              type="button"
-                              disabled={actionId === rx.deviceId}
-                              onClick={() => runHostDecision(rx.deviceId, 'remove')}
-                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#64748B] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-50"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                              <span>Remove</span>
-                            </button>
-                          )}
-                        </div>
-                      </li>
-                    );
-                  })
-                )}
-              </ul>
-            )}
-          </div>
+          <DeviceManagerPanel
+            deviceId={deviceId}
+            deviceName={deviceName}
+            capabilities={capabilities}
+            preferences={preferences}
+            signalingState={signalingState}
+            activeRoom={activeRoom}
+            activeRoomRole={activeRoomRole}
+            webrtcState={webrtcState}
+            mutedByPeerId={mutedByPeerId}
+            onRenameDevice={onRenameDevice}
+            onApproveReceiver={onApproveReceiver}
+            onRejectReceiver={onRejectReceiver}
+            onRemoveReceiver={onRemoveReceiver}
+            onStopDeviceStream={onStopDeviceStream}
+            onReconnectDevice={onReconnectDevice}
+            onToggleMutePeer={onToggleMutePeer}
+            onToggleAdaptiveLock={onToggleAdaptiveLock}
+            onViewStream={() => onNavigate('multi-view')}
+            onRefresh={onRefreshDevices}
+          />
 
           {(isApprovedMember || webrtcState.incomingStreams.length > 0) && (
             <IncomingScreensPanel
               streams={webrtcState.incomingStreams}
               compactTelemetry
+              mutedByPeerId={mutedByPeerId}
+              onToggleMutePeer={onToggleMutePeer}
+              onRetryPeer={onRetryPeer}
               emptyMessage={
                 activeRoomRole === 'receiver'
                   ? `Connected to room ${activeRoom?.roomId ?? ''}. Incoming screens appear here whenever a participant shares.`

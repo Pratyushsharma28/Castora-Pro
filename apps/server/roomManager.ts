@@ -12,6 +12,7 @@ import type {
   CastoraPlatform,
   CastoraRoom,
   CastoraVideoCodec,
+  DetectedDeviceType,
   DeviceCapabilities,
   PairedReceiverMember,
   PairingMethod,
@@ -25,8 +26,102 @@ const DEFAULT_ROOM_TTL_MS = 15 * 60 * 1000;
 const MIN_ROOM_TTL_MS = 200;
 const MAX_ROOM_TTL_MS = 60 * 60 * 1000;
 
+const ALLOWED_DEVICE_TYPES = new Set<DetectedDeviceType>([
+  'Mac',
+  'Windows',
+  'Linux',
+  'iPad',
+  'iPhone',
+  'Android',
+  'TV',
+  'Chromebook',
+  'Unknown',
+]);
+
+const RESERVED_EXACT_LABELS = new Set<string>([
+  'host',
+  'room host',
+  'admin',
+  'administrator',
+  'system',
+  'server',
+  'castora',
+  'castora server',
+  'castora signaling server',
+  'castora pro',
+  'moderator',
+  'mod',
+  'root',
+  'superuser',
+  'operator',
+  'all',
+  'everyone',
+  'broadcast',
+  'unknown',
+  'you',
+  'me',
+  'anonymous',
+  'null',
+  'undefined',
+  'none',
+  'device',
+  'local',
+  'localhost',
+]);
+
+const MISLEADING_SYSTEM_LABEL_REGEX =
+  /(\[(?:host|admin|administrator|system|server|moderator|mod|you)\]|\((?:host|admin|administrator|system|server|moderator|mod|you)\)|^(?:host|admin|administrator|system|server|moderator)\s*:)/i;
+
+export function normalizeDeviceType(raw: unknown): DetectedDeviceType {
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim() as DetectedDeviceType;
+    if (ALLOWED_DEVICE_TYPES.has(trimmed)) {
+      return trimmed;
+    }
+  }
+  return 'Unknown';
+}
+
+export function normalizeAndValidateDeviceName(raw: unknown):
+  | { ok: true; name: string }
+  | { ok: false; code: 'INVALID_DEVICE_NAME'; message: string } {
+  if (typeof raw !== 'string') {
+    return {
+      ok: false,
+      code: 'INVALID_DEVICE_NAME',
+      message: 'Device name must be a non-empty string',
+    };
+  }
+  const collapsed = raw.replace(/\s+/g, ' ').trim();
+  if (collapsed.length < 2 || collapsed.length > 48) {
+    return {
+      ok: false,
+      code: 'INVALID_DEVICE_NAME',
+      message: 'Device name must be between 2 and 48 characters',
+    };
+  }
+  if (/[\u0000-\u001F\u007F<>]/.test(collapsed)) {
+    return {
+      ok: false,
+      code: 'INVALID_DEVICE_NAME',
+      message: 'Device name contains invalid control or markup characters',
+    };
+  }
+  const canonical = collapsed.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (RESERVED_EXACT_LABELS.has(canonical) || MISLEADING_SYSTEM_LABEL_REGEX.test(collapsed)) {
+    return {
+      ok: false,
+      code: 'INVALID_DEVICE_NAME',
+      message: `Device name "${collapsed}" is a reserved or misleading system label`,
+    };
+  }
+  return { ok: true, name: collapsed };
+}
+
 export type RoomOperationErrorCode =
   | 'INVALID_ROOM_ID'
+  | 'INVALID_DEVICE_NAME'
+  | 'DUPLICATE_DEVICE_NAME'
   | 'ROOM_NOT_FOUND'
   | 'ROOM_EXPIRED'
   | 'ROOM_FULL'
@@ -34,6 +129,7 @@ export type RoomOperationErrorCode =
   | 'DUPLICATE_PAIR_REQUEST'
   | 'REQUEST_NOT_FOUND'
   | 'RECEIVER_NOT_FOUND'
+  | 'STREAM_NOT_FOUND'
   | 'UNAUTHORIZED';
 
 export type RoomLookupResult =
@@ -119,13 +215,43 @@ export type StreamRegistrationResult =
       message: string;
     };
 
+export type CreateRoomResult =
+  | { ok: true; room: PublicRoomSnapshot; hostToken: string }
+  | { ok: false; code: RoomOperationErrorCode; message: string };
+
+export type RenameDeviceResult =
+  | { ok: true; room: PublicRoomSnapshot; targetDeviceId: string; deviceName: string }
+  | { ok: false; code: RoomOperationErrorCode; message: string };
+
+export type StopStreamControlResult =
+  | {
+      ok: true;
+      room: PublicRoomSnapshot;
+      publisherDeviceId: string;
+      publisherSocket: WebSocket | null;
+      terminatedStreams: TerminatedStreamNotice[];
+    }
+  | { ok: false; code: RoomOperationErrorCode; message: string };
+
+export type ReconnectDeviceControlResult =
+  | {
+      ok: true;
+      room: PublicRoomSnapshot;
+      targetDeviceId: string;
+      targetSocket: WebSocket | null;
+      requestedByHost: boolean;
+    }
+  | { ok: false; code: RoomOperationErrorCode; message: string };
+
 export function toRoomStatePayload(snapshot: PublicRoomSnapshot): Record<string, unknown> {
   return {
     status: snapshot.status,
     hostDeviceId: snapshot.hostDeviceId,
     hostDeviceName: snapshot.hostDeviceName,
     hostPlatform: snapshot.hostPlatform,
+    hostDeviceType: snapshot.hostDeviceType,
     hostConnected: snapshot.hostConnected,
+    hostLastSeenAt: snapshot.hostLastSeenAt,
     expiresAt: snapshot.expiresAt,
     maxReceivers: snapshot.maxReceivers,
     pendingRequests: snapshot.pendingRequests,
@@ -180,9 +306,11 @@ export class RoomManager {
       deviceId: req.deviceId,
       deviceName: req.deviceName,
       platform: req.platform,
+      deviceType: req.deviceType,
       pairingMethod: req.pairingMethod,
       connected: status === 'active' && req.connected && this.hasOpenSocket(req.deviceId),
       requestedAt: new Date(req.requestedAt).toISOString(),
+      lastSeenAt: new Date(req.lastSeenAt).toISOString(),
       sessionId: req.sessionId,
     }));
 
@@ -192,9 +320,11 @@ export class RoomManager {
         deviceId: member.deviceId,
         deviceName: member.deviceName,
         platform: member.platform,
+        deviceType: member.deviceType,
         connected: status === 'active' && member.connected && this.hasOpenSocket(member.deviceId),
         assignedSlotIndex: member.assignedSlotIndex,
         pairedAt: new Date(member.pairedAt).toISOString(),
+        lastSeenAt: new Date(member.lastSeenAt).toISOString(),
         sessionId: member.sessionId,
       }));
 
@@ -215,6 +345,7 @@ export class RoomManager {
               height: stream.height,
               fps: stream.fps,
               codec: stream.codec,
+              ...(typeof stream.hasAudio === 'boolean' ? { hasAudio: stream.hasAudio } : {}),
               startedAt: new Date(stream.startedAt).toISOString(),
             }))
         : [];
@@ -225,7 +356,9 @@ export class RoomManager {
       hostDeviceId: room.hostDeviceId,
       hostDeviceName: room.hostDeviceName,
       hostPlatform: room.hostPlatform,
+      hostDeviceType: room.hostDeviceType,
       hostConnected,
+      hostLastSeenAt: new Date(room.hostLastSeenAt).toISOString(),
       createdAt: new Date(room.createdAt).toISOString(),
       expiresAt: new Date(room.expiresAt).toISOString(),
       maxReceivers: room.maxReceivers,
@@ -236,6 +369,37 @@ export class RoomManager {
       pairedReceivers,
       activeStreams,
     };
+  }
+
+  private hasDuplicateDeviceNameInRoom(
+    room: CastoraRoom,
+    candidateName: string,
+    excludeDeviceId?: string
+  ): boolean {
+    const normalized = candidateName.trim().toLowerCase();
+    if (
+      room.hostDeviceId !== excludeDeviceId &&
+      room.hostDeviceName.trim().toLowerCase() === normalized
+    ) {
+      return true;
+    }
+    for (const member of room.pairedReceivers.values()) {
+      if (
+        member.deviceId !== excludeDeviceId &&
+        member.deviceName.trim().toLowerCase() === normalized
+      ) {
+        return true;
+      }
+    }
+    for (const req of room.pendingRequests.values()) {
+      if (
+        req.deviceId !== excludeDeviceId &&
+        req.deviceName.trim().toLowerCase() === normalized
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private findNextSlotIndex(room: CastoraRoom): number | null {
@@ -289,6 +453,7 @@ export class RoomManager {
     deviceId: string;
     deviceName: string;
     platform: CastoraPlatform;
+    deviceType?: DetectedDeviceType;
     role: CastoraDeviceRole;
     wsPort: number;
     capabilities: DeviceCapabilities;
@@ -303,6 +468,9 @@ export class RoomManager {
   } {
     const now = Date.now();
     const existing = this.devices.get(params.deviceId);
+    const resolvedType = params.deviceType
+      ? normalizeDeviceType(params.deviceType)
+      : existing?.deviceType ?? 'Unknown';
 
     let verifiedRoomId: string | null = null;
     let authenticatedRole: 'host' | 'pending' | 'paired' | null = null;
@@ -316,6 +484,10 @@ export class RoomManager {
           verifyToken(params.token, room.hostTokenHash)
         ) {
           room.hostConnected = true;
+          room.hostLastSeenAt = now;
+          if (room.hostDeviceType === 'Unknown' && resolvedType !== 'Unknown') {
+            room.hostDeviceType = resolvedType;
+          }
           verifiedRoomId = room.roomId;
           authenticatedRole = 'host';
         } else {
@@ -323,12 +495,19 @@ export class RoomManager {
           if (paired && verifyToken(params.token, paired.tokenHash)) {
             paired.connected = true;
             paired.lastSeenAt = now;
+            if (paired.deviceType === 'Unknown' && resolvedType !== 'Unknown') {
+              paired.deviceType = resolvedType;
+            }
             verifiedRoomId = room.roomId;
             authenticatedRole = 'paired';
           } else {
             const pending = room.pendingRequests.get(params.deviceId);
             if (pending && verifyToken(params.token, pending.tokenHash)) {
               pending.connected = true;
+              pending.lastSeenAt = now;
+              if (pending.deviceType === 'Unknown' && resolvedType !== 'Unknown') {
+                pending.deviceType = resolvedType;
+              }
               verifiedRoomId = room.roomId;
               authenticatedRole = 'pending';
             }
@@ -360,6 +539,7 @@ export class RoomManager {
       deviceId: params.deviceId,
       deviceName: params.deviceName,
       platform: params.platform,
+      deviceType: resolvedType,
       role: params.role,
       wsPort: params.wsPort,
       capabilities: params.capabilities,
@@ -388,6 +568,44 @@ export class RoomManager {
     if (room.hostDeviceId !== deviceId) return false;
     if (!rawToken) return false;
     return verifyToken(rawToken, room.hostTokenHash);
+  }
+
+  verifyAuthorizedMemberSession(params: {
+    roomId: string;
+    deviceId?: string;
+    token: string;
+  }):
+    | { ok: true; deviceId: string; role: 'host' | 'paired' }
+    | { ok: false; code: RoomOperationErrorCode; message: string } {
+    const lookup = this.getActiveRoomOrError(params.roomId);
+    if (!lookup.ok) return lookup;
+    const room = lookup.room;
+
+    if (
+      (!params.deviceId || params.deviceId === room.hostDeviceId) &&
+      verifyToken(params.token, room.hostTokenHash)
+    ) {
+      return { ok: true, deviceId: room.hostDeviceId, role: 'host' };
+    }
+
+    if (params.deviceId) {
+      const paired = room.pairedReceivers.get(params.deviceId);
+      if (paired && verifyToken(params.token, paired.tokenHash)) {
+        return { ok: true, deviceId: paired.deviceId, role: 'paired' };
+      }
+    } else {
+      for (const paired of room.pairedReceivers.values()) {
+        if (verifyToken(params.token, paired.tokenHash)) {
+          return { ok: true, deviceId: paired.deviceId, role: 'paired' };
+        }
+      }
+    }
+
+    return {
+      ok: false,
+      code: 'UNAUTHORIZED',
+      message: 'Unauthorized: valid approved room host or member Bearer token required',
+    };
   }
 
   getDeviceBySocket(socket: WebSocket): RegisteredDevice | undefined {
@@ -433,6 +651,7 @@ export class RoomManager {
       if (room && room.expiresAt > now) {
         if (room.hostDeviceId === device.deviceId) {
           room.hostConnected = true;
+          room.hostLastSeenAt = now;
         } else {
           const paired = room.pairedReceivers.get(device.deviceId);
           if (paired) {
@@ -441,6 +660,7 @@ export class RoomManager {
           }
           const pending = room.pendingRequests.get(device.deviceId);
           if (pending) {
+            pending.lastSeenAt = now;
             pending.connected = true;
           }
         }
@@ -453,8 +673,14 @@ export class RoomManager {
     hostDeviceId: string;
     hostDeviceName: string;
     hostPlatform: CastoraPlatform;
+    hostDeviceType?: unknown;
     ttlMs?: number;
-  }): { room: PublicRoomSnapshot; hostToken: string } {
+  }): CreateRoomResult {
+    const nameCheck = normalizeAndValidateDeviceName(params.hostDeviceName);
+    if (!nameCheck.ok) {
+      return nameCheck;
+    }
+
     const now = Date.now();
     let roomId = generateRoomCode();
     let attempts = 0;
@@ -471,14 +697,21 @@ export class RoomManager {
     const hostToken = generateSessionToken();
     const hostTokenHash = hashToken(hostToken);
     const hostSocketConnected = this.hasOpenSocket(params.hostDeviceId);
+    const hostDevice = this.devices.get(params.hostDeviceId);
+    const hostDeviceType =
+      params.hostDeviceType !== undefined
+        ? normalizeDeviceType(params.hostDeviceType)
+        : hostDevice?.deviceType ?? 'Unknown';
 
     const room: CastoraRoom = {
       roomId,
       hostDeviceId: params.hostDeviceId,
-      hostDeviceName: params.hostDeviceName,
+      hostDeviceName: nameCheck.name,
       hostPlatform: params.hostPlatform,
+      hostDeviceType,
       hostTokenHash,
       hostConnected: hostSocketConnected,
+      hostLastSeenAt: now,
       createdAt: now,
       expiresAt: now + ttl,
       ttlMs: ttl,
@@ -490,12 +723,16 @@ export class RoomManager {
 
     this.rooms.set(roomId, room);
 
-    const hostDevice = this.devices.get(params.hostDeviceId);
     if (hostDevice && this.isSocketOpen(hostDevice.socket)) {
       hostDevice.roomId = roomId;
+      hostDevice.deviceName = nameCheck.name;
+      if (hostDeviceType !== 'Unknown') {
+        hostDevice.deviceType = hostDeviceType;
+      }
     }
 
     return {
+      ok: true,
       room: this.toPublicSnapshot(room),
       hostToken,
     };
@@ -517,10 +754,16 @@ export class RoomManager {
     receiverDeviceId: string;
     deviceName: string;
     platform: CastoraPlatform;
+    deviceType?: unknown;
     pairingMethod?: PairingMethod;
   }): SubmitPairRequestResult {
     const lookup = this.getActiveRoomOrError(params.roomId);
     if (!lookup.ok) return lookup;
+
+    const nameCheck = normalizeAndValidateDeviceName(params.deviceName);
+    if (!nameCheck.ok) {
+      return nameCheck;
+    }
 
     const room = lookup.room;
     const now = Date.now();
@@ -549,6 +792,14 @@ export class RoomManager {
       };
     }
 
+    if (this.hasDuplicateDeviceNameInRoom(room, nameCheck.name, params.receiverDeviceId)) {
+      return {
+        ok: false,
+        code: 'DUPLICATE_DEVICE_NAME',
+        message: `Device name "${nameCheck.name}" is already in use in this room. Choose a unique device name.`,
+      };
+    }
+
     if (room.pairedReceivers.size >= room.maxReceivers) {
       return {
         ok: false,
@@ -559,22 +810,33 @@ export class RoomManager {
 
     const memberToken = generateSessionToken();
     const sessionId = `sess-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+    const dev = this.devices.get(params.receiverDeviceId);
+    const resolvedType =
+      params.deviceType !== undefined
+        ? normalizeDeviceType(params.deviceType)
+        : dev?.deviceType ?? 'Unknown';
+
     const pending: PendingPairRequest = {
       deviceId: params.receiverDeviceId,
-      deviceName: params.deviceName,
+      deviceName: nameCheck.name,
       platform: params.platform,
+      deviceType: resolvedType,
       pairingMethod: params.pairingMethod ?? 'room_code',
       tokenHash: hashToken(memberToken),
       connected: this.hasOpenSocket(params.receiverDeviceId),
       requestedAt: now,
+      lastSeenAt: now,
       sessionId,
     };
 
     room.pendingRequests.set(params.receiverDeviceId, pending);
 
-    const dev = this.devices.get(params.receiverDeviceId);
     if (dev && this.isSocketOpen(dev.socket)) {
       dev.roomId = room.roomId;
+      dev.deviceName = nameCheck.name;
+      if (resolvedType !== 'Unknown') {
+        dev.deviceType = resolvedType;
+      }
     }
 
     return {
@@ -644,6 +906,7 @@ export class RoomManager {
       deviceId: pending.deviceId,
       deviceName: pending.deviceName,
       platform: pending.platform,
+      deviceType: pending.deviceType,
       tokenHash: pending.tokenHash,
       connected: this.hasOpenSocket(pending.deviceId),
       assignedSlotIndex: slotIndex,
@@ -810,6 +1073,221 @@ export class RoomManager {
 
     this.rooms.delete(roomId);
     return { ok: true, closedSnapshot, affectedSockets };
+  }
+
+  renameRoomDevice(params: {
+    roomId: string;
+    targetDeviceId: string;
+    newName: string;
+    token: string;
+  }): RenameDeviceResult {
+    const lookup = this.getActiveRoomOrError(params.roomId);
+    if (!lookup.ok) return lookup;
+
+    const nameCheck = normalizeAndValidateDeviceName(params.newName);
+    if (!nameCheck.ok) return nameCheck;
+
+    const room = lookup.room;
+    const isHostToken = verifyToken(params.token, room.hostTokenHash);
+    let actorDeviceId: string | null = isHostToken ? room.hostDeviceId : null;
+
+    if (!actorDeviceId) {
+      for (const paired of room.pairedReceivers.values()) {
+        if (verifyToken(params.token, paired.tokenHash)) {
+          actorDeviceId = paired.deviceId;
+          break;
+        }
+      }
+    }
+    if (!actorDeviceId) {
+      for (const pending of room.pendingRequests.values()) {
+        if (verifyToken(params.token, pending.tokenHash)) {
+          actorDeviceId = pending.deviceId;
+          break;
+        }
+      }
+    }
+
+    if (!actorDeviceId) {
+      return {
+        ok: false,
+        code: 'UNAUTHORIZED',
+        message: 'Unauthorized: valid room session Bearer token required to rename a device',
+      };
+    }
+
+    if (params.targetDeviceId !== actorDeviceId && !isHostToken) {
+      return {
+        ok: false,
+        code: 'UNAUTHORIZED',
+        message: 'Unauthorized: only the room host may rename another participant device',
+      };
+    }
+
+    const isHostTarget = params.targetDeviceId === room.hostDeviceId;
+    const pairedTarget = room.pairedReceivers.get(params.targetDeviceId);
+    const pendingTarget = room.pendingRequests.get(params.targetDeviceId);
+
+    if (!isHostTarget && !pairedTarget && !pendingTarget) {
+      return {
+        ok: false,
+        code: 'RECEIVER_NOT_FOUND',
+        message: 'Target device is not in this room',
+      };
+    }
+
+    if (this.hasDuplicateDeviceNameInRoom(room, nameCheck.name, params.targetDeviceId)) {
+      return {
+        ok: false,
+        code: 'DUPLICATE_DEVICE_NAME',
+        message: `Device name "${nameCheck.name}" is already in use in this room`,
+      };
+    }
+
+    const now = Date.now();
+    if (isHostTarget) {
+      room.hostDeviceName = nameCheck.name;
+      room.hostLastSeenAt = now;
+    } else if (pairedTarget) {
+      pairedTarget.deviceName = nameCheck.name;
+      pairedTarget.lastSeenAt = now;
+    } else if (pendingTarget) {
+      pendingTarget.deviceName = nameCheck.name;
+      pendingTarget.lastSeenAt = now;
+    }
+
+    const registered = this.devices.get(params.targetDeviceId);
+    if (registered) {
+      registered.deviceName = nameCheck.name;
+      registered.lastSeenAt = now;
+    }
+
+    for (const stream of room.activeStreams.values()) {
+      if (stream.publisherDeviceId === params.targetDeviceId) {
+        stream.publisherName = nameCheck.name;
+      }
+    }
+
+    return {
+      ok: true,
+      room: this.toPublicSnapshot(room),
+      targetDeviceId: params.targetDeviceId,
+      deviceName: nameCheck.name,
+    };
+  }
+
+  stopStreamByControl(params: {
+    roomId: string;
+    publisherDeviceId: string;
+    streamTargetDeviceId?: string;
+    token: string;
+  }): StopStreamControlResult {
+    const auth = this.verifyAuthorizedMemberSession({
+      roomId: params.roomId,
+      token: params.token,
+    });
+    if (!auth.ok) return auth;
+
+    if (auth.role !== 'host' && auth.deviceId !== params.publisherDeviceId) {
+      return {
+        ok: false,
+        code: 'UNAUTHORIZED',
+        message: 'Unauthorized: only the room host or stream owner may stop this stream',
+      };
+    }
+
+    const room = this.rooms.get(params.roomId)!;
+    if (
+      params.publisherDeviceId !== room.hostDeviceId &&
+      !room.pairedReceivers.has(params.publisherDeviceId)
+    ) {
+      return {
+        ok: false,
+        code: 'RECEIVER_NOT_FOUND',
+        message: 'Target device is not an approved member of this room',
+      };
+    }
+
+    const terminatedStreams: TerminatedStreamNotice[] = [];
+    for (const [key, stream] of room.activeStreams.entries()) {
+      if (
+        stream.publisherDeviceId === params.publisherDeviceId &&
+        (!params.streamTargetDeviceId || stream.targetDeviceId === params.streamTargetDeviceId)
+      ) {
+        room.activeStreams.delete(key);
+        terminatedStreams.push({
+          streamId: stream.streamId,
+          sessionId: stream.sessionId,
+          publisherDeviceId: stream.publisherDeviceId,
+          targetDeviceId: stream.targetDeviceId,
+          targetSocket: this.getOpenSocket(stream.targetDeviceId),
+        });
+      }
+    }
+
+    const now = Date.now();
+    if (auth.deviceId === room.hostDeviceId) {
+      room.hostLastSeenAt = now;
+    } else {
+      const actorMember = room.pairedReceivers.get(auth.deviceId);
+      if (actorMember) actorMember.lastSeenAt = now;
+    }
+
+    return {
+      ok: true,
+      room: this.toPublicSnapshot(room),
+      publisherDeviceId: params.publisherDeviceId,
+      publisherSocket: this.getOpenSocket(params.publisherDeviceId),
+      terminatedStreams,
+    };
+  }
+
+  authorizeDeviceReconnect(params: {
+    roomId: string;
+    targetDeviceId: string;
+    token: string;
+  }): ReconnectDeviceControlResult {
+    const auth = this.verifyAuthorizedMemberSession({
+      roomId: params.roomId,
+      token: params.token,
+    });
+    if (!auth.ok) return auth;
+
+    if (auth.role !== 'host' && auth.deviceId !== params.targetDeviceId) {
+      return {
+        ok: false,
+        code: 'UNAUTHORIZED',
+        message: 'Unauthorized: only the room host may remotely reconnect another device',
+      };
+    }
+
+    const room = this.rooms.get(params.roomId)!;
+    const isMember =
+      params.targetDeviceId === room.hostDeviceId ||
+      room.pairedReceivers.has(params.targetDeviceId);
+    if (!isMember) {
+      return {
+        ok: false,
+        code: 'RECEIVER_NOT_FOUND',
+        message: 'Target device is not a member of this room',
+      };
+    }
+
+    const now = Date.now();
+    if (params.targetDeviceId === room.hostDeviceId) {
+      room.hostLastSeenAt = now;
+    } else {
+      const targetMember = room.pairedReceivers.get(params.targetDeviceId);
+      if (targetMember) targetMember.lastSeenAt = now;
+    }
+
+    return {
+      ok: true,
+      room: this.toPublicSnapshot(room),
+      targetDeviceId: params.targetDeviceId,
+      targetSocket: this.getOpenSocket(params.targetDeviceId),
+      requestedByHost: auth.role === 'host' && auth.deviceId !== params.targetDeviceId,
+    };
   }
 
   private getAllRoomSockets(room: CastoraRoom, excludeDeviceId?: string): WebSocket[] {
@@ -1051,6 +1529,15 @@ export class RoomManager {
       }
     }
 
+    const now = Date.now();
+    const senderDevice = this.devices.get(params.senderDeviceId);
+    if (params.senderDeviceId === room.hostDeviceId) {
+      room.hostLastSeenAt = now;
+    } else {
+      const senderMember = room.pairedReceivers.get(params.senderDeviceId);
+      if (senderMember) senderMember.lastSeenAt = now;
+    }
+
     const linkKey = this.streamLinkKey(params.senderDeviceId, params.targetDeviceId!);
     const record: ActiveRoomStream = {
       streamId: params.streamId,
@@ -1063,7 +1550,8 @@ export class RoomManager {
       height: params.height,
       fps: params.fps,
       codec: params.codec,
-      startedAt: Date.now(),
+      ...(senderDevice ? { hasAudio: senderDevice.capabilities.supportsAudio } : {}),
+      startedAt: now,
     };
     room.activeStreams.set(linkKey, record);
 
@@ -1118,6 +1606,14 @@ export class RoomManager {
           room.activeStreams.delete(k);
         }
       }
+    }
+
+    const now = Date.now();
+    if (params.senderDeviceId === room.hostDeviceId) {
+      room.hostLastSeenAt = now;
+    } else {
+      const senderMember = room.pairedReceivers.get(params.senderDeviceId);
+      if (senderMember) senderMember.lastSeenAt = now;
     }
 
     return {

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Activity,
   AlertTriangle,
   ChevronDown,
   ChevronUp,
@@ -8,6 +9,7 @@ import {
   MonitorPlay,
   Power,
   Radio,
+  RotateCcw,
   SlidersHorizontal,
   Square,
   Users,
@@ -15,6 +17,7 @@ import {
   VolumeX,
 } from 'lucide-react';
 import type { PairingLifecycleStatus, RoomSnapshot } from '../services/backendClient';
+import { evaluateConnectionQuality } from '../services/streamingDiagnosticsService';
 import {
   VIDEO_QUALITY_PRESETS,
   getPresetDefaultBitrateKbps,
@@ -33,7 +36,9 @@ import type {
   StreamTelemetrySnapshot,
   StudioDestination,
 } from '../types/studio';
+import { AdaptiveQualityPanel } from '../components/common/AdaptiveQualityPanel';
 import { SignalBadge } from '../components/common/SignalBadge';
+import { StreamingQualityDiagnosticsPanel } from '../components/common/StreamingQualityDiagnosticsPanel';
 import { TelemetryStrip } from '../components/common/TelemetryStrip';
 import { VideoSurface } from '../components/common/VideoSurface';
 
@@ -58,10 +63,17 @@ interface MultiViewViewProps {
   onStartSharing?: (targetSelection: string | string[] | null) => Promise<void>;
   onConnectReceiver?: (targetPeerId: string) => Promise<void>;
   onStopSharing?: () => void;
+  onRetryPeer?: (peerDeviceId: string) => void;
+  onRetryAllFailed?: () => void;
   onNavigate?: (destination: StudioDestination) => void;
   defaultShowSharePanel?: boolean;
   onToggleMute?: (slotIndex: number) => void;
   onDisconnectSlot?: (peerDeviceId: string) => void;
+  onIncomingVideoDimensions?: (
+    senderDeviceId: string,
+    width: number | null,
+    height: number | null
+  ) => void;
   onLogEvent: (
     category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error',
     title: string,
@@ -142,16 +154,20 @@ export function MultiViewView({
   onStartSharing,
   onConnectReceiver,
   onStopSharing,
+  onRetryPeer,
+  onRetryAllFailed,
   onNavigate,
   defaultShowSharePanel = false,
   onToggleMute,
   onDisconnectSlot,
+  onIncomingVideoDimensions,
   onLogEvent,
 }: MultiViewViewProps) {
   const [spotlightIndex, setSpotlightIndex] = useState<number>(0);
   const [wallNotice, setWallNotice] = useState<string | null>(null);
   const [isWallFullscreen, setIsWallFullscreen] = useState<boolean>(false);
   const [showSharePanel, setShowSharePanel] = useState<boolean>(defaultShowSharePanel);
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(true);
   const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
   const [shareBusy, setShareBusy] = useState<boolean>(false);
   const [shareError, setShareError] = useState<string | null>(null);
@@ -353,13 +369,32 @@ export function MultiViewView({
     const slotCode = `Screen ${slot.slotIndex + 1}`;
     const hasRealPeer = slot.receiverDeviceId.length > 0;
     const isActive = hasRealPeer && slot.connectionState === 'connected' && slot.stream !== null;
-    const isConnecting =
-      hasRealPeer &&
-      (slot.connectionState === 'connecting' || slot.connectionState === 'reconnecting');
+    const isReconnecting =
+      hasRealPeer && (slot.connectionState === 'reconnecting' || Boolean(slot.recovery?.reconnecting));
+    const isConnecting = hasRealPeer && slot.connectionState === 'connecting';
     const isDisconnected = hasRealPeer && slot.connectionState === 'disconnected';
-    const isError = hasRealPeer && slot.connectionState === 'failed';
+    const isError = hasRealPeer && (slot.connectionState === 'failed' || Boolean(slot.recovery?.exhausted));
     const isSpotlightTarget = layout === 'spotlight' && slot.slotIndex === spotlightIndex;
     const isSingleLarge = layout === 'auto' && normalizedSlots.length === 1;
+
+    const quality = hasRealPeer
+      ? evaluateConnectionQuality({
+          phase: slot.connectionState,
+          iceConnectionState: slot.iceConnectionState,
+          telemetry: slot.telemetry,
+          recovery: slot.recovery,
+        })
+      : null;
+
+    const canRetryTile =
+      hasRealPeer &&
+      Boolean(onRetryPeer) &&
+      (isError || isDisconnected || Boolean(slot.recovery?.exhausted));
+
+    const reconnectingSuffix =
+      slot.recovery && slot.recovery.attempt > 0
+        ? ` (${slot.recovery.attempt}/${slot.recovery.maxAttempts})`
+        : '';
 
     const measuredFps =
       slot.telemetry.decodedFps ?? slot.telemetry.encodedFps ?? slot.telemetry.captureFps;
@@ -376,36 +411,50 @@ export function MultiViewView({
         muted={slot.muted}
         large={isPrimarySpotlight || isSingleLarge}
         highlight={isPrimarySpotlight || isSpotlightTarget || isActive}
+        onVideoDimensionsChange={
+          hasRealPeer && onIncomingVideoDimensions
+            ? (width, height) => onIncomingVideoDimensions(slot.receiverDeviceId, width, height)
+            : undefined
+        }
         standbyReason={
           hasRealPeer
-            ? `Connecting to stream from ${slot.deviceName}...`
+            ? slot.errorMessage ??
+              (isReconnecting
+                ? `Temporary interruption with ${slot.deviceName}. Reconnecting${reconnectingSuffix}...`
+                : isError
+                  ? `Connection to ${slot.deviceName} failed. Click Retry to reconnect.`
+                  : `Connecting to stream from ${slot.deviceName}...`)
             : 'Available feed slot. Incoming participant screens appear here automatically.'
         }
         statusBadge={
           <SignalBadge
             label={
-              isActive
-                ? 'Live'
-                : isConnecting
-                  ? 'Connecting'
-                  : isDisconnected
-                    ? 'Disconnected'
-                    : isError
-                      ? 'Error'
-                      : 'Standby'
+              isReconnecting
+                ? `Reconnecting${reconnectingSuffix}`
+                : isActive
+                  ? 'Live'
+                  : isConnecting
+                    ? 'Connecting'
+                    : isDisconnected
+                      ? 'Disconnected'
+                      : isError
+                        ? 'Failed'
+                        : 'Standby'
             }
             tone={
-              isActive
-                ? 'active'
-                : isConnecting
-                  ? 'signal'
-                  : isDisconnected
-                    ? 'warn'
-                    : isError
-                      ? 'fault'
-                      : 'standby'
+              isReconnecting
+                ? 'warn'
+                : isActive
+                  ? 'active'
+                  : isConnecting
+                    ? 'signal'
+                    : isDisconnected
+                      ? 'warn'
+                      : isError
+                        ? 'fault'
+                        : 'standby'
             }
-            pulse={isConnecting}
+            pulse={isConnecting || isReconnecting}
           />
         }
         footerMeta={
@@ -443,9 +492,27 @@ export function MultiViewView({
                   {slot.telemetry.rttMs !== null ? `${slot.telemetry.rttMs.toFixed(1)} ms` : '—'}
                 </strong>
               </span>
+              {quality && (
+                <span title={quality.detail}>
+                  Quality:{' '}
+                  <strong className="font-semibold text-[#172033]">
+                    {quality.label}
+                  </strong>
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-1.5">
+              {canRetryTile && (
+                <button
+                  type="button"
+                  onClick={() => onRetryPeer?.(slot.receiverDeviceId)}
+                  className="inline-flex h-7 items-center gap-1 rounded-lg border border-[#DC2626]/30 bg-[#FEF2F2] px-2.5 text-xs font-semibold text-[#DC2626] hover:bg-[#FEE2E2]"
+                >
+                  <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                  <span>Retry</span>
+                </button>
+              )}
               {layout === 'spotlight' && !isPrimarySpotlight && (
                 <button
                   type="button"
@@ -575,6 +642,22 @@ export function MultiViewView({
             </button>
           )}
 
+          {preferences && webrtcState && (
+            <button
+              type="button"
+              aria-expanded={showDiagnostics}
+              onClick={() => setShowDiagnostics((prev) => !prev)}
+              className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-[10px] border px-3 text-xs font-medium transition-colors ${
+                showDiagnostics
+                  ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                  : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB]'
+              }`}
+            >
+              <Activity className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Diagnostics</span>
+            </button>
+          )}
+
           <div
             role="group"
             aria-label="Screen Grid Layout"
@@ -654,9 +737,22 @@ export function MultiViewView({
       {(shareError || webrtcState?.errorMessage || wallNotice || qualityNotice) && (
         <div
           role="alert"
-          className="rounded-xl border border-[#DC2626]/30 bg-[#FEF2F2] px-4 py-3 text-xs text-[#B91C1C]"
+          data-castora-chrome
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#DC2626]/30 bg-[#FEF2F2] px-4 py-3 text-xs text-[#B91C1C]"
         >
-          {shareError ?? webrtcState?.errorMessage ?? qualityNotice ?? wallNotice}
+          <span>{shareError ?? webrtcState?.errorMessage ?? qualityNotice ?? wallNotice}</span>
+          {onRetryAllFailed &&
+            (webrtcState?.incomingStreams.some((s) => s.phase === 'failed' || s.recovery?.exhausted) ||
+              webrtcState?.outboundPeers.some((o) => o.phase === 'failed' || o.recovery?.exhausted)) && (
+              <button
+                type="button"
+                onClick={onRetryAllFailed}
+                className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg border border-[#DC2626]/30 bg-white px-2.5 text-xs font-semibold text-[#DC2626] hover:bg-[#FEE2E2]"
+              >
+                <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                <span>Retry Failed Connections</span>
+              </button>
+            )}
         </div>
       )}
 
@@ -670,7 +766,10 @@ export function MultiViewView({
         const adaptiveEnabled = preferences.adaptiveBitrate !== false;
 
         return (
-          <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-5">
+          <div
+            data-castora-chrome
+            className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-5"
+          >
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
               <div className="space-y-4 lg:col-span-6">
                 <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
@@ -827,7 +926,7 @@ export function MultiViewView({
                               : 'border-[#E2E8F0] bg-white text-[#64748B]'
                           }`}
                         >
-                          {adaptiveEnabled ? 'Adaptive ABR: Auto' : 'Adaptive ABR: Fixed'}
+                          {adaptiveEnabled ? 'Mode: Auto' : 'Mode: Manual'}
                         </button>
                       </div>
                     </div>
@@ -942,14 +1041,31 @@ export function MultiViewView({
                     <div className="divide-y divide-[#E2E8F0] rounded-lg border border-[#E2E8F0] bg-[#F8FAFC]">
                       {activeOutboundTargets.map((out) => {
                         const overrideCap = out.qualityOverride?.maxBitrateKbps ?? null;
+                        const outQuality = evaluateConnectionQuality({
+                          phase: out.phase,
+                          iceConnectionState: out.iceConnectionState,
+                          telemetry: out.telemetry,
+                          recovery: out.recovery,
+                        });
+                        const canRetryOut =
+                          Boolean(onRetryPeer) &&
+                          (out.phase === 'failed' ||
+                            out.phase === 'disconnected' ||
+                            Boolean(out.recovery?.exhausted));
                         return (
                           <div
                             key={out.targetDeviceId}
                             className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs"
                           >
                             <div className="min-w-0">
-                              <div className="truncate font-medium text-[#172033]">
-                                {out.targetName}
+                              <div className="flex items-center gap-2 truncate font-medium text-[#172033]">
+                                <span>{out.targetName}</span>
+                                <span
+                                  title={outQuality.detail}
+                                  className="text-[11px] font-normal text-[#64748B]"
+                                >
+                                  ({outQuality.label})
+                                </span>
                               </div>
                               <div className="text-[11px] text-[#64748B] tabular-metrics">
                                 {out.telemetry.resolution ?? 'Negotiating'} ·{' '}
@@ -959,6 +1075,16 @@ export function MultiViewView({
                               </div>
                             </div>
                             <div className="flex items-center gap-1">
+                              {canRetryOut && (
+                                <button
+                                  type="button"
+                                  onClick={() => onRetryPeer?.(out.targetDeviceId)}
+                                  className="mr-1 inline-flex items-center gap-1 rounded-md border border-[#DC2626]/30 bg-[#FEF2F2] px-2 py-0.5 text-[11px] font-semibold text-[#DC2626] hover:bg-[#FEE2E2]"
+                                >
+                                  <RotateCcw className="h-2.5 w-2.5" aria-hidden="true" />
+                                  <span>Retry</span>
+                                </button>
+                              )}
                               {[
                                 { label: 'Global', kbps: null },
                                 { label: '10M', kbps: 10_000 },
@@ -1102,6 +1228,25 @@ export function MultiViewView({
           </div>
         )}
       </div>
+
+      {/* Smart Adaptive Streaming Quality Control & Per-Peer Status */}
+      {preferences && onUpdatePreferences && webrtcState && (
+        <AdaptiveQualityPanel
+          preferences={preferences}
+          onUpdatePreferences={onUpdatePreferences}
+          onSetPeerQualityOverride={onSetPeerQualityOverride}
+          webrtcState={webrtcState}
+        />
+      )}
+
+      {/* Real Streaming Quality Diagnostics Panel (hidden automatically in fullscreen via data-castora-chrome) */}
+      {showDiagnostics && preferences && webrtcState && (
+        <StreamingQualityDiagnosticsPanel
+          preferences={preferences}
+          webrtcState={webrtcState}
+          onRetryPeer={onRetryPeer}
+        />
+      )}
 
       {/* Compact Outbound Status Strip when sharing & drawer collapsed */}
       {webrtcState?.isSharingLocal && !showSharePanel && (

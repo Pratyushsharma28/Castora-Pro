@@ -33,13 +33,31 @@ export function createEmptyTelemetry(
     jitterMs: null,
     droppedFrames: null,
     connectionState,
+    captureWidth: null,
+    captureHeight: null,
+    encodedWidth: null,
+    encodedHeight: null,
+    framesSent: null,
+    framesEncoded: null,
+    decodedWidth: null,
+    decodedHeight: null,
+    framesDecoded: null,
+    renderedWidth: null,
+    renderedHeight: null,
     configuredMaxBitrateKbps: null,
     targetBitrateKbps: null,
+    targetFramerate: null,
     availableOutgoingBitrateKbps: null,
     qualityLimitationReason: null,
     codecMimeType: null,
     scaleResolutionDownBy: null,
     adaptationStatus: null,
+    adaptiveMode: null,
+    networkCondition: null,
+    lastAdjustmentReason: null,
+    lastAdjustmentAt: null,
+    lastAdjustmentAction: null,
+    supportedAdaptiveControls: null,
   };
 }
 
@@ -110,10 +128,23 @@ export class WebRtcStatsCollector {
 
     if (params.localVideoTrack && params.localVideoTrack.readyState === 'live') {
       const settings = params.localVideoTrack.getSettings();
-      if (typeof settings.width === 'number' && typeof settings.height === 'number') {
+      if (
+        typeof settings.width === 'number' &&
+        typeof settings.height === 'number' &&
+        Number.isFinite(settings.width) &&
+        Number.isFinite(settings.height) &&
+        settings.width > 0 &&
+        settings.height > 0
+      ) {
+        outbound.captureWidth = settings.width;
+        outbound.captureHeight = settings.height;
         outbound.resolution = `${settings.width}×${settings.height}`;
       }
-      if (typeof settings.frameRate === 'number' && Number.isFinite(settings.frameRate)) {
+      if (
+        typeof settings.frameRate === 'number' &&
+        Number.isFinite(settings.frameRate) &&
+        settings.frameRate > 0
+      ) {
         outbound.captureFps = settings.frameRate;
       }
     }
@@ -220,21 +251,56 @@ export class WebRtcStatsCollector {
 
     if (mediaSource) {
       const ms = mediaSource as Record<string, unknown>;
-      if (typeof ms.framesPerSecond === 'number' && Number.isFinite(ms.framesPerSecond)) {
+      if (
+        target.captureFps === null &&
+        typeof ms.framesPerSecond === 'number' &&
+        Number.isFinite(ms.framesPerSecond) &&
+        ms.framesPerSecond > 0
+      ) {
         target.captureFps = ms.framesPerSecond;
       }
-      if (typeof ms.width === 'number' && typeof ms.height === 'number' && ms.width > 0) {
-        target.resolution = `${ms.width}×${ms.height}`;
+      if (
+        target.captureWidth === null &&
+        typeof ms.width === 'number' &&
+        typeof ms.height === 'number' &&
+        ms.width > 0 &&
+        ms.height > 0
+      ) {
+        target.captureWidth = ms.width;
+        target.captureHeight = ms.height;
+        target.resolution = target.resolution ?? `${ms.width}×${ms.height}`;
       }
     }
+
+    const ri = remoteInbound as Record<string, unknown> | null;
 
     if (outbound) {
       const ob = outbound as Record<string, unknown>;
       const ts = typeof ob.timestamp === 'number' ? ob.timestamp : performance.now();
-      const bytesSent = typeof ob.bytesSent === 'number' ? ob.bytesSent : 0;
-      const framesEncoded = typeof ob.framesEncoded === 'number' ? ob.framesEncoded : 0;
+      const bytesSent =
+        typeof ob.bytesSent === 'number' && Number.isFinite(ob.bytesSent) ? ob.bytesSent : null;
+      const framesEncoded =
+        typeof ob.framesEncoded === 'number' && Number.isFinite(ob.framesEncoded)
+          ? ob.framesEncoded
+          : null;
+      const framesSent =
+        typeof ob.framesSent === 'number' && Number.isFinite(ob.framesSent)
+          ? ob.framesSent
+          : null;
 
-      if (typeof ob.frameWidth === 'number' && typeof ob.frameHeight === 'number' && ob.frameWidth > 0) {
+      target.framesEncoded = framesEncoded;
+      target.framesSent = framesSent;
+
+      if (
+        typeof ob.frameWidth === 'number' &&
+        typeof ob.frameHeight === 'number' &&
+        Number.isFinite(ob.frameWidth) &&
+        Number.isFinite(ob.frameHeight) &&
+        ob.frameWidth > 0 &&
+        ob.frameHeight > 0
+      ) {
+        target.encodedWidth = ob.frameWidth;
+        target.encodedHeight = ob.frameHeight;
         target.resolution = `${ob.frameWidth}×${ob.frameHeight}`;
       }
 
@@ -248,6 +314,10 @@ export class WebRtcStatsCollector {
 
       target.qualityLimitationReason = normalizeLimitationReason(ob.qualityLimitationReason);
 
+      if (typeof ob.framesDropped === 'number' && Number.isFinite(ob.framesDropped)) {
+        target.droppedFrames = ob.framesDropped;
+      }
+
       if (
         typeof ob.targetBitrate === 'number' &&
         Number.isFinite(ob.targetBitrate) &&
@@ -256,27 +326,53 @@ export class WebRtcStatsCollector {
         target.targetBitrateKbps = ob.targetBitrate / 1000;
       }
 
+      const frameCounter = framesEncoded ?? framesSent ?? 0;
+      const packetsSent =
+        typeof ob.packetsSent === 'number' && Number.isFinite(ob.packetsSent)
+          ? ob.packetsSent
+          : 0;
+      const remotePacketsLost =
+        ri &&
+        typeof ri.packetsLost === 'number' &&
+        Number.isFinite(ri.packetsLost)
+          ? Math.max(0, ri.packetsLost)
+          : 0;
+      const packetsTotal = Math.max(0, packetsSent);
+
       if (this.priorOutbound && ts > this.priorOutbound.timestampMs) {
         const dtSec = (ts - this.priorOutbound.timestampMs) / 1000;
-        const dBytes = Math.max(0, bytesSent - this.priorOutbound.bytes);
-        target.bitrateKbps = (dBytes * 8) / 1000 / dtSec;
+        if (bytesSent !== null && bytesSent >= this.priorOutbound.bytes) {
+          const dBytes = bytesSent - this.priorOutbound.bytes;
+          target.bitrateKbps = (dBytes * 8) / 1000 / dtSec;
+        }
 
-        if (target.encodedFps === null && framesEncoded >= this.priorOutbound.frames) {
-          target.encodedFps = (framesEncoded - this.priorOutbound.frames) / dtSec;
+        if (
+          target.encodedFps === null &&
+          (framesEncoded !== null || framesSent !== null) &&
+          frameCounter >= this.priorOutbound.frames
+        ) {
+          target.encodedFps = (frameCounter - this.priorOutbound.frames) / dtSec;
+        }
+
+        if (ri && typeof ri.fractionLost !== 'number') {
+          const dTotal = packetsTotal - this.priorOutbound.packetsTotal;
+          const dLost = Math.max(0, remotePacketsLost - this.priorOutbound.packetsLost);
+          if (dTotal > 0 && typeof ri.packetsLost === 'number') {
+            target.packetLossPct = Math.min(100, (dLost / dTotal) * 100);
+          }
         }
       }
 
       this.priorOutbound = {
         timestampMs: ts,
-        bytes: bytesSent,
-        frames: framesEncoded,
-        packetsLost: 0,
-        packetsTotal: 0,
+        bytes: bytesSent ?? 0,
+        frames: frameCounter,
+        packetsLost: remotePacketsLost,
+        packetsTotal,
       };
     }
 
-    if (remoteInbound) {
-      const ri = remoteInbound as Record<string, unknown>;
+    if (ri) {
       if (typeof ri.roundTripTime === 'number' && Number.isFinite(ri.roundTripTime)) {
         target.rttMs = ri.roundTripTime * 1000;
       }
@@ -285,6 +381,13 @@ export class WebRtcStatsCollector {
       }
       if (typeof ri.jitter === 'number' && Number.isFinite(ri.jitter)) {
         target.jitterMs = ri.jitter * 1000;
+      }
+      if (
+        target.droppedFrames === null &&
+        typeof ri.framesDropped === 'number' &&
+        Number.isFinite(ri.framesDropped)
+      ) {
+        target.droppedFrames = ri.framesDropped;
       }
     }
   }
@@ -312,13 +415,34 @@ export class WebRtcStatsCollector {
 
     const ib = inbound as Record<string, unknown>;
     const ts = typeof ib.timestamp === 'number' ? ib.timestamp : performance.now();
-    const bytesReceived = typeof ib.bytesReceived === 'number' ? ib.bytesReceived : 0;
-    const framesDecoded = typeof ib.framesDecoded === 'number' ? ib.framesDecoded : 0;
-    const packetsLost = typeof ib.packetsLost === 'number' ? ib.packetsLost : 0;
-    const packetsReceived = typeof ib.packetsReceived === 'number' ? ib.packetsReceived : 0;
+    const bytesReceived =
+      typeof ib.bytesReceived === 'number' && Number.isFinite(ib.bytesReceived)
+        ? ib.bytesReceived
+        : null;
+    const framesDecoded =
+      typeof ib.framesDecoded === 'number' && Number.isFinite(ib.framesDecoded)
+        ? ib.framesDecoded
+        : null;
+    const packetsLost =
+      typeof ib.packetsLost === 'number' && Number.isFinite(ib.packetsLost) ? ib.packetsLost : 0;
+    const packetsReceived =
+      typeof ib.packetsReceived === 'number' && Number.isFinite(ib.packetsReceived)
+        ? ib.packetsReceived
+        : 0;
     const packetsTotal = Math.max(0, packetsReceived + Math.max(0, packetsLost));
 
-    if (typeof ib.frameWidth === 'number' && typeof ib.frameHeight === 'number' && ib.frameWidth > 0) {
+    target.framesDecoded = framesDecoded;
+
+    if (
+      typeof ib.frameWidth === 'number' &&
+      typeof ib.frameHeight === 'number' &&
+      Number.isFinite(ib.frameWidth) &&
+      Number.isFinite(ib.frameHeight) &&
+      ib.frameWidth > 0 &&
+      ib.frameHeight > 0
+    ) {
+      target.decodedWidth = ib.frameWidth;
+      target.decodedHeight = ib.frameHeight;
       target.resolution = `${ib.frameWidth}×${ib.frameHeight}`;
     }
 
@@ -340,10 +464,16 @@ export class WebRtcStatsCollector {
 
     if (this.priorInbound && ts > this.priorInbound.timestampMs) {
       const dtSec = (ts - this.priorInbound.timestampMs) / 1000;
-      const dBytes = Math.max(0, bytesReceived - this.priorInbound.bytes);
-      target.bitrateKbps = (dBytes * 8) / 1000 / dtSec;
+      if (bytesReceived !== null && bytesReceived >= this.priorInbound.bytes) {
+        const dBytes = bytesReceived - this.priorInbound.bytes;
+        target.bitrateKbps = (dBytes * 8) / 1000 / dtSec;
+      }
 
-      if (target.decodedFps === null && framesDecoded >= this.priorInbound.frames) {
+      if (
+        target.decodedFps === null &&
+        framesDecoded !== null &&
+        framesDecoded >= this.priorInbound.frames
+      ) {
         target.decodedFps = (framesDecoded - this.priorInbound.frames) / dtSec;
       }
 
@@ -356,8 +486,8 @@ export class WebRtcStatsCollector {
 
     this.priorInbound = {
       timestampMs: ts,
-      bytes: bytesReceived,
-      frames: framesDecoded,
+      bytes: bytesReceived ?? 0,
+      frames: framesDecoded ?? 0,
       packetsLost: Math.max(0, packetsLost),
       packetsTotal,
     };

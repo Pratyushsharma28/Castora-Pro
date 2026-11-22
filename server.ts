@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
+import { buildIceConfigForDevice, getIceConfigStatus } from './apps/server/iceConfig.ts';
 import { createServerEnvelope } from './apps/server/protocolValidator.ts';
 import { RoomManager, toRoomStatePayload } from './apps/server/roomManager.ts';
 import { SlidingWindowRateLimiter } from './apps/server/security.ts';
@@ -74,16 +75,19 @@ function extractBearerToken(req: Request): string {
 function mapRoomErrorStatus(code?: string): number {
   switch (code) {
     case 'INVALID_ROOM_ID':
+    case 'INVALID_DEVICE_NAME':
       return 400;
     case 'UNAUTHORIZED':
       return 403;
     case 'ROOM_NOT_FOUND':
     case 'REQUEST_NOT_FOUND':
     case 'RECEIVER_NOT_FOUND':
+    case 'STREAM_NOT_FOUND':
       return 404;
     case 'ROOM_FULL':
     case 'ALREADY_PAIRED':
     case 'DUPLICATE_PAIR_REQUEST':
+    case 'DUPLICATE_DEVICE_NAME':
       return 409;
     case 'ROOM_EXPIRED':
       return 410;
@@ -122,6 +126,8 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
     options.rateLimitWindowMs ?? 60_000
   );
 
+  const iceRateLimiter = new SlidingWindowRateLimiter(30, 60_000);
+
   const gateway = attachSignalingGateway({
     server,
     roomManager,
@@ -132,6 +138,7 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
   // --- REST API Routes ---
   app.get('/api/health', (_req: Request, res: Response) => {
     const stats = roomManager.getStats();
+    const iceStatus = getIceConfigStatus();
     const body: BackendHealthStatus = {
       status: 'ok',
       service: 'castora-pro-signaling',
@@ -143,9 +150,72 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       activeDevices: stats.activeDevices,
       activeRooms: stats.activeRooms,
       maxReceiversPerRoom: stats.maxReceiversPerRoom,
+      turnConfigured: iceStatus.turnConfigured,
+      turnMode: iceStatus.turnMode,
       timestamp: new Date().toISOString(),
     };
     res.status(200).json(body);
+  });
+
+  app.get('/api/ice-servers', (req: Request, res: Response) => {
+    const clientIp = getClientIp(req);
+    const rate = iceRateLimiter.consume(`http-ice:${clientIp}`);
+    if (!rate.allowed) {
+      res.setHeader('Retry-After', Math.ceil(rate.retryAfterMs / 1000).toString());
+      res.status(429).json({
+        error: 'RATE_LIMITED',
+        message: 'Too many ICE server configuration requests. Try again shortly.',
+      });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    const iceStatus = getIceConfigStatus();
+
+    // When TURN is not configured on the server, return STUN-only fallback safely.
+    if (!iceStatus.turnConfigured) {
+      const stunOnly = buildIceConfigForDevice('anonymous');
+      res.status(200).json(stunOnly);
+      return;
+    }
+
+    const roomId = typeof req.query.roomId === 'string' ? req.query.roomId.trim().toUpperCase() : '';
+    const requestedDeviceId =
+      typeof req.query.deviceId === 'string' ? req.query.deviceId.trim() : undefined;
+    const token = extractBearerToken(req);
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !token) {
+      res.status(403).json({
+        error: 'UNAUTHORIZED',
+        message: 'Valid roomId and approved member Bearer token required for TURN credentials',
+      });
+      return;
+    }
+
+    if (requestedDeviceId && !DEVICE_ID_REGEX.test(requestedDeviceId)) {
+      res.status(400).json({
+        error: 'INVALID_REQUEST',
+        message: 'Invalid deviceId format',
+      });
+      return;
+    }
+
+    const verified = roomManager.verifyAuthorizedMemberSession({
+      roomId,
+      deviceId: requestedDeviceId,
+      token,
+    });
+    if (!verified.ok) {
+      res.status(mapRoomErrorStatus(verified.code)).json({
+        error: verified.code,
+        message: verified.message,
+      });
+      return;
+    }
+
+    // Never log ephemeral TURN credentials returned here
+    const iceConfig = buildIceConfigForDevice(verified.deviceId);
+    res.status(200).json(iceConfig);
   });
 
   app.post('/api/rooms', (req: Request, res: Response) => {
@@ -153,6 +223,7 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       hostDeviceId?: unknown;
       hostDeviceName?: unknown;
       hostPlatform?: unknown;
+      hostDeviceType?: unknown;
       ttlMs?: unknown;
     };
 
@@ -182,8 +253,17 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       hostDeviceId,
       hostDeviceName,
       hostPlatform,
+      hostDeviceType: body?.hostDeviceType,
       ttlMs: requestedTtl,
     });
+
+    if (!created.ok) {
+      res.status(mapRoomErrorStatus(created.code)).json({
+        error: created.code,
+        message: created.message,
+      });
+      return;
+    }
 
     // Security: never log hostToken
     res.status(201).json({
@@ -242,6 +322,7 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       receiverDeviceId?: unknown;
       deviceName?: unknown;
       platform?: unknown;
+      deviceType?: unknown;
       pairingMethod?: unknown;
     };
 
@@ -280,6 +361,7 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       receiverDeviceId,
       deviceName,
       platform,
+      deviceType: body?.deviceType,
       pairingMethod,
     });
 
@@ -511,6 +593,164 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
     res.status(200).json({ left: true, roomId });
   });
 
+  app.patch('/api/rooms/:roomId/devices/:targetDeviceId/name', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const targetDeviceId = String(req.params.targetDeviceId ?? '').trim();
+    const token = extractBearerToken(req);
+    const body = req.body as { deviceName?: unknown } | undefined;
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !DEVICE_ID_REGEX.test(targetDeviceId) || !token) {
+      res.status(token ? 400 : 403).json({
+        error: token ? 'INVALID_REQUEST' : 'UNAUTHORIZED',
+        message: token
+          ? 'Valid roomId and targetDeviceId required'
+          : 'Authorization Bearer session token required',
+      });
+      return;
+    }
+
+    const renamed = roomManager.renameRoomDevice({
+      roomId,
+      targetDeviceId,
+      newName: typeof body?.deviceName === 'string' ? body.deviceName : '',
+      token,
+    });
+
+    if (!renamed.ok) {
+      res.status(mapRoomErrorStatus(renamed.code)).json({
+        error: renamed.code,
+        message: renamed.message,
+      });
+      return;
+    }
+
+    broadcastRoomState(roomManager, renamed.room);
+    res.status(200).json({
+      room: renamed.room,
+      targetDeviceId: renamed.targetDeviceId,
+      deviceName: renamed.deviceName,
+    });
+  });
+
+  app.post('/api/rooms/:roomId/devices/:targetDeviceId/stop-stream', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const publisherDeviceId = String(req.params.targetDeviceId ?? '').trim();
+    const token = extractBearerToken(req);
+    const body = req.body as { streamTargetDeviceId?: unknown } | undefined;
+    const streamTargetDeviceId =
+      typeof body?.streamTargetDeviceId === 'string' && DEVICE_ID_REGEX.test(body.streamTargetDeviceId.trim())
+        ? body.streamTargetDeviceId.trim()
+        : undefined;
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !DEVICE_ID_REGEX.test(publisherDeviceId) || !token) {
+      res.status(token ? 400 : 403).json({
+        error: token ? 'INVALID_REQUEST' : 'UNAUTHORIZED',
+        message: token
+          ? 'Valid roomId and targetDeviceId required'
+          : 'Authorization Bearer session token required',
+      });
+      return;
+    }
+
+    const stopped = roomManager.stopStreamByControl({
+      roomId,
+      publisherDeviceId,
+      streamTargetDeviceId,
+      token,
+    });
+
+    if (!stopped.ok) {
+      res.status(mapRoomErrorStatus(stopped.code)).json({
+        error: stopped.code,
+        message: stopped.message,
+      });
+      return;
+    }
+
+    emitTerminatedStreams(roomId, stopped.terminatedStreams, 'receiver_closed');
+
+    // Notify the publisher's open signaling socket if a host stopped their stream remotely
+    if (stopped.publisherSocket && stopped.publisherSocket.readyState === 1) {
+      for (const item of stopped.terminatedStreams) {
+        sendJson(
+          stopped.publisherSocket,
+          createServerEnvelope({
+            messageType: 'stream_stop',
+            senderDeviceId: stopped.room.hostDeviceId,
+            receiverDeviceId: stopped.publisherDeviceId,
+            roomId,
+            payload: {
+              sessionId: item.sessionId,
+              streamId: item.streamId,
+              reason: 'receiver_closed',
+            },
+          })
+        );
+      }
+    }
+
+    broadcastRoomState(roomManager, stopped.room);
+    res.status(200).json({
+      room: stopped.room,
+      terminatedCount: stopped.terminatedStreams.length,
+    });
+  });
+
+  app.post('/api/rooms/:roomId/devices/:targetDeviceId/reconnect', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const targetDeviceId = String(req.params.targetDeviceId ?? '').trim();
+    const token = extractBearerToken(req);
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !DEVICE_ID_REGEX.test(targetDeviceId) || !token) {
+      res.status(token ? 400 : 403).json({
+        error: token ? 'INVALID_REQUEST' : 'UNAUTHORIZED',
+        message: token
+          ? 'Valid roomId and targetDeviceId required'
+          : 'Authorization Bearer session token required',
+      });
+      return;
+    }
+
+    const recon = roomManager.authorizeDeviceReconnect({
+      roomId,
+      targetDeviceId,
+      token,
+    });
+
+    if (!recon.ok) {
+      res.status(mapRoomErrorStatus(recon.code)).json({
+        error: recon.code,
+        message: recon.message,
+      });
+      return;
+    }
+
+    if (recon.requestedByHost && recon.targetSocket && recon.targetSocket.readyState === 1) {
+      sendJson(
+        recon.targetSocket,
+        createServerEnvelope({
+          messageType: 'error',
+          senderDeviceId: recon.room.hostDeviceId,
+          receiverDeviceId: recon.targetDeviceId,
+          roomId,
+          payload: {
+            code: 'WEBRTC_NEGOTIATION_FAILED',
+            message: `Reconnect requested by host for room ${roomId}`,
+            recoverable: true,
+            relatedMessageId: null,
+          },
+        })
+      );
+    }
+
+    broadcastRoomState(roomManager, recon.room);
+    res.status(200).json({
+      room: recon.room,
+      targetDeviceId: recon.targetDeviceId,
+      requestedByHost: recon.requestedByHost,
+    });
+  });
+
   app.delete('/api/rooms/:roomId', (req: Request, res: Response) => {
     const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
     const token = extractBearerToken(req);
@@ -633,6 +873,7 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       }
     }
     roomRateLimiter.prune(now);
+    iceRateLimiter.prune(now);
   }, EXPIRY_SWEEP_INTERVAL_MS);
   sweepInterval.unref();
 

@@ -1,11 +1,18 @@
 import { useState } from 'react';
 import { RefreshCw, Save, ShieldAlert, ShieldCheck } from 'lucide-react';
+import type { BackendHealthResponse } from '../services/backendClient';
 import type {
   ActivityEvent,
   BrowserCapabilityReport,
   CapturePreferences,
   NetworkPreferences,
 } from '../types/studio';
+import {
+  QUALITY_PROFILE_ORDER,
+  QUALITY_PROFILES,
+  applyQualityProfileToPreferences,
+  resolveProfileIdFromPreferences,
+} from '../services/videoQualityService';
 import { SignalBadge } from '../components/common/SignalBadge';
 import { ActivityView } from './ActivityView';
 
@@ -17,6 +24,8 @@ interface SettingsViewProps {
   onUpdatePreferences: (next: CapturePreferences) => void;
   networkPrefs: NetworkPreferences;
   onUpdateNetworkPrefs: (next: NetworkPreferences) => void;
+  backendHealth?: BackendHealthResponse | null;
+  onRefreshIceConfig?: () => void;
   capabilities: BrowserCapabilityReport;
   onReprobeCapabilities: () => void;
   activityEvents?: ActivityEvent[];
@@ -36,6 +45,8 @@ export function SettingsView({
   onUpdatePreferences,
   networkPrefs,
   onUpdateNetworkPrefs,
+  backendHealth = null,
+  onRefreshIceConfig,
   capabilities,
   onReprobeCapabilities,
   activityEvents = [],
@@ -109,9 +120,75 @@ export function SettingsView({
           </form>
 
           <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
-            <h2 className="border-b border-[#E2E8F0] pb-2.5 text-sm font-semibold text-[#172033]">
-              Default Capture Quality
-            </h2>
+            <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
+              <h2 className="text-sm font-semibold text-[#172033]">
+                Default Capture Quality
+              </h2>
+              <div
+                role="group"
+                aria-label="Default Adaptive Mode"
+                className="inline-flex rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5"
+              >
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdatePreferences({ ...preferences, adaptiveBitrate: true })
+                  }
+                  className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                    preferences.adaptiveBitrate !== false
+                      ? 'bg-white text-[#172033] shadow-xs'
+                      : 'text-[#64748B] hover:text-[#172033]'
+                  }`}
+                >
+                  Auto
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdatePreferences({ ...preferences, adaptiveBitrate: false })
+                  }
+                  className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                    preferences.adaptiveBitrate === false
+                      ? 'bg-white text-[#172033] shadow-xs'
+                      : 'text-[#64748B] hover:text-[#172033]'
+                  }`}
+                >
+                  Manual
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              {QUALITY_PROFILE_ORDER.map((profileId) => {
+                const prof = QUALITY_PROFILES[profileId];
+                const selected = resolveProfileIdFromPreferences(preferences) === profileId;
+                return (
+                  <button
+                    key={profileId}
+                    type="button"
+                    onClick={() =>
+                      onUpdatePreferences(applyQualityProfileToPreferences(preferences, profileId))
+                    }
+                    className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                      selected
+                        ? 'border-[#2563EB] bg-[#EFF6FF]'
+                        : 'border-[#E2E8F0] bg-[#F8FAFC] hover:border-[#2563EB]/60'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-xs font-semibold text-[#172033]">
+                      <span className={selected ? 'text-[#2563EB]' : ''}>{prof.label}</span>
+                      {prof.isDefault && (
+                        <span className="text-[10px] font-medium text-[#64748B]">Default</span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-[#64748B] tabular-metrics">
+                      {prof.specLabel}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
             <dl className="space-y-2 text-xs">
               <div className="flex items-center justify-between">
                 <dt className="text-[#64748B]">Default Resolution</dt>
@@ -132,9 +209,9 @@ export function SettingsView({
                 </dd>
               </div>
               <div className="flex items-center justify-between">
-                <dt className="text-[#64748B]">Adaptive Bitrate (ABR)</dt>
+                <dt className="text-[#64748B]">Quality Mode</dt>
                 <dd className="font-mono font-medium text-[#172033]">
-                  {preferences.adaptiveBitrate !== false ? 'Auto (getStats)' : 'Fixed Cap'}
+                  {preferences.adaptiveBitrate !== false ? 'Auto (Adaptive getStats)' : 'Manual (Locked)'}
                 </dd>
               </div>
               <div className="flex items-center justify-between">
@@ -158,19 +235,77 @@ export function SettingsView({
                 onLogEvent(
                   'ui',
                   'Capture defaults restored',
-                  'Reset capture defaults to 1080p @ 60 FPS target, 10 Mbps, H264 preferred.'
+                  'Reset capture defaults to High (1080p @ 60 FPS target, 10 Mbps, Auto mode, H264).'
                 );
               }}
               className="min-h-[38px] rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
             >
-              Restore 1080p60 / H.264 Defaults
+              Restore High (1080p60) Defaults
             </button>
           </div>
 
           <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
             <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
               <h2 className="text-sm font-semibold text-[#172033]">Network &amp; ICE Servers</h2>
-              <span className="text-xs text-[#64748B]">Session memory only</span>
+              <div className="flex items-center gap-2">
+                <SignalBadge
+                  label={
+                    (networkPrefs.turnConfigured ?? backendHealth?.turnConfigured)
+                      ? 'TURN Active'
+                      : 'STUN Only'
+                  }
+                  tone={
+                    (networkPrefs.turnConfigured ?? backendHealth?.turnConfigured)
+                      ? 'active'
+                      : 'standby'
+                  }
+                />
+                {onRefreshIceConfig && (
+                  <button
+                    type="button"
+                    onClick={onRefreshIceConfig}
+                    className="inline-flex h-7 items-center gap-1 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-2 text-[11px] font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                  >
+                    <RefreshCw className="h-3 w-3" aria-hidden="true" />
+                    <span>Refresh</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] p-3 text-xs space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[#64748B]">Server Relay Provisioning</span>
+                <span className="font-mono font-semibold text-[#172033]">
+                  {(networkPrefs.turnMode ?? backendHealth?.turnMode ?? 'disabled') ===
+                  'ephemeral-hmac'
+                    ? 'Temporary HMAC Credentials'
+                    : (networkPrefs.turnMode ?? backendHealth?.turnMode) === 'static'
+                      ? 'Server Static TURN'
+                      : 'Disabled (STUN Fallback)'}
+                </span>
+              </div>
+              {networkPrefs.turnTransports && networkPrefs.turnTransports.length > 0 && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[#64748B]">Configured Transports</span>
+                  <span className="font-mono text-[#172033] uppercase">
+                    {networkPrefs.turnTransports.join(', ')}
+                  </span>
+                </div>
+              )}
+              {networkPrefs.turnExpiresAt && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[#64748B]">Credential Expiry</span>
+                  <span className="font-mono text-[#172033] tabular-metrics">
+                    {new Date(networkPrefs.turnExpiresAt).toLocaleTimeString()}
+                  </span>
+                </div>
+              )}
+              <p className="pt-1 text-[11px] leading-relaxed text-[#64748B]">
+                {(networkPrefs.turnConfigured ?? backendHealth?.turnConfigured)
+                  ? 'Approved room members automatically receive short-lived TURN credentials from GET /api/ice-servers.'
+                  : 'No backend TURN server is configured. Castora Pro uses STUN + LAN P2P fallback. See docs/TURN_SETUP.md to enable UDP/TCP/TLS TURN relay.'}
+              </p>
             </div>
 
             <button

@@ -7,9 +7,14 @@ import {
   closeBackendRoom,
   createBackendRoom,
   fetchBackendHealth,
+  fetchBackendIceServers,
+  fetchBackendRoom,
   leaveBackendRoom,
   rejectBackendPairRequest,
   removeBackendReceiver,
+  renameBackendRoomDevice,
+  requestBackendDeviceReconnect,
+  stopBackendDeviceStream,
   submitBackendPairRequest,
   type BackendHealthResponse,
   type PairingLifecycleStatus,
@@ -21,6 +26,7 @@ import {
   loadSavedDeviceName,
   probeBrowserCapabilities,
   saveDeviceName,
+  validateDeviceDisplayName,
 } from './services/browserCapabilities';
 import { createEmptyTelemetry } from './services/streamStatsService';
 import {
@@ -40,6 +46,7 @@ import type {
 } from './types/studio';
 import { ActivityView } from './views/ActivityView';
 import { ControlRoomView } from './views/ControlRoomView';
+import { DevicesView } from './views/DevicesView';
 import { MultiViewView } from './views/MultiViewView';
 import { ReceiversView } from './views/ReceiversView';
 import { SettingsView } from './views/SettingsView';
@@ -68,6 +75,9 @@ function getInitialRouteState(): {
   const viewParam = (params.get('view') ?? '').toLowerCase();
   if (viewParam === 'rooms' || viewParam === 'receivers') {
     return { destination: 'receivers', roomCode: '' };
+  }
+  if (viewParam === 'devices') {
+    return { destination: 'devices', roomCode: '' };
   }
   if (viewParam === 'screens' || viewParam === 'multi-view') {
     return { destination: 'multi-view', roomCode: '' };
@@ -144,7 +154,10 @@ function parseRoomSnapshotFromEnvelope(
     hostDeviceId: String(payload.hostDeviceId ?? ''),
     hostDeviceName: String(payload.hostDeviceName ?? ''),
     hostPlatform: (payload.hostPlatform as RoomSnapshot['hostPlatform']) ?? 'macos',
+    hostDeviceType: (payload.hostDeviceType as RoomSnapshot['hostDeviceType']) ?? 'Unknown',
     hostConnected: Boolean(payload.hostConnected),
+    hostLastSeenAt:
+      typeof payload.hostLastSeenAt === 'string' ? payload.hostLastSeenAt : undefined,
     expiresAt: String(payload.expiresAt ?? ''),
     maxReceivers: Number(payload.maxReceivers ?? 6),
     activeReceiverCount: pairedReceivers.filter((r) => r.connected).length,
@@ -199,6 +212,7 @@ export function App() {
   const roomTokenRef = useRef<string | null>(null);
   const activeRoomIdRef = useRef<string | null>(null);
   const activeRoomRoleRef = useRef<'host' | 'receiver' | null>(null);
+  const networkPrefsRef = useRef<NetworkPreferences>(networkPrefs);
   const signalingClientRef = useRef<CastoraSignalingClient | null>(null);
   const bridgeRef = useRef<WebRtcSignalingBridge | null>(null);
   const sessionStartedAtRef = useRef<number | null>(null);
@@ -265,12 +279,48 @@ export function App() {
     []
   );
 
+  const refreshIceServerConfig = useCallback(
+    async (
+      explicitRoomId?: string | null,
+      explicitToken?: string | null
+    ): Promise<NetworkPreferences | null> => {
+      try {
+        const roomIdToUse =
+          explicitRoomId !== undefined ? explicitRoomId : activeRoomIdRef.current;
+        const tokenToUse =
+          explicitToken !== undefined ? explicitToken : roomTokenRef.current;
+        const res = await fetchBackendIceServers({
+          roomId: roomIdToUse,
+          deviceId,
+          token: tokenToUse,
+        });
+        const nextPrefs: NetworkPreferences = {
+          ...networkPrefsRef.current,
+          serverIceServers: res.iceServers,
+          turnConfigured: res.turnConfigured,
+          turnMode: res.turnMode,
+          turnTransports: res.transports,
+          turnExpiresAt: res.expiresAt,
+        };
+        networkPrefsRef.current = nextPrefs;
+        setNetworkPrefs(nextPrefs);
+        return nextPrefs;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Unable to refresh ICE configuration';
+        logEvent('signaling', 'ICE configuration lookup deferred', msg);
+        return null;
+      }
+    },
+    [deviceId, logEvent]
+  );
+
   if (!bridgeRef.current) {
     bridgeRef.current = new WebRtcSignalingBridge({
       deviceId,
       preferences,
       networkPrefs,
       getSignalingClient: () => signalingClientRef.current,
+      onRefreshIceServers: () => refreshIceServerConfig(),
       callbacks: {
         onStateChange: (snapshot) => {
           setWebrtcState(snapshot);
@@ -284,6 +334,7 @@ export function App() {
   }
 
   useEffect(() => {
+    networkPrefsRef.current = networkPrefs;
     bridgeRef.current?.updateContext({
       deviceId,
       activeRoom,
@@ -324,6 +375,11 @@ export function App() {
         setActiveRoomRole(null);
         setPairingStatus('Expired');
         setPairingDetail(`Room ${snapshot.roomId} expired.`);
+        setNetworkPrefs((prev) => ({
+          ...prev,
+          serverIceServers: undefined,
+          turnExpiresAt: null,
+        }));
         return;
       }
 
@@ -335,6 +391,11 @@ export function App() {
         setActiveRoomRole(null);
         setPairingStatus('Disconnected');
         setPairingDetail(`Room ${snapshot.roomId} was closed by the host.`);
+        setNetworkPrefs((prev) => ({
+          ...prev,
+          serverIceServers: undefined,
+          turnExpiresAt: null,
+        }));
         return;
       }
 
@@ -367,6 +428,9 @@ export function App() {
           } else {
             setPairingStatus('Paired');
             setPairingDetail(`Paired with ${snapshot.hostDeviceName} in room ${snapshot.roomId}.`);
+            if (!networkPrefsRef.current.turnExpiresAt) {
+              void refreshIceServerConfig(snapshot.roomId, roomTokenRef.current);
+            }
           }
         } else if (isPending) {
           setPairingStatus('Awaiting approval');
@@ -379,10 +443,15 @@ export function App() {
           setActiveRoomRole(null);
           setPairingStatus('Disconnected');
           setPairingDetail('Removed from room.');
+          setNetworkPrefs((prev) => ({
+            ...prev,
+            serverIceServers: undefined,
+            turnExpiresAt: null,
+          }));
         }
       }
     },
-    [deviceId]
+    [deviceId, refreshIceServerConfig]
   );
 
   const connectSignaling = useCallback(
@@ -394,6 +463,7 @@ export function App() {
         deviceId,
         deviceName,
         platform: capabilities.detectedPlatform,
+        deviceType: capabilities.detectedDeviceType,
         capabilities: toProtocolCapabilities(capabilities, preferences),
         roomId,
         token,
@@ -403,15 +473,30 @@ export function App() {
             if (nextState === 'connected') {
               logEvent('signaling', 'Connected to /castora', detail ?? 'Device registered on server.');
               void refreshHealth();
+              if (activeRoomIdRef.current && roomTokenRef.current) {
+                void refreshIceServerConfig(activeRoomIdRef.current, roomTokenRef.current);
+              }
             } else if (nextState === 'error') {
               logEvent('error', 'Signaling socket error', detail ?? 'Unable to connect to /castora.');
             } else if (nextState === 'disconnected') {
               logEvent('signaling', 'Signaling socket disconnected', detail ?? 'Socket closed.');
               if (activeRoomIdRef.current) {
-                setPairingStatus('Disconnected');
-                setPairingDetail('Signaling connection lost. Click reconnect to restore room state.');
+                setPairingDetail('Signaling connection lost. Reconnecting automatically...');
               }
             }
+          },
+          onReconnectScheduled: (attempt, maxAttempts, delayMs) => {
+            setSignalingState('connecting');
+            setPairingDetail(
+              `Signaling interrupted. Reconnecting (${attempt}/${maxAttempts}) in ${Math.round(
+                delayMs / 100
+              ) / 10}s...`
+            );
+            logEvent(
+              'signaling',
+              'Scheduled signaling reconnect',
+              `Attempt ${attempt}/${maxAttempts} in ${delayMs} ms`
+            );
           },
           onEnvelope: (envelope) => {
             if (envelope.messageType === 'room_state' && envelope.roomId) {
@@ -431,6 +516,9 @@ export function App() {
                 setPairingStatus('Paired');
                 setPairingDetail('Host approved pairing request.');
                 logEvent('signaling', 'Pairing approved by host', `Room ${envelope.roomId ?? ''}`);
+                if (envelope.roomId && roomTokenRef.current) {
+                  void refreshIceServerConfig(envelope.roomId, roomTokenRef.current);
+                }
               } else {
                 roomTokenRef.current = null;
                 activeRoomIdRef.current = null;
@@ -452,6 +540,14 @@ export function App() {
                 `Server error (${payload.code ?? 'UNKNOWN'})`,
                 payload.message ?? 'Signaling error received'
               );
+              if (
+                payload.code === 'WEBRTC_NEGOTIATION_FAILED' &&
+                typeof payload.message === 'string' &&
+                payload.message.toLowerCase().includes('reconnect')
+              ) {
+                void bridgeRef.current?.retryAllFailedConnections();
+                void refreshHealth();
+              }
               return;
             }
 
@@ -504,12 +600,14 @@ export function App() {
       logEvent,
       preferences,
       refreshHealth,
+      refreshIceServerConfig,
       syncReceiverLifecycleFromSnapshot,
     ]
   );
 
   useEffect(() => {
     void refreshHealth();
+    void refreshIceServerConfig(null, null);
     connectSignaling(null, null);
     const healthTimer = window.setInterval(() => {
       void refreshHealth();
@@ -526,14 +624,16 @@ export function App() {
 
   const handleReconnectBackend = useCallback(() => {
     void refreshHealth();
+    void refreshIceServerConfig(activeRoomIdRef.current, roomTokenRef.current);
     connectSignaling(activeRoomIdRef.current, roomTokenRef.current);
-  }, [connectSignaling, refreshHealth]);
+  }, [connectSignaling, refreshHealth, refreshIceServerConfig]);
 
   const handleCreateRoom = useCallback(async () => {
     const created = await createBackendRoom({
       hostDeviceId: deviceId,
       hostDeviceName: deviceName,
       hostPlatform: capabilities.detectedPlatform,
+      hostDeviceType: capabilities.detectedDeviceType,
     });
     roomTokenRef.current = created.hostToken;
     activeRoomIdRef.current = created.room.roomId;
@@ -549,8 +649,18 @@ export function App() {
       `Expires at ${new Date(created.room.expiresAt).toLocaleTimeString()}.`
     );
     void refreshHealth();
+    void refreshIceServerConfig(created.room.roomId, created.hostToken);
     return created.room;
-  }, [capabilities.detectedPlatform, connectSignaling, deviceId, deviceName, logEvent, refreshHealth]);
+  }, [
+    capabilities.detectedDeviceType,
+    capabilities.detectedPlatform,
+    connectSignaling,
+    deviceId,
+    deviceName,
+    logEvent,
+    refreshHealth,
+    refreshIceServerConfig,
+  ]);
 
   const handleSubmitPairRequest = useCallback(
     async (roomId: string) => {
@@ -562,6 +672,7 @@ export function App() {
           receiverDeviceId: deviceId,
           deviceName,
           platform: capabilities.detectedPlatform,
+          deviceType: capabilities.detectedDeviceType,
           pairingMethod: 'room_code',
         });
         roomTokenRef.current = submitted.memberToken;
@@ -590,7 +701,15 @@ export function App() {
         throw err;
       }
     },
-    [capabilities.detectedPlatform, connectSignaling, deviceId, deviceName, logEvent, refreshHealth]
+    [
+      capabilities.detectedDeviceType,
+      capabilities.detectedPlatform,
+      connectSignaling,
+      deviceId,
+      deviceName,
+      logEvent,
+      refreshHealth,
+    ]
   );
 
   const handleApproveReceiver = useCallback(
@@ -663,6 +782,11 @@ export function App() {
     setActiveRoomRole(null);
     setPairingStatus('Available');
     setPairingDetail(`Left room ${roomId}.`);
+    setNetworkPrefs((prev) => ({
+      ...prev,
+      serverIceServers: undefined,
+      turnExpiresAt: null,
+    }));
     connectSignaling(null, null);
     logEvent('signaling', `Left room ${roomId}`, 'Receiver membership cleared.');
     void refreshHealth();
@@ -679,12 +803,66 @@ export function App() {
     setActiveRoomRole(null);
     setPairingStatus('Available');
     setPairingDetail(`Room ${roomId} closed.`);
+    setNetworkPrefs((prev) => ({
+      ...prev,
+      serverIceServers: undefined,
+      turnExpiresAt: null,
+    }));
     connectSignaling(null, null);
     logEvent('signaling', `Closed room ${roomId}`, 'Room removed from server.');
     void refreshHealth();
   }, [activeRoom, connectSignaling, logEvent, refreshHealth]);
 
+  const handleRenameDevice = useCallback(
+    async (targetDeviceId: string, newName: string) => {
+      const validationError = validateDeviceDisplayName(newName);
+      if (validationError) {
+        throw new Error(validationError);
+      }
+      const normalized = newName.replace(/\s+/g, ' ').trim();
+
+      if (activeRoom && roomTokenRef.current) {
+        const updated = await renameBackendRoomDevice({
+          roomId: activeRoom.roomId,
+          targetDeviceId,
+          deviceName: normalized,
+          token: roomTokenRef.current,
+        });
+        syncReceiverLifecycleFromSnapshot(updated);
+      }
+
+      if (targetDeviceId === deviceId) {
+        const saved = saveDeviceName(normalized);
+        if (saved) {
+          setDeviceName(saved);
+        }
+      }
+
+      logEvent(
+        'ui',
+        'Device display name updated',
+        `Renamed ${targetDeviceId} to "${normalized}".`
+      );
+    },
+    [activeRoom, deviceId, logEvent, syncReceiverLifecycleFromSnapshot]
+  );
+
   const handleSaveDeviceName = (nextName: string) => {
+    const validationError = validateDeviceDisplayName(nextName);
+    if (validationError) {
+      logEvent('error', 'Invalid device name', validationError);
+      return;
+    }
+    if (activeRoom && roomTokenRef.current) {
+      void handleRenameDevice(deviceId, nextName).catch((err) => {
+        logEvent(
+          'error',
+          'Room device rename rejected',
+          err instanceof Error ? err.message : 'Unable to sync display name with room'
+        );
+      });
+      return;
+    }
     const saved = saveDeviceName(nextName);
     if (saved) {
       setDeviceName(saved);
@@ -734,6 +912,58 @@ export function App() {
     await bridgeRef.current.connectStreamToReceiver(targetReceiverId);
   }, []);
 
+  const handleIncomingVideoDimensions = useCallback(
+    (senderDeviceId: string, width: number | null, height: number | null) => {
+      bridgeRef.current?.updateIncomingRenderedDimensions(senderDeviceId, width, height);
+    },
+    []
+  );
+
+  const handleRetryPeer = useCallback((peerDeviceId: string) => {
+    if (!bridgeRef.current) return;
+    void bridgeRef.current.retryPeerConnection(peerDeviceId);
+  }, []);
+
+  const handleRetryAllFailed = useCallback(() => {
+    if (!bridgeRef.current) return;
+    void bridgeRef.current.retryAllFailedConnections();
+  }, []);
+
+  const handleToggleMutePeer = useCallback((peerDeviceId: string) => {
+    setMutedSlots((prev) => ({
+      ...prev,
+      [peerDeviceId]: !(prev[peerDeviceId] ?? true),
+    }));
+  }, []);
+
+  const handleToggleAdaptiveLock = useCallback(
+    async (targetDeviceId: string, isSelf: boolean, nextLocked: boolean) => {
+      if (isSelf) {
+        await handleUpdatePreferences({
+          ...preferences,
+          adaptiveBitrate: !nextLocked,
+        });
+        return;
+      }
+      await handleSetPeerQualityOverride(targetDeviceId, {
+        adaptiveBitrate: !nextLocked,
+      });
+    },
+    [handleSetPeerQualityOverride, handleUpdatePreferences, preferences]
+  );
+
+  const handleRefreshDevices = useCallback(async () => {
+    await refreshHealth();
+    if (activeRoomIdRef.current) {
+      try {
+        const snapshot = await fetchBackendRoom(activeRoomIdRef.current);
+        syncReceiverLifecycleFromSnapshot(snapshot);
+      } catch {
+        // Room snapshot refresh failed cleanly; health state updated above
+      }
+    }
+  }, [refreshHealth, syncReceiverLifecycleFromSnapshot]);
+
   const handleStopSharing = useCallback(() => {
     if (!bridgeRef.current) return;
     const snap = bridgeRef.current.getSnapshot();
@@ -762,6 +992,64 @@ export function App() {
     bridgeRef.current.stopSharing('user_stopped');
   }, [preferences.resolution]);
 
+  const handleStopDeviceStream = useCallback(
+    async (
+      targetDeviceId: string,
+      mode: 'outbound-to-peer' | 'participant-room-stream'
+    ) => {
+      if (mode === 'outbound-to-peer') {
+        await bridgeRef.current?.stopOutgoingStreamToPeer(targetDeviceId);
+        logEvent(
+          'webrtc',
+          'Stopped individual outgoing stream',
+          `Terminated outbound stream to ${targetDeviceId} without interrupting other peers.`
+        );
+        return;
+      }
+
+      if (targetDeviceId === deviceId) {
+        handleStopSharing();
+        return;
+      }
+
+      if (!activeRoom || !roomTokenRef.current) {
+        throw new Error('Active room session required to stop participant stream.');
+      }
+      const updated = await stopBackendDeviceStream({
+        roomId: activeRoom.roomId,
+        targetDeviceId,
+        token: roomTokenRef.current,
+      });
+      syncReceiverLifecycleFromSnapshot(updated);
+      logEvent(
+        'webrtc',
+        'Stopped participant stream',
+        `Host stopped active room stream for ${targetDeviceId}.`
+      );
+    },
+    [activeRoom, deviceId, handleStopSharing, logEvent, syncReceiverLifecycleFromSnapshot]
+  );
+
+  const handleReconnectDevice = useCallback(
+    async (targetDeviceId: string) => {
+      await bridgeRef.current?.retryPeerConnection(targetDeviceId);
+      if (
+        activeRoom &&
+        roomTokenRef.current &&
+        (activeRoomRole === 'host' || targetDeviceId === deviceId)
+      ) {
+        const updated = await requestBackendDeviceReconnect({
+          roomId: activeRoom.roomId,
+          targetDeviceId,
+          token: roomTokenRef.current,
+        });
+        syncReceiverLifecycleFromSnapshot(updated);
+      }
+      logEvent('webrtc', 'Requested device reconnection', `Target device: ${targetDeviceId}`);
+    },
+    [activeRoom, activeRoomRole, deviceId, logEvent, syncReceiverLifecycleFromSnapshot]
+  );
+
   const receivers: ConnectedReceiverSlot[] = (() => {
     if (!activeRoom) return [];
     const list: ConnectedReceiverSlot[] = [];
@@ -769,17 +1057,28 @@ export function App() {
       const incomingFromHost = webrtcState.incomingStreams.find(
         (s) => s.senderDeviceId === activeRoom.hostDeviceId
       );
+      const outboundToHost = webrtcState.outboundPeers.find(
+        (o) => o.targetDeviceId === activeRoom.hostDeviceId
+      );
       list.push({
         slotIndex: 0,
         receiverDeviceId: activeRoom.hostDeviceId,
         deviceName: `${activeRoom.hostDeviceName} (Host)`,
         platform: activeRoom.hostPlatform,
-        connectionState: incomingFromHost?.phase ?? (activeRoom.hostConnected ? 'idle' : 'disconnected'),
+        connectionState:
+          incomingFromHost?.phase ??
+          outboundToHost?.phase ??
+          (activeRoom.hostConnected ? 'idle' : 'disconnected'),
+        iceConnectionState:
+          incomingFromHost?.iceConnectionState ?? outboundToHost?.iceConnectionState ?? null,
+        errorMessage: incomingFromHost?.errorMessage ?? outboundToHost?.errorMessage ?? null,
+        recovery: incomingFromHost?.recovery ?? outboundToHost?.recovery ?? null,
         stream: incomingFromHost?.stream ?? null,
         hasAudioTrack: Boolean(incomingFromHost?.stream?.getAudioTracks().length),
         muted: mutedSlots[activeRoom.hostDeviceId] ?? true,
         telemetry:
           incomingFromHost?.telemetry ??
+          outboundToHost?.telemetry ??
           createEmptyTelemetry(preferences.targetFps, activeRoom.hostConnected ? 'idle' : 'disconnected'),
       });
     }
@@ -796,6 +1095,9 @@ export function App() {
           incoming?.phase ??
           outbound?.phase ??
           (rx.connected ? 'idle' : 'disconnected'),
+        iceConnectionState: incoming?.iceConnectionState ?? outbound?.iceConnectionState ?? null,
+        errorMessage: incoming?.errorMessage ?? outbound?.errorMessage ?? null,
+        recovery: incoming?.recovery ?? outbound?.recovery ?? null,
         stream: incoming?.stream ?? null,
         hasAudioTrack: Boolean(incoming?.stream?.getAudioTracks().length),
         muted: mutedSlots[rx.deviceId] ?? true,
@@ -814,6 +1116,9 @@ export function App() {
     deviceName: entry.senderName,
     platform: entry.senderPlatform,
     connectionState: entry.phase,
+    iceConnectionState: entry.iceConnectionState,
+    errorMessage: entry.errorMessage,
+    recovery: entry.recovery ?? null,
     stream: entry.stream,
     hasAudioTrack: Boolean(entry.stream?.getAudioTracks().length),
     muted: mutedSlots[entry.senderDeviceId] ?? true,
@@ -876,7 +1181,12 @@ export function App() {
             onStartSharing={handleStartSharing}
             onStopSharing={handleStopSharing}
             onReconnectBackend={handleReconnectBackend}
+            onRetryPeer={handleRetryPeer}
+            onRetryAllFailed={handleRetryAllFailed}
+            mutedByPeerId={mutedSlots}
+            onToggleMutePeer={handleToggleMutePeer}
             onNavigate={setDestination}
+            onIncomingVideoDimensions={handleIncomingVideoDimensions}
           />
         )}
 
@@ -885,6 +1195,7 @@ export function App() {
             deviceId={deviceId}
             deviceName={deviceName}
             capabilities={capabilities}
+            preferences={preferences}
             initialRoomCode={initialRoute.roomCode}
             activePhase={webrtcState.phase}
             signalingState={signalingState}
@@ -893,17 +1204,51 @@ export function App() {
             pairingStatus={pairingStatus}
             pairingDetail={pairingDetail}
             webrtcState={webrtcState}
+            mutedByPeerId={mutedSlots}
             onCreateRoom={handleCreateRoom}
             onSubmitPairRequest={handleSubmitPairRequest}
             onApproveReceiver={handleApproveReceiver}
             onRejectReceiver={handleRejectReceiver}
             onRemoveReceiver={handleRemoveReceiver}
+            onRenameDevice={handleRenameDevice}
+            onStopDeviceStream={handleStopDeviceStream}
+            onReconnectDevice={handleReconnectDevice}
+            onToggleMutePeer={handleToggleMutePeer}
+            onToggleAdaptiveLock={handleToggleAdaptiveLock}
+            onRefreshDevices={handleRefreshDevices}
             onLeaveRoom={handleLeaveRoom}
             onCloseRoom={handleCloseRoom}
             onStartSharing={handleStartSharing}
             onStopSharing={handleStopSharing}
+            onReconnectBackend={handleReconnectBackend}
+            onRetryPeer={handleRetryPeer}
             onNavigate={setDestination}
             onLogEvent={logEvent}
+          />
+        )}
+
+        {destination === 'devices' && (
+          <DevicesView
+            deviceId={deviceId}
+            deviceName={deviceName}
+            capabilities={capabilities}
+            preferences={preferences}
+            signalingState={signalingState}
+            activeRoom={activeRoom}
+            activeRoomRole={activeRoomRole}
+            webrtcState={webrtcState}
+            mutedByPeerId={mutedSlots}
+            onRenameDevice={handleRenameDevice}
+            onApproveReceiver={handleApproveReceiver}
+            onRejectReceiver={handleRejectReceiver}
+            onRemoveReceiver={handleRemoveReceiver}
+            onStopDeviceStream={handleStopDeviceStream}
+            onReconnectDevice={handleReconnectDevice}
+            onToggleMutePeer={handleToggleMutePeer}
+            onToggleAdaptiveLock={handleToggleAdaptiveLock}
+            onViewStream={() => setDestination('multi-view')}
+            onRefresh={handleRefreshDevices}
+            onNavigate={setDestination}
           />
         )}
 
@@ -930,6 +1275,8 @@ export function App() {
             onStartSharing={handleStartSharing}
             onConnectReceiver={handleConnectReceiver}
             onStopSharing={handleStopSharing}
+            onRetryPeer={handleRetryPeer}
+            onRetryAllFailed={handleRetryAllFailed}
             onNavigate={setDestination}
             defaultShowSharePanel={destination === 'cast'}
             onToggleMute={(slotIndex) => {
@@ -943,6 +1290,7 @@ export function App() {
                   }
                 : undefined
             }
+            onIncomingVideoDimensions={handleIncomingVideoDimensions}
             onLogEvent={logEvent}
           />
         )}
@@ -965,6 +1313,10 @@ export function App() {
             }}
             networkPrefs={networkPrefs}
             onUpdateNetworkPrefs={setNetworkPrefs}
+            backendHealth={backendHealth}
+            onRefreshIceConfig={() => {
+              void refreshIceServerConfig(activeRoomIdRef.current, roomTokenRef.current);
+            }}
             capabilities={capabilities}
             onReprobeCapabilities={handleReprobeCapabilities}
             activityEvents={activityEvents}

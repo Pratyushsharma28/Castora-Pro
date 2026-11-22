@@ -1,8 +1,12 @@
 import type { CastoraVideoCodec } from '../types/protocol';
 import type {
   AdaptationStatus,
+  AdaptiveAdjustmentAction,
   CapturePreferences,
   CodecPreference,
+  FrameRateTarget,
+  NetworkConditionLevel,
+  QualityProfileId,
   ResolutionPresetId,
   StreamTelemetrySnapshot,
 } from '../types/studio';
@@ -89,6 +93,90 @@ export const VIDEO_QUALITY_PRESETS: Record<ResolutionPresetId, VideoQualityPrese
   },
 };
 
+export interface QualityProfileSpec {
+  id: QualityProfileId;
+  label: string;
+  specLabel: string;
+  resolution: ResolutionPresetId;
+  targetFps: FrameRateTarget;
+  defaultBitrateKbps: number;
+  isDefault?: boolean;
+}
+
+export const QUALITY_PROFILE_ORDER: QualityProfileId[] = [
+  'standard',
+  'high',
+  'ultra',
+  'maximum',
+];
+
+export const QUALITY_PROFILES: Record<QualityProfileId, QualityProfileSpec> = {
+  standard: {
+    id: 'standard',
+    label: 'Standard',
+    specLabel: '1080p30 · 7.5 Mbps',
+    resolution: '1080p',
+    targetFps: 30,
+    defaultBitrateKbps: 7_500,
+  },
+  high: {
+    id: 'high',
+    label: 'High',
+    specLabel: '1080p60 · 10 Mbps',
+    resolution: '1080p',
+    targetFps: 60,
+    defaultBitrateKbps: 10_000,
+    isDefault: true,
+  },
+  ultra: {
+    id: 'ultra',
+    label: 'Ultra',
+    specLabel: '1440p60 · 20 Mbps',
+    resolution: '1440p',
+    targetFps: 60,
+    defaultBitrateKbps: 20_000,
+  },
+  maximum: {
+    id: 'maximum',
+    label: 'Maximum',
+    specLabel: '4K60 · 40 Mbps',
+    resolution: '4k',
+    targetFps: 60,
+    defaultBitrateKbps: 40_000,
+  },
+};
+
+export function resolveProfileIdFromPreferences(
+  preferences: CapturePreferences
+): QualityProfileId | null {
+  if (preferences.resolution === '1080p' && preferences.targetFps === 30) {
+    return 'standard';
+  }
+  if (preferences.resolution === '1080p' && preferences.targetFps === 60) {
+    return 'high';
+  }
+  if (preferences.resolution === '1440p' && preferences.targetFps === 60) {
+    return 'ultra';
+  }
+  if (preferences.resolution === '4k' && preferences.targetFps === 60) {
+    return 'maximum';
+  }
+  return null;
+}
+
+export function applyQualityProfileToPreferences(
+  current: CapturePreferences,
+  profileId: QualityProfileId
+): CapturePreferences {
+  const profile = QUALITY_PROFILES[profileId] ?? QUALITY_PROFILES.high;
+  return {
+    ...current,
+    resolution: profile.resolution,
+    targetFps: profile.targetFps,
+    maxBitrateKbps: profile.defaultBitrateKbps,
+  };
+}
+
 export interface ResolvedQualityTarget {
   preset: VideoQualityPresetSpec;
   targetWidth: number;
@@ -145,10 +233,8 @@ export function resolveQualityTarget(
     Math.min(55_000, rawBitrate)
   );
 
-  const targetWidth =
-    actualDims?.width ?? preset.targetWidth ?? 1920;
-  const targetHeight =
-    actualDims?.height ?? preset.targetHeight ?? 1080;
+  const targetWidth = actualDims?.width ?? preset.targetWidth ?? 1920;
+  const targetHeight = actualDims?.height ?? preset.targetHeight ?? 1080;
 
   return {
     preset,
@@ -190,7 +276,6 @@ export interface CodecPreferenceResult {
 
 function getH264ProfilePriority(sdpFmtpLine: string | undefined): number {
   const fmtp = (sdpFmtpLine ?? '').toLowerCase();
-  // Prefer packetization-mode=1 and High/Main/Constrained Baseline profiles (hardware-accelerated across macOS/Win/Android)
   const packetizationBonus = fmtp.includes('packetization-mode=1') ? 10 : 0;
   if (fmtp.includes('profile-level-id=6400')) return 40 + packetizationBonus;
   if (fmtp.includes('profile-level-id=4d00')) return 35 + packetizationBonus;
@@ -206,7 +291,14 @@ export function orderVideoCodecsForPreference(
   if (!capabilitiesCodecs || capabilitiesCodecs.length === 0) {
     return {
       orderedCodecs: [],
-      codecHint: preference === 'H264' ? 'H264' : preference === 'VP9' ? 'VP9' : preference === 'AV1' ? 'AV1' : 'VP8',
+      codecHint:
+        preference === 'H264'
+          ? 'H264'
+          : preference === 'VP9'
+            ? 'VP9'
+            : preference === 'AV1'
+              ? 'AV1'
+              : 'VP8',
     };
   }
 
@@ -257,12 +349,83 @@ export function orderVideoCodecsForPreference(
     };
   }
 
-  // AUTO: Prefer efficient screen codecs (H264 hardware-friendly or VP9/AV1) while keeping all fallbacks
   const ordered = [...h264, ...vp9, ...av1, ...vp8, ...rest, ...auxiliary];
   return {
     orderedCodecs: ordered,
     codecHint: h264.length > 0 ? 'H264' : vp9.length > 0 ? 'VP9' : av1.length > 0 ? 'AV1' : 'VP8',
   };
+}
+
+export function formatMbpsLabel(kbps: number): string {
+  return kbps >= 1000 ? `${(kbps / 1000).toFixed(1)} Mbps` : `${Math.round(kbps)} kbps`;
+}
+
+export function assessNetworkCondition(
+  stats: StreamTelemetrySnapshot,
+  referenceBitrateKbps?: number,
+  deltaDroppedFrames = 0
+): NetworkConditionLevel {
+  const hasAnySignal =
+    stats.rttMs !== null ||
+    stats.packetLossPct !== null ||
+    stats.jitterMs !== null ||
+    stats.availableOutgoingBitrateKbps !== null ||
+    stats.qualityLimitationReason !== null ||
+    stats.encodedFps !== null ||
+    stats.droppedFrames !== null;
+
+  if (!hasAnySignal) {
+    return 'unavailable';
+  }
+
+  const packetLoss = stats.packetLossPct ?? 0;
+  const rttMs = stats.rttMs ?? 0;
+  const jitterMs = stats.jitterMs ?? 0;
+  const limiter = stats.qualityLimitationReason ?? 'none';
+  const availableKbps = stats.availableOutgoingBitrateKbps ?? null;
+  const targetFps = stats.targetFps > 0 ? stats.targetFps : 60;
+  const actualFps = stats.encodedFps ?? null;
+
+  const severeFpsShortfall =
+    actualFps !== null && actualFps > 0 && actualFps < Math.max(12, targetFps * 0.45);
+  const moderateFpsShortfall =
+    actualFps !== null && actualFps > 0 && actualFps < Math.max(20, targetFps * 0.7);
+  const availableSevere =
+    availableKbps !== null &&
+    availableKbps > 0 &&
+    Boolean(referenceBitrateKbps && referenceBitrateKbps > 0) &&
+    availableKbps < (referenceBitrateKbps ?? 0) * 0.62;
+  const availableModerate =
+    availableKbps !== null &&
+    availableKbps > 0 &&
+    Boolean(referenceBitrateKbps && referenceBitrateKbps > 0) &&
+    availableKbps < (referenceBitrateKbps ?? 0) * 0.88;
+
+  if (
+    packetLoss >= 4.0 ||
+    rttMs >= 240 ||
+    jitterMs >= 45 ||
+    availableSevere ||
+    deltaDroppedFrames >= 12 ||
+    severeFpsShortfall
+  ) {
+    return 'congested';
+  }
+
+  if (
+    packetLoss >= 1.5 ||
+    rttMs >= 150 ||
+    jitterMs >= 25 ||
+    limiter === 'bandwidth' ||
+    limiter === 'cpu' ||
+    availableModerate ||
+    deltaDroppedFrames >= 4 ||
+    moderateFpsShortfall
+  ) {
+    return 'moderate';
+  }
+
+  return 'healthy';
 }
 
 export interface AdaptiveBitrateDecision {
@@ -272,6 +435,19 @@ export interface AdaptiveBitrateDecision {
   scaleResolutionDownBy: number;
   degradationPreference: RTCDegradationPreference;
   adaptationStatus: AdaptationStatus;
+  adaptiveMode: 'auto' | 'manual';
+  networkCondition: NetworkConditionLevel;
+  lastAdjustmentReason: string | null;
+  lastAdjustmentAt: number | null;
+  lastAdjustmentAction: AdaptiveAdjustmentAction;
+}
+
+export interface AdaptiveControllerOptions {
+  downgradeCooldownMs?: number;
+  severeDowngradeCooldownMs?: number;
+  postDowngradeUpgradeCooldownMs?: number;
+  upgradeCooldownMs?: number;
+  upgradeHealthyStreakRequired?: number;
 }
 
 export class AdaptiveBitrateController {
@@ -280,13 +456,43 @@ export class AdaptiveBitrateController {
   private currentScaleDown = 1.0;
   private currentMaxFramerate: number;
   private currentStatus: AdaptationStatus = 'target';
+  private networkCondition: NetworkConditionLevel = 'unavailable';
   private healthySamplesStreak = 0;
+  private congestedSamplesStreak = 0;
   private lastAdjustmentAtMs = 0;
+  private lastDowngradeAtMs = 0;
+  private lastAdjustmentAt: number | null = null;
+  private lastAdjustmentReason: string | null = null;
+  private lastAdjustmentAction: AdaptiveAdjustmentAction = 'none';
+  private prevDroppedFrames: number | null = null;
 
-  constructor(preferences: CapturePreferences, actualDims?: { width?: number | null; height?: number | null }) {
+  private readonly downgradeCooldownMs: number;
+  private readonly severeDowngradeCooldownMs: number;
+  private readonly postDowngradeUpgradeCooldownMs: number;
+  private readonly upgradeCooldownMs: number;
+  private readonly upgradeHealthyStreakRequired: number;
+
+  constructor(
+    preferences: CapturePreferences,
+    actualDims?: { width?: number | null; height?: number | null },
+    options: AdaptiveControllerOptions = {}
+  ) {
     this.configuredTarget = resolveQualityTarget(preferences, actualDims);
     this.currentBitrateKbps = this.configuredTarget.configuredMaxBitrateKbps;
     this.currentMaxFramerate = this.configuredTarget.targetFps;
+    this.downgradeCooldownMs = Math.max(250, options.downgradeCooldownMs ?? 1800);
+    this.severeDowngradeCooldownMs = Math.max(200, options.severeDowngradeCooldownMs ?? 1000);
+    this.postDowngradeUpgradeCooldownMs = Math.max(
+      500,
+      options.postDowngradeUpgradeCooldownMs ?? 5000
+    );
+    this.upgradeCooldownMs = Math.max(500, options.upgradeCooldownMs ?? 3000);
+    this.upgradeHealthyStreakRequired = Math.max(1, options.upgradeHealthyStreakRequired ?? 2);
+
+    if (!this.configuredTarget.adaptiveEnabled) {
+      this.lastAdjustmentAction = 'manual-locked';
+      this.lastAdjustmentReason = 'Manual quality selected — automatic adaptation disabled.';
+    }
   }
 
   updatePreferences(
@@ -305,34 +511,49 @@ export class AdaptiveBitrateController {
     this.currentMaxFramerate = this.configuredTarget.targetFps;
     this.currentStatus = 'target';
     this.healthySamplesStreak = 0;
+    this.congestedSamplesStreak = 0;
     this.lastAdjustmentAtMs = 0;
+    this.lastDowngradeAtMs = 0;
+    this.prevDroppedFrames = null;
 
-    return {
-      changed: true,
-      targetBitrateKbps: this.currentBitrateKbps,
-      maxFramerate: this.currentMaxFramerate,
-      scaleResolutionDownBy: this.currentScaleDown,
-      degradationPreference: this.selectDegradationPreference(),
-      adaptationStatus: this.currentStatus,
-    };
+    if (!this.configuredTarget.adaptiveEnabled) {
+      this.lastAdjustmentAction = 'manual-locked';
+      this.lastAdjustmentReason = 'Manual quality locked — automatic adaptation paused.';
+    } else {
+      this.lastAdjustmentAction = 'none';
+      this.lastAdjustmentReason = null;
+    }
+
+    return this.buildDecision(true);
   }
 
   getCurrentState(): {
     configuredMaxBitrateKbps: number;
     targetBitrateKbps: number;
+    targetFramerate: number;
     scaleResolutionDownBy: number;
     adaptationStatus: AdaptationStatus;
+    adaptiveMode: 'auto' | 'manual';
+    networkCondition: NetworkConditionLevel;
+    lastAdjustmentReason: string | null;
+    lastAdjustmentAt: number | null;
+    lastAdjustmentAction: AdaptiveAdjustmentAction;
   } {
     return {
       configuredMaxBitrateKbps: this.configuredTarget.configuredMaxBitrateKbps,
       targetBitrateKbps: this.currentBitrateKbps,
+      targetFramerate: this.currentMaxFramerate,
       scaleResolutionDownBy: this.currentScaleDown,
       adaptationStatus: this.currentStatus,
+      adaptiveMode: this.configuredTarget.adaptiveEnabled ? 'auto' : 'manual',
+      networkCondition: this.networkCondition,
+      lastAdjustmentReason: this.lastAdjustmentReason,
+      lastAdjustmentAt: this.lastAdjustmentAt,
+      lastAdjustmentAction: this.lastAdjustmentAction,
     };
   }
 
   private selectDegradationPreference(): RTCDegradationPreference {
-    // Prioritize crisp text & UI resolution at 1440p/4K, balanced under normal 1080p60 motion
     if (
       this.configuredTarget.preset.id === '1440p' ||
       this.configuredTarget.preset.id === '4k'
@@ -340,6 +561,73 @@ export class AdaptiveBitrateController {
       return 'maintain-resolution';
     }
     return 'balanced';
+  }
+
+  private computeDeltaDroppedFrames(droppedFrames: number | null): number {
+    if (droppedFrames === null || !Number.isFinite(droppedFrames) || droppedFrames < 0) {
+      return 0;
+    }
+    if (this.prevDroppedFrames === null) {
+      this.prevDroppedFrames = droppedFrames;
+      return 0;
+    }
+    const delta =
+      droppedFrames >= this.prevDroppedFrames
+        ? droppedFrames - this.prevDroppedFrames
+        : droppedFrames;
+    this.prevDroppedFrames = droppedFrames;
+    return delta;
+  }
+
+  private buildDecision(changed: boolean): AdaptiveBitrateDecision {
+    return {
+      changed,
+      targetBitrateKbps: this.currentBitrateKbps,
+      maxFramerate: this.currentMaxFramerate,
+      scaleResolutionDownBy: this.currentScaleDown,
+      degradationPreference: this.selectDegradationPreference(),
+      adaptationStatus: this.currentStatus,
+      adaptiveMode: this.configuredTarget.adaptiveEnabled ? 'auto' : 'manual',
+      networkCondition: this.networkCondition,
+      lastAdjustmentReason: this.lastAdjustmentReason,
+      lastAdjustmentAt: this.lastAdjustmentAt,
+      lastAdjustmentAction: this.lastAdjustmentAction,
+    };
+  }
+
+  private buildPressureReasons(params: {
+    packetLoss: number;
+    rttMs: number;
+    jitterMs: number;
+    limiter: string;
+    availableKbps: number | null;
+    deltaDropped: number;
+    encodedFps: number | null;
+  }): string {
+    const reasons: string[] = [];
+    if (params.packetLoss >= 1.5) reasons.push(`${params.packetLoss.toFixed(1)}% packet loss`);
+    if (params.rttMs >= 150) reasons.push(`${Math.round(params.rttMs)} ms RTT`);
+    if (params.jitterMs >= 25) reasons.push(`${params.jitterMs.toFixed(1)} ms jitter`);
+    if (
+      params.availableKbps !== null &&
+      params.availableKbps > 0 &&
+      params.availableKbps < this.currentBitrateKbps * 0.88
+    ) {
+      reasons.push(`uplink est. ${formatMbpsLabel(params.availableKbps)}`);
+    }
+    if (params.deltaDropped >= 4) reasons.push(`${params.deltaDropped} dropped frames`);
+    if (
+      params.encodedFps !== null &&
+      params.encodedFps > 0 &&
+      params.encodedFps < Math.max(20, this.configuredTarget.targetFps * 0.7)
+    ) {
+      reasons.push(`FPS dipped to ${params.encodedFps.toFixed(0)}`);
+    }
+    if (params.limiter === 'cpu') reasons.push('encoder CPU limit');
+    else if (params.limiter === 'bandwidth' && reasons.length === 0) {
+      reasons.push('bandwidth congestion');
+    }
+    return reasons.length > 0 ? reasons.join(', ') : 'network congestion';
   }
 
   evaluate(
@@ -354,102 +642,148 @@ export class AdaptiveBitrateController {
       this.configuredTarget.minBitrateKbps
     );
 
+    const deltaDropped = this.computeDeltaDroppedFrames(stats.droppedFrames);
+    this.networkCondition = assessNetworkCondition(stats, this.currentBitrateKbps, deltaDropped);
+
+    // Manual mode protection: NEVER override user-selected profile or bitrate automatically
     if (!this.configuredTarget.adaptiveEnabled) {
       const changed =
         this.currentBitrateKbps !== ceilingKbps ||
         this.currentScaleDown !== 1.0 ||
-        this.currentMaxFramerate !== this.configuredTarget.targetFps;
+        this.currentMaxFramerate !== this.configuredTarget.targetFps ||
+        this.currentStatus !== 'target';
       this.currentBitrateKbps = ceilingKbps;
       this.currentScaleDown = 1.0;
       this.currentMaxFramerate = this.configuredTarget.targetFps;
       this.currentStatus = 'target';
-      return {
-        changed,
-        targetBitrateKbps: this.currentBitrateKbps,
-        maxFramerate: this.currentMaxFramerate,
-        scaleResolutionDownBy: this.currentScaleDown,
-        degradationPreference: this.selectDegradationPreference(),
-        adaptationStatus: this.currentStatus,
-      };
+      this.healthySamplesStreak = 0;
+      this.congestedSamplesStreak = 0;
+      this.lastAdjustmentAction = 'manual-locked';
+      this.lastAdjustmentReason = 'Manual quality locked — automatic adaptation paused.';
+      return this.buildDecision(changed);
+    }
+
+    // When WebRTC statistics are unavailable, avoid blind degradation or false upgrades
+    if (this.networkCondition === 'unavailable') {
+      return this.buildDecision(false);
     }
 
     const packetLoss = stats.packetLossPct ?? 0;
     const rttMs = stats.rttMs ?? 0;
+    const jitterMs = stats.jitterMs ?? 0;
     const limiter = stats.qualityLimitationReason ?? 'none';
     const availableKbps = stats.availableOutgoingBitrateKbps ?? null;
+    const encodedFps = stats.encodedFps ?? null;
 
-    const availableConstrained =
-      availableKbps !== null && availableKbps > 0 && availableKbps < this.currentBitrateKbps * 0.88;
-    const severeNetworkPressure =
-      packetLoss >= 4.5 ||
-      rttMs >= 260 ||
-      (availableKbps !== null && availableKbps > 0 && availableKbps < this.currentBitrateKbps * 0.6);
-    const moderatePressure =
-      limiter === 'bandwidth' ||
-      limiter === 'cpu' ||
-      packetLoss >= 1.8 ||
-      rttMs >= 165 ||
-      availableConstrained;
+    const severePressure = this.networkCondition === 'congested';
+    const moderatePressure = this.networkCondition === 'moderate';
 
-    if (severeNetworkPressure || moderatePressure) {
+    if (severePressure || moderatePressure) {
       this.healthySamplesStreak = 0;
+      this.congestedSamplesStreak += 1;
 
-      // Step down at most once per 1500ms unless severe degradation arrives
-      const minCooldown = severeNetworkPressure ? 800 : 1500;
-      if (nowMs - this.lastAdjustmentAtMs < minCooldown && this.currentBitrateKbps <= ceilingKbps) {
-        return {
-          changed: false,
-          targetBitrateKbps: this.currentBitrateKbps,
-          maxFramerate: this.currentMaxFramerate,
-          scaleResolutionDownBy: this.currentScaleDown,
-          degradationPreference: this.selectDegradationPreference(),
-          adaptationStatus: this.currentStatus,
-        };
+      const minCooldown = severePressure
+        ? this.severeDowngradeCooldownMs
+        : this.downgradeCooldownMs;
+      if (
+        this.lastAdjustmentAtMs > 0 &&
+        nowMs - this.lastAdjustmentAtMs < minCooldown &&
+        this.currentBitrateKbps <= ceilingKbps
+      ) {
+        return this.buildDecision(false);
       }
 
-      const factor = severeNetworkPressure ? 0.65 : 0.78;
+      // Step 1: Always reduce bitrate first
+      const factor = severePressure ? 0.65 : 0.78;
       let nextBitrate = Math.round(this.currentBitrateKbps * factor);
       if (availableKbps !== null && availableKbps > 0 && availableKbps < nextBitrate) {
         nextBitrate = Math.round(availableKbps * 0.85);
       }
-      nextBitrate = Math.max(this.configuredTarget.minBitrateKbps, nextBitrate);
+      nextBitrate = Math.max(this.configuredTarget.minBitrateKbps, Math.min(ceilingKbps, nextBitrate));
 
-      let nextScaleDown = 1.0;
+      // Step 2: Reduce FPS or resolution scaling ONLY when bitrate alone is at/near floor
+      // or sustained CPU/frame-drop pressure requires lowering pixel/frame load.
+      const bitrateAtSmoothFloor = nextBitrate <= this.configuredTarget.minSmoothBitrateKbps;
+      const sustainedPressure = this.congestedSamplesStreak >= 2;
+
+      let nextMaxFps = this.currentMaxFramerate;
       if (
-        (limiter === 'cpu' && this.configuredTarget.targetWidth >= 2560) ||
-        nextBitrate < this.configuredTarget.minSmoothBitrateKbps
+        this.configuredTarget.targetFps > 30 &&
+        ((limiter === 'cpu' && nextBitrate <= ceilingKbps * 0.75) ||
+          (sustainedPressure && nextBitrate <= ceilingKbps * 0.6) ||
+          (deltaDropped >= 10 && bitrateAtSmoothFloor))
       ) {
-        nextScaleDown = nextBitrate < this.configuredTarget.minBitrateKbps * 1.2 ? 2.0 : 1.5;
+        nextMaxFps = 30;
       }
 
-      let nextFps = this.configuredTarget.targetFps;
-      if (limiter === 'cpu' && this.configuredTarget.targetFps > 30 && nextBitrate <= ceilingKbps * 0.65) {
-        nextFps = 30;
+      let nextScaleDown = this.currentScaleDown;
+      if (
+        bitrateAtSmoothFloor ||
+        (limiter === 'cpu' && this.configuredTarget.targetWidth >= 2560 && sustainedPressure)
+      ) {
+        if (nextBitrate <= this.configuredTarget.minBitrateKbps * 1.15 && sustainedPressure) {
+          nextScaleDown = Math.max(nextScaleDown, 2.0);
+        } else {
+          nextScaleDown = Math.max(nextScaleDown, 1.5);
+        }
       }
 
       const changed =
         nextBitrate !== this.currentBitrateKbps ||
         nextScaleDown !== this.currentScaleDown ||
-        nextFps !== this.currentMaxFramerate ||
+        nextMaxFps !== this.currentMaxFramerate ||
         this.currentStatus !== 'degraded';
+
+      if (changed) {
+        const pressureSummary = this.buildPressureReasons({
+          packetLoss,
+          rttMs,
+          jitterMs,
+          limiter,
+          availableKbps,
+          deltaDropped,
+          encodedFps,
+        });
+
+        let action: AdaptiveAdjustmentAction = 'reduced-bitrate';
+        const adjustments: string[] = [];
+        if (nextBitrate < this.currentBitrateKbps) {
+          adjustments.push(`bitrate to ${formatMbpsLabel(nextBitrate)}`);
+        }
+        if (nextMaxFps < this.currentMaxFramerate) {
+          action = 'reduced-fps';
+          adjustments.push(`frame rate to ${nextMaxFps} FPS`);
+        }
+        if (nextScaleDown > this.currentScaleDown) {
+          action = 'reduced-resolution';
+          adjustments.push(`resolution scale ${nextScaleDown.toFixed(1)}× down`);
+        }
+
+        const changeSummary =
+          adjustments.length > 0 ? adjustments.join(' and ') : `bitrate cap ${formatMbpsLabel(nextBitrate)}`;
+        this.lastAdjustmentAction = action;
+        this.lastAdjustmentReason = `Lowered ${changeSummary} due to ${pressureSummary}.`;
+        this.lastAdjustmentAt = nowMs;
+      }
 
       this.currentBitrateKbps = nextBitrate;
       this.currentScaleDown = nextScaleDown;
-      this.currentMaxFramerate = nextFps;
-      this.currentStatus = nextBitrate < ceilingKbps || nextScaleDown > 1.0 ? 'degraded' : 'target';
+      this.currentMaxFramerate = nextMaxFps;
+      this.currentStatus =
+        nextBitrate < ceilingKbps ||
+        nextScaleDown > 1.0 ||
+        nextMaxFps < this.configuredTarget.targetFps
+          ? 'degraded'
+          : 'target';
       this.lastAdjustmentAtMs = nowMs;
+      this.lastDowngradeAtMs = nowMs;
 
-      return {
-        changed,
-        targetBitrateKbps: this.currentBitrateKbps,
-        maxFramerate: this.currentMaxFramerate,
-        scaleResolutionDownBy: this.currentScaleDown,
-        degradationPreference: this.selectDegradationPreference(),
-        adaptationStatus: this.currentStatus,
-      };
+      return this.buildDecision(changed);
     }
 
-    // Network & encoder look healthy -> check recovery toward ceilingKbps
+    // Healthy network sample
+    this.congestedSamplesStreak = 0;
+
     const needsRecovery =
       this.currentBitrateKbps < ceilingKbps ||
       this.currentScaleDown > 1.0 ||
@@ -458,30 +792,32 @@ export class AdaptiveBitrateController {
     if (!needsRecovery) {
       const statusChanged = this.currentStatus !== 'target';
       this.currentStatus = 'target';
-      return {
-        changed: statusChanged,
-        targetBitrateKbps: this.currentBitrateKbps,
-        maxFramerate: this.currentMaxFramerate,
-        scaleResolutionDownBy: this.currentScaleDown,
-        degradationPreference: this.selectDegradationPreference(),
-        adaptationStatus: 'target',
-      };
+      return this.buildDecision(statusChanged);
     }
 
-    const healthyCondition =
+    const healthyForUpgrade =
       limiter === 'none' &&
       packetLoss < 0.8 &&
       rttMs < 130 &&
-      (availableKbps === null || availableKbps >= this.currentBitrateKbps * 1.15);
+      jitterMs < 20 &&
+      (availableKbps === null || availableKbps >= this.currentBitrateKbps * 1.12);
 
-    if (healthyCondition) {
+    if (healthyForUpgrade) {
       this.healthySamplesStreak += 1;
     } else {
       this.healthySamplesStreak = 0;
     }
 
-    if (this.healthySamplesStreak >= 2 && nowMs - this.lastAdjustmentAtMs >= 1500) {
-      let nextBitrate = Math.min(ceilingKbps, Math.round(this.currentBitrateKbps * 1.25));
+    // Hysteresis: wait longer right after any downgrade before stepping back up
+    const elapsedSinceLastAdj = nowMs - this.lastAdjustmentAtMs;
+    const elapsedSinceDowngrade =
+      this.lastDowngradeAtMs > 0 ? nowMs - this.lastDowngradeAtMs : Number.POSITIVE_INFINITY;
+    const cooldownSatisfied =
+      elapsedSinceLastAdj >= this.upgradeCooldownMs &&
+      elapsedSinceDowngrade >= this.postDowngradeUpgradeCooldownMs;
+
+    if (this.healthySamplesStreak >= this.upgradeHealthyStreakRequired && cooldownSatisfied) {
+      let nextBitrate = Math.min(ceilingKbps, Math.round(this.currentBitrateKbps * 1.3));
       if (availableKbps !== null && availableKbps > 0) {
         nextBitrate = Math.min(nextBitrate, Math.round(availableKbps * 0.9));
       }
@@ -489,55 +825,45 @@ export class AdaptiveBitrateController {
 
       const nextScaleDown =
         nextBitrate >= this.configuredTarget.minSmoothBitrateKbps ? 1.0 : this.currentScaleDown;
-      const nextFps =
-        nextBitrate >= ceilingKbps * 0.7 ? this.configuredTarget.targetFps : this.currentMaxFramerate;
+      const nextMaxFps =
+        nextBitrate >= ceilingKbps * 0.65
+          ? this.configuredTarget.targetFps
+          : this.currentMaxFramerate;
 
       const atTarget =
         nextBitrate >= ceilingKbps &&
         nextScaleDown === 1.0 &&
-        nextFps === this.configuredTarget.targetFps;
+        nextMaxFps === this.configuredTarget.targetFps;
 
       const changed =
         nextBitrate !== this.currentBitrateKbps ||
         nextScaleDown !== this.currentScaleDown ||
-        nextFps !== this.currentMaxFramerate;
+        nextMaxFps !== this.currentMaxFramerate ||
+        this.currentStatus !== (atTarget ? 'target' : 'recovering');
+
+      if (changed) {
+        this.lastAdjustmentAction = 'restored';
+        this.lastAdjustmentReason = atTarget
+          ? `Restored target quality (${formatMbpsLabel(nextBitrate)} @ ${nextMaxFps} FPS) after stable network recovery.`
+          : `Stepped quality up toward target (${formatMbpsLabel(nextBitrate)} @ ${nextMaxFps} FPS) on healthy link metrics.`;
+        this.lastAdjustmentAt = nowMs;
+      }
 
       this.currentBitrateKbps = nextBitrate;
       this.currentScaleDown = nextScaleDown;
-      this.currentMaxFramerate = nextFps;
+      this.currentMaxFramerate = nextMaxFps;
       this.currentStatus = atTarget ? 'target' : 'recovering';
       this.lastAdjustmentAtMs = nowMs;
       this.healthySamplesStreak = 0;
 
-      return {
-        changed,
-        targetBitrateKbps: this.currentBitrateKbps,
-        maxFramerate: this.currentMaxFramerate,
-        scaleResolutionDownBy: this.currentScaleDown,
-        degradationPreference: this.selectDegradationPreference(),
-        adaptationStatus: this.currentStatus,
-      };
+      return this.buildDecision(changed);
     }
 
-    if (this.currentStatus === 'degraded' && healthyCondition) {
+    if (this.currentStatus === 'degraded' && healthyForUpgrade) {
       this.currentStatus = 'recovering';
-      return {
-        changed: true,
-        targetBitrateKbps: this.currentBitrateKbps,
-        maxFramerate: this.currentMaxFramerate,
-        scaleResolutionDownBy: this.currentScaleDown,
-        degradationPreference: this.selectDegradationPreference(),
-        adaptationStatus: 'recovering',
-      };
+      return this.buildDecision(true);
     }
 
-    return {
-      changed: false,
-      targetBitrateKbps: this.currentBitrateKbps,
-      maxFramerate: this.currentMaxFramerate,
-      scaleResolutionDownBy: this.currentScaleDown,
-      degradationPreference: this.selectDegradationPreference(),
-      adaptationStatus: this.currentStatus,
-    };
+    return this.buildDecision(false);
   }
 }

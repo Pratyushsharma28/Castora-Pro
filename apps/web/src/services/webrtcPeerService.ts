@@ -1,5 +1,6 @@
 import type { CastoraVideoCodec } from '../types/protocol';
 import type {
+  AdaptiveControlCapabilities,
   CapturePreferences,
   NetworkPreferences,
   StreamTelemetrySnapshot,
@@ -17,21 +18,44 @@ import {
   type AdaptiveBitrateDecision,
 } from './videoQualityService';
 
-export function buildRtcConfiguration(networkPrefs: NetworkPreferences): RTCConfiguration {
-  const iceServers: RTCIceServer[] = [];
-
-  const stunList = networkPrefs.stunUrls
+function parseCommaUrls(raw: string): string[] {
+  return raw
     .split(',')
     .map((u) => u.trim())
-    .filter((u) => u.length > 0);
+    .filter((u) => u.length > 0 && !/\s/.test(u));
+}
 
-  if (stunList.length > 0) {
-    iceServers.push({ urls: stunList });
+export function buildRtcConfiguration(networkPrefs: NetworkPreferences): RTCConfiguration {
+  const iceServers: RTCIceServer[] = [];
+  const seenStun = new Set<string>();
+
+  if (Array.isArray(networkPrefs.serverIceServers)) {
+    for (const server of networkPrefs.serverIceServers) {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      const cleanedUrls = urls.map((u) => String(u).trim()).filter(Boolean);
+      if (cleanedUrls.length === 0) continue;
+      for (const u of cleanedUrls) {
+        if (u.toLowerCase().startsWith('stun:')) {
+          seenStun.add(u);
+        }
+      }
+      const entry: RTCIceServer = { urls: cleanedUrls };
+      if (server.username) entry.username = server.username;
+      if (server.credential) entry.credential = server.credential;
+      iceServers.push(entry);
+    }
   }
 
-  const turnUrl = networkPrefs.turnUrl.trim();
-  if (turnUrl) {
-    const turnServer: RTCIceServer = { urls: turnUrl };
+  const manualStunList = parseCommaUrls(networkPrefs.stunUrls).filter((u) => !seenStun.has(u));
+  if (manualStunList.length > 0) {
+    iceServers.push({ urls: manualStunList });
+  }
+
+  const manualTurnUrls = parseCommaUrls(networkPrefs.turnUrl);
+  if (manualTurnUrls.length > 0) {
+    const turnServer: RTCIceServer = {
+      urls: manualTurnUrls.length === 1 ? manualTurnUrls[0] : manualTurnUrls,
+    };
     if (networkPrefs.turnUsername.trim()) {
       turnServer.username = networkPrefs.turnUsername.trim();
     }
@@ -62,6 +86,7 @@ export interface PeerServiceCallbacks {
   onInboundStream: (stream: MediaStream | null) => void;
   onPhaseChange: (phase: WebRtcConnectionPhase, detail: string) => void;
   onIceConnectionChange: (iceState: RTCIceConnectionState) => void;
+  onConnectionFailure?: (reason: string) => void;
   onStats: (stats: BidirectionalTelemetrySample) => void;
   onError: (message: string) => void;
 }
@@ -87,6 +112,14 @@ export class CastoraWebRtcPeer {
   private localVideoTrack: MediaStreamTrack | null = null;
   private videoSender: RTCRtpSender | null = null;
   private audioSender: RTCRtpSender | null = null;
+  private supportedControls: AdaptiveControlCapabilities = {
+    supportsSetParameters: true,
+    supportsMaxBitrate: true,
+    supportsMaxFramerate: true,
+    supportsScaleResolutionDownBy: true,
+    supportsDegradationPreference: true,
+    lastError: null,
+  };
 
   private inboundStream: MediaStream | null = null;
   private lastInboundStream: MediaStream | null = null;
@@ -98,6 +131,10 @@ export class CastoraWebRtcPeer {
   private makingOffer = false;
   private ignoreOffer = false;
   private pendingRenegotiation = false;
+  private pendingIceRestart = false;
+  private iceRestartInFlight = false;
+  private iceDisconnectGraceMs = 1500;
+  private failureNotified = false;
   private negotiationQueue: Promise<void> = Promise.resolve();
   private disposed = false;
   private callbacks: PeerServiceCallbacks;
@@ -110,6 +147,7 @@ export class CastoraWebRtcPeer {
     networkPrefs: NetworkPreferences;
     callbacks: PeerServiceCallbacks;
     rtcFactory?: (config: RTCConfiguration) => RTCPeerConnection;
+    iceDisconnectGraceMs?: number;
   }) {
     if (!params.rtcFactory && typeof RTCPeerConnection === 'undefined') {
       throw new Error('RTCPeerConnection is not supported in this browser.');
@@ -124,12 +162,52 @@ export class CastoraWebRtcPeer {
     this.outboundTargetFps = params.targetFps;
     this.inboundTargetFps = params.targetFps;
     this.callbacks = params.callbacks;
+    if (typeof params.iceDisconnectGraceMs === 'number' && params.iceDisconnectGraceMs >= 0) {
+      this.iceDisconnectGraceMs = params.iceDisconnectGraceMs;
+    }
     this.statsCollector = new WebRtcStatsCollector('bidirectional');
 
     const config = buildRtcConfiguration(params.networkPrefs);
     this.pc = params.rtcFactory ? params.rtcFactory(config) : new RTCPeerConnection(config);
     this.attachPeerListeners(this.pc);
     this.startStatsPolling();
+  }
+
+  getConnectionDiagnostics(): {
+    phase: WebRtcConnectionPhase;
+    connectionState: RTCPeerConnectionState | null;
+    iceConnectionState: RTCIceConnectionState | null;
+    signalingState: RTCSignalingState | null;
+  } {
+    return {
+      phase: this.currentPhase,
+      connectionState: this.pc?.connectionState ?? null,
+      iceConnectionState: this.pc?.iceConnectionState ?? null,
+      signalingState: this.pc?.signalingState ?? null,
+    };
+  }
+
+  getSupportedAdaptiveControls(): AdaptiveControlCapabilities {
+    return { ...this.supportedControls };
+  }
+
+  getAdaptiveState() {
+    return this.abrController?.getCurrentState() ?? null;
+  }
+
+  isHealthy(): boolean {
+    if (this.disposed || !this.pc || this.pc.signalingState === 'closed') {
+      return false;
+    }
+    const iceOk =
+      this.pc.iceConnectionState === 'connected' || this.pc.iceConnectionState === 'completed';
+    const connOk = this.pc.connectionState === 'connected';
+    const hasFailure =
+      this.pc.iceConnectionState === 'failed' ||
+      this.pc.iceConnectionState === 'disconnected' ||
+      this.pc.connectionState === 'failed' ||
+      this.pc.connectionState === 'disconnected';
+    return !hasFailure && (iceOk || connOk) && this.currentPhase === 'connected';
   }
 
   getActiveOutboundStreamId(): string | null {
@@ -262,23 +340,30 @@ export class CastoraWebRtcPeer {
 
       if (state === 'connected' || state === 'completed') {
         this.clearIceRestartTimer();
+        this.iceRestartInFlight = false;
+        this.failureNotified = false;
         this.setPhase('connected', `WebRTC ICE ${state}`);
       } else if (state === 'checking' || state === 'new') {
-        this.setPhase('connecting', `Negotiating ICE (${state})...`);
+        if (this.currentPhase !== 'reconnecting') {
+          this.setPhase('connecting', `Negotiating ICE (${state})...`);
+        }
       } else if (state === 'disconnected') {
-        this.setPhase('reconnecting', 'ICE connection interrupted. Attempting recovery...');
-        this.scheduleIceRestartIfInitiator();
+        this.failureNotified = false;
+        this.setPhase(
+          'reconnecting',
+          'Temporary ICE interruption detected. Attempting automatic ICE recovery...'
+        );
+        this.scheduleIceRestart();
       } else if (state === 'failed') {
         this.clearIceRestartTimer();
-        this.setPhase(
-          'failed',
-          'ICE connectivity failed. Devices on isolated subnets or symmetric NAT may require a TURN relay in Settings.'
-        );
-        this.callbacks.onError(
-          'ICE connectivity failed. Check local network firewall or configure a TURN server in Settings.'
-        );
+        this.iceRestartInFlight = false;
+        const reason =
+          'ICE connectivity failed. Devices on isolated subnets or symmetric NAT may require a TURN relay in Settings.';
+        this.setPhase('failed', reason);
+        this.notifyFailureOnce(reason);
       } else if (state === 'closed') {
         this.clearIceRestartTimer();
+        this.iceRestartInFlight = false;
         this.setPhase('disconnected', 'Peer connection closed.');
       }
     };
@@ -288,21 +373,40 @@ export class CastoraWebRtcPeer {
       const state = pc.connectionState;
       if (state === 'connected') {
         this.clearIceRestartTimer();
+        this.iceRestartInFlight = false;
+        this.failureNotified = false;
         this.setPhase('connected', 'WebRTC peer connection established.');
       } else if (state === 'connecting') {
         if (this.currentPhase !== 'reconnecting') {
           this.setPhase('connecting', 'Establishing DTLS/SRTP peer session...');
         }
+      } else if (state === 'disconnected') {
+        this.failureNotified = false;
+        this.setPhase(
+          'reconnecting',
+          'Peer connection interrupted temporarily. Waiting for ICE recovery...'
+        );
+        this.scheduleIceRestart();
       } else if (state === 'failed') {
         this.clearIceRestartTimer();
-        this.setPhase(
-          'failed',
-          'WebRTC peer connection failed. Verify network reachability or configure optional TURN relay.'
-        );
+        this.iceRestartInFlight = false;
+        const reason =
+          'WebRTC peer connection failed. Verify network reachability or configure a TURN relay.';
+        this.setPhase('failed', reason);
+        this.notifyFailureOnce(reason);
       } else if (state === 'closed') {
+        this.clearIceRestartTimer();
+        this.iceRestartInFlight = false;
         this.setPhase('disconnected', 'WebRTC peer connection closed.');
       }
     };
+  }
+
+  private notifyFailureOnce(reason: string): void {
+    if (this.disposed || this.failureNotified) return;
+    this.failureNotified = true;
+    this.callbacks.onError(reason);
+    this.callbacks.onConnectionFailure?.(reason);
   }
 
   private clearIceRestartTimer(): void {
@@ -312,23 +416,71 @@ export class CastoraWebRtcPeer {
     }
   }
 
-  private scheduleIceRestartIfInitiator(): void {
-    // Only the impolite peer schedules automatic ICE restart to prevent simultaneous restart collisions;
-    // Perfect Negotiation handles collisions if both sides renegotiate anyway.
-    if (this.polite || this.iceRestartTimer !== null) {
+  private scheduleIceRestart(): void {
+    if (this.iceRestartTimer !== null || this.iceRestartInFlight) {
       return;
     }
+    // Impolite peer attempts ICE restart quickly; polite peer waits slightly longer as fallback
+    // so both sides do not race simultaneously while still recovering if the remote peer stalled.
+    const delayMs = this.polite
+      ? Math.max(this.iceDisconnectGraceMs * 2, this.iceDisconnectGraceMs + 1000)
+      : this.iceDisconnectGraceMs;
+
     this.iceRestartTimer = globalThis.setTimeout(() => {
       this.iceRestartTimer = null;
       if (this.disposed || !this.pc) return;
-      if (
-        this.pc.iceConnectionState !== 'disconnected' &&
-        this.pc.iceConnectionState !== 'failed'
-      ) {
+      const iceDisconnected =
+        this.pc.iceConnectionState === 'disconnected' ||
+        this.pc.iceConnectionState === 'failed';
+      const connDisconnected =
+        this.pc.connectionState === 'disconnected' ||
+        this.pc.connectionState === 'failed';
+      if (!iceDisconnected && !connDisconnected) {
         return;
       }
-      void this.enqueueNegotiation(true);
-    }, 2500) as unknown as number;
+      void this.triggerIceRestart();
+    }, delayMs) as unknown as number;
+  }
+
+  async triggerIceRestart(): Promise<boolean> {
+    if (this.disposed || !this.pc || this.pc.signalingState === 'closed') {
+      return false;
+    }
+    if (this.isHealthy()) {
+      return false;
+    }
+    if (this.iceRestartInFlight) {
+      return false;
+    }
+
+    this.clearIceRestartTimer();
+    this.iceRestartInFlight = true;
+    this.setPhase('reconnecting', 'Performing WebRTC ICE restart...');
+
+    try {
+      if (typeof this.pc.restartIce === 'function') {
+        this.pc.restartIce();
+      }
+      await this.enqueueNegotiation(true);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.iceRestartInFlight = false;
+    }
+  }
+
+  async requestInboundRecoveryOffer(): Promise<void> {
+    await this.enqueueOperation(async () => {
+      if (this.disposed || !this.pc || this.pc.signalingState === 'closed') return;
+      if (typeof this.pc.addTransceiver === 'function') {
+        const transceivers = this.pc.getTransceivers?.() ?? [];
+        if (transceivers.length === 0) {
+          this.pc.addTransceiver('video', { direction: 'recvonly' });
+        }
+      }
+      await this.negotiateOfferInternal(true);
+    });
   }
 
   async sampleAndAdaptStats(nowMs?: number): Promise<BidirectionalTelemetrySample> {
@@ -359,8 +511,15 @@ export class CastoraWebRtcPeer {
       const abrState = this.abrController.getCurrentState();
       snapshot.outbound.configuredMaxBitrateKbps = abrState.configuredMaxBitrateKbps;
       snapshot.outbound.targetBitrateKbps = abrState.targetBitrateKbps;
+      snapshot.outbound.targetFramerate = abrState.targetFramerate;
       snapshot.outbound.scaleResolutionDownBy = abrState.scaleResolutionDownBy;
       snapshot.outbound.adaptationStatus = abrState.adaptationStatus;
+      snapshot.outbound.adaptiveMode = abrState.adaptiveMode;
+      snapshot.outbound.networkCondition = abrState.networkCondition;
+      snapshot.outbound.lastAdjustmentReason = abrState.lastAdjustmentReason;
+      snapshot.outbound.lastAdjustmentAt = abrState.lastAdjustmentAt;
+      snapshot.outbound.lastAdjustmentAction = abrState.lastAdjustmentAction;
+      snapshot.outbound.supportedAdaptiveControls = { ...this.supportedControls };
       if (!snapshot.outbound.codecMimeType) {
         snapshot.outbound.codecMimeType = this.outboundCodecHint;
       }
@@ -377,7 +536,7 @@ export class CastoraWebRtcPeer {
     if (typeof window === 'undefined') return;
     this.statsTimer = window.setInterval(() => {
       void this.sampleAndAdaptStats();
-    }, 1000);
+    }, 2000);
   }
 
   private stopStatsPolling(): void {
@@ -401,21 +560,103 @@ export class CastoraWebRtcPeer {
   }
 
   private async applySenderEncodingDecision(decision: AdaptiveBitrateDecision): Promise<void> {
-    if (!this.videoSender || typeof this.videoSender.getParameters !== 'function') {
+    if (
+      !this.videoSender ||
+      typeof this.videoSender.getParameters !== 'function' ||
+      typeof this.videoSender.setParameters !== 'function'
+    ) {
+      this.supportedControls = {
+        supportsSetParameters: false,
+        supportsMaxBitrate: false,
+        supportsMaxFramerate: false,
+        supportsScaleResolutionDownBy: false,
+        supportsDegradationPreference: false,
+        lastError: 'RTCRtpSender.setParameters is unavailable in this browser.',
+      };
       return;
     }
+
+    const maxBitrateBps = Math.round(decision.targetBitrateKbps * 1000);
+
     try {
       const senderParams = this.videoSender.getParameters();
       if (!senderParams.encodings || senderParams.encodings.length === 0) {
         senderParams.encodings = [{}];
       }
-      senderParams.encodings[0].maxBitrate = Math.round(decision.targetBitrateKbps * 1000);
+      senderParams.encodings[0].maxBitrate = maxBitrateBps;
       senderParams.encodings[0].maxFramerate = decision.maxFramerate;
       senderParams.encodings[0].scaleResolutionDownBy = decision.scaleResolutionDownBy;
       senderParams.degradationPreference = decision.degradationPreference;
       await this.videoSender.setParameters(senderParams);
-    } catch {
-      // Optional encoding parameters may be rejected on restricted browser implementations
+      this.supportedControls = {
+        supportsSetParameters: true,
+        supportsMaxBitrate: true,
+        supportsMaxFramerate: true,
+        supportsScaleResolutionDownBy: true,
+        supportsDegradationPreference: true,
+        lastError: null,
+      };
+      return;
+    } catch (fullErr) {
+      const errMsg =
+        fullErr instanceof Error ? fullErr.message : 'Partial sender encoding restriction';
+
+      // Fallback 1: Try { maxBitrate, maxFramerate } without scaleResolutionDownBy / degradationPreference
+      try {
+        const fallback1 = this.videoSender.getParameters();
+        if (!fallback1.encodings || fallback1.encodings.length === 0) {
+          fallback1.encodings = [{}];
+        }
+        fallback1.encodings[0].maxBitrate = maxBitrateBps;
+        fallback1.encodings[0].maxFramerate = decision.maxFramerate;
+        delete fallback1.encodings[0].scaleResolutionDownBy;
+        delete fallback1.degradationPreference;
+        await this.videoSender.setParameters(fallback1);
+        this.supportedControls = {
+          supportsSetParameters: true,
+          supportsMaxBitrate: true,
+          supportsMaxFramerate: true,
+          supportsScaleResolutionDownBy: false,
+          supportsDegradationPreference: false,
+          lastError: errMsg,
+        };
+        return;
+      } catch {
+        // Continue to bitrate-only fallback
+      }
+
+      // Fallback 2: Try { maxBitrate } only
+      try {
+        const fallback2 = this.videoSender.getParameters();
+        if (!fallback2.encodings || fallback2.encodings.length === 0) {
+          fallback2.encodings = [{}];
+        }
+        fallback2.encodings[0].maxBitrate = maxBitrateBps;
+        delete fallback2.encodings[0].maxFramerate;
+        delete fallback2.encodings[0].scaleResolutionDownBy;
+        delete fallback2.degradationPreference;
+        await this.videoSender.setParameters(fallback2);
+        this.supportedControls = {
+          supportsSetParameters: true,
+          supportsMaxBitrate: true,
+          supportsMaxFramerate: false,
+          supportsScaleResolutionDownBy: false,
+          supportsDegradationPreference: false,
+          lastError: errMsg,
+        };
+        return;
+      } catch (bitrateErr) {
+        const finalMsg =
+          bitrateErr instanceof Error ? bitrateErr.message : errMsg;
+        this.supportedControls = {
+          supportsSetParameters: false,
+          supportsMaxBitrate: false,
+          supportsMaxFramerate: false,
+          supportsScaleResolutionDownBy: false,
+          supportsDegradationPreference: false,
+          lastError: finalMsg,
+        };
+      }
     }
   }
 
@@ -676,8 +917,12 @@ export class CastoraWebRtcPeer {
   private async negotiateOfferInternal(iceRestart: boolean): Promise<void> {
     if (this.disposed || !this.pc || this.pc.signalingState === 'closed') return;
 
-    if (!iceRestart && this.pc.signalingState !== 'stable') {
-      this.pendingRenegotiation = true;
+    if (this.makingOffer || this.pc.signalingState !== 'stable') {
+      if (iceRestart) {
+        this.pendingIceRestart = true;
+      } else {
+        this.pendingRenegotiation = true;
+      }
       return;
     }
 
@@ -685,8 +930,12 @@ export class CastoraWebRtcPeer {
     try {
       const offer = await this.pc.createOffer(iceRestart ? { iceRestart: true } : undefined);
       if (this.disposed || !this.pc) return;
-      if (!iceRestart && this.pc.signalingState !== 'stable') {
-        this.pendingRenegotiation = true;
+      if (this.pc.signalingState !== 'stable') {
+        if (iceRestart) {
+          this.pendingIceRestart = true;
+        } else {
+          this.pendingRenegotiation = true;
+        }
         return;
       }
 
@@ -770,12 +1019,14 @@ export class CastoraWebRtcPeer {
         throw new Error('Browser produced an empty SDP answer');
       }
 
-      if (this.pendingRenegotiation && this.outboundStream) {
+      if (this.pendingIceRestart || (this.pendingRenegotiation && this.outboundStream)) {
+        const doIceRestart = this.pendingIceRestart;
+        this.pendingIceRestart = false;
         this.pendingRenegotiation = false;
         // Schedule outbound renegotiation right after returning answer
         queueMicrotask(() => {
           if (!this.disposed) {
-            void this.enqueueNegotiation(false);
+            void this.enqueueNegotiation(doIceRestart);
           }
         });
       }
@@ -802,11 +1053,16 @@ export class CastoraWebRtcPeer {
       );
       await this.flushPendingIceCandidates();
 
-      if (this.pendingRenegotiation && (this.pc.signalingState as RTCSignalingState) === 'stable') {
+      if (
+        (this.pendingIceRestart || this.pendingRenegotiation) &&
+        (this.pc.signalingState as RTCSignalingState) === 'stable'
+      ) {
+        const doIceRestart = this.pendingIceRestart;
+        this.pendingIceRestart = false;
         this.pendingRenegotiation = false;
         queueMicrotask(() => {
           if (!this.disposed) {
-            void this.enqueueNegotiation(false);
+            void this.enqueueNegotiation(doIceRestart);
           }
         });
       }

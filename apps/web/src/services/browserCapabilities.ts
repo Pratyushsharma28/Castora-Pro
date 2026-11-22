@@ -1,8 +1,57 @@
 import type { CastoraPlatform } from '../types/protocol';
-import type { BrowserCapabilityReport } from '../types/studio';
+import type { BrowserCapabilityReport, DetectedDeviceType } from '../types/studio';
 
 const DEVICE_ID_STORAGE_KEY = 'castora.web.deviceId';
 const DEVICE_NAME_STORAGE_KEY = 'castora.web.deviceName';
+
+const RESERVED_EXACT_LABELS = new Set<string>([
+  'host',
+  'room host',
+  'admin',
+  'administrator',
+  'system',
+  'server',
+  'castora',
+  'castora server',
+  'castora signaling server',
+  'castora pro',
+  'moderator',
+  'mod',
+  'root',
+  'superuser',
+  'operator',
+  'all',
+  'everyone',
+  'broadcast',
+  'unknown',
+  'you',
+  'me',
+  'anonymous',
+  'null',
+  'undefined',
+  'none',
+  'device',
+  'local',
+  'localhost',
+]);
+
+const MISLEADING_SYSTEM_LABEL_REGEX =
+  /(\[(?:host|admin|administrator|system|server|moderator|mod|you)\]|\((?:host|admin|administrator|system|server|moderator|mod|you)\)|^(?:host|admin|administrator|system|server|moderator)\s*:)/i;
+
+export function validateDeviceDisplayName(raw: string): string | null {
+  const collapsed = raw.replace(/\s+/g, ' ').trim();
+  if (collapsed.length < 2 || collapsed.length > 48) {
+    return 'Device name must be between 2 and 48 characters.';
+  }
+  if (/[\u0000-\u001F\u007F<>]/.test(collapsed)) {
+    return 'Device name contains invalid control or markup characters.';
+  }
+  const canonical = collapsed.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (RESERVED_EXACT_LABELS.has(canonical) || MISLEADING_SYSTEM_LABEL_REGEX.test(collapsed)) {
+    return `"${collapsed}" is a reserved or misleading system label. Choose a descriptive device name.`;
+  }
+  return null;
+}
 
 function detectPlatform(userAgent: string): CastoraPlatform {
   const ua = userAgent.toLowerCase();
@@ -15,8 +64,57 @@ function detectPlatform(userAgent: string): CastoraPlatform {
   return 'macos';
 }
 
-function summarizeUserAgent(userAgent: string): string {
-  const platform = detectPlatform(userAgent);
+export function detectDeviceType(
+  userAgent: string,
+  uaDataPlatform?: string,
+  maxTouchPoints = 0
+): DetectedDeviceType {
+  const ua = (userAgent || '').toLowerCase();
+  const hint = (uaDataPlatform || '').toLowerCase();
+
+  if (!ua && !hint) {
+    return 'Unknown';
+  }
+
+  if (
+    ua.includes('smart-tv') ||
+    ua.includes('smarttv') ||
+    ua.includes('googletv') ||
+    ua.includes('android tv') ||
+    ua.includes('bravia') ||
+    ua.includes('aft') ||
+    ua.includes('tizen') ||
+    ua.includes('webos') ||
+    ua.includes('appletv') ||
+    ua.includes('roku')
+  ) {
+    return 'TV';
+  }
+  if (ua.includes('ipad') || (ua.includes('macintosh') && maxTouchPoints > 1)) {
+    return 'iPad';
+  }
+  if (ua.includes('iphone') || ua.includes('ipod')) {
+    return 'iPhone';
+  }
+  if (ua.includes('cros') || ua.includes('chromebook')) {
+    return 'Chromebook';
+  }
+  if (ua.includes('android') || hint === 'android') {
+    return 'Android';
+  }
+  if (ua.includes('windows') || hint.includes('win')) {
+    return 'Windows';
+  }
+  if (ua.includes('macintosh') || ua.includes('mac os') || hint === 'macos') {
+    return 'Mac';
+  }
+  if (ua.includes('linux') || ua.includes('x11') || hint === 'linux') {
+    return 'Linux';
+  }
+  return 'Unknown';
+}
+
+function summarizeUserAgent(userAgent: string, detectedDeviceType: DetectedDeviceType): string {
   const browser = userAgent.includes('Edg/')
     ? 'Edge'
     : userAgent.includes('Chrome/')
@@ -26,14 +124,7 @@ function summarizeUserAgent(userAgent: string): string {
         : userAgent.includes('Safari/')
           ? 'Safari'
           : 'Browser';
-  const osLabel =
-    platform === 'android-tv'
-      ? 'Android TV'
-      : platform === 'android'
-        ? 'Android'
-        : userAgent.includes('Macintosh')
-          ? 'macOS'
-          : 'Desktop';
+  const osLabel = detectedDeviceType === 'Unknown' ? 'Unknown Device' : detectedDeviceType;
   return `${osLabel} · ${browser}`;
 }
 
@@ -51,11 +142,19 @@ export function probeBrowserCapabilities(): BrowserCapabilityReport {
       supportsBarcodeDetector: false,
       supportsFullscreen: false,
       detectedPlatform: 'macos',
-      userAgentSummary: 'Unavailable',
+      detectedDeviceType: 'Unknown',
+      userAgentSummary: 'Unknown Device',
     };
   }
 
   const ua = navigator.userAgent || '';
+  const navWithUaData = navigator as Navigator & {
+    userAgentData?: { platform?: string };
+  };
+  const uaDataPlatform = navWithUaData.userAgentData?.platform ?? '';
+  const maxTouchPoints = navigator.maxTouchPoints ?? 0;
+  const detectedDeviceType = detectDeviceType(ua, uaDataPlatform, maxTouchPoints);
+
   const senderCaps =
     typeof RTCRtpSender !== 'undefined' && typeof RTCRtpSender.getCapabilities === 'function'
       ? RTCRtpSender.getCapabilities('video')
@@ -94,7 +193,8 @@ export function probeBrowserCapabilities(): BrowserCapabilityReport {
           ?.webkitRequestFullscreen
     ),
     detectedPlatform: detectPlatform(ua),
-    userAgentSummary: summarizeUserAgent(ua),
+    detectedDeviceType,
+    userAgentSummary: summarizeUserAgent(ua, detectedDeviceType),
   };
 }
 

@@ -257,6 +257,10 @@
       "type": "string",
       "enum": ["macos", "android", "android-tv"]
     },
+    "detectedDeviceType": {
+      "type": "string",
+      "enum": ["Mac", "Windows", "Linux", "iPad", "iPhone", "Android", "TV", "Chromebook", "Unknown"]
+    },
     "deviceRole": {
       "type": "string",
       "enum": ["sender", "receiver", "both"]
@@ -594,7 +598,9 @@
         "hostDeviceId": { "$ref": "#/$defs/deviceId" },
         "hostDeviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
         "hostPlatform": { "$ref": "#/$defs/platform" },
+        "hostDeviceType": { "$ref": "#/$defs/detectedDeviceType" },
         "hostConnected": { "type": "boolean" },
+        "hostLastSeenAt": { "type": "string", "format": "date-time" },
         "expiresAt": { "type": "string", "format": "date-time" },
         "maxReceivers": { "type": "integer", "minimum": 1, "maximum": 16 },
         "pendingRequests": {
@@ -607,9 +613,11 @@
               "deviceId": { "$ref": "#/$defs/deviceId" },
               "deviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
               "platform": { "$ref": "#/$defs/platform" },
+              "deviceType": { "$ref": "#/$defs/detectedDeviceType" },
               "pairingMethod": { "type": "string", "enum": ["qr", "room_code", "manual_ip"] },
               "connected": { "type": "boolean" },
               "requestedAt": { "type": "string", "format": "date-time" },
+              "lastSeenAt": { "type": "string", "format": "date-time" },
               "sessionId": { "$ref": "#/$defs/sessionId" }
             }
           }
@@ -624,9 +632,11 @@
               "deviceId": { "$ref": "#/$defs/deviceId" },
               "deviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
               "platform": { "$ref": "#/$defs/platform" },
+              "deviceType": { "$ref": "#/$defs/detectedDeviceType" },
               "connected": { "type": "boolean" },
               "assignedSlotIndex": { "type": "integer", "minimum": 0, "maximum": 15 },
               "pairedAt": { "type": "string", "format": "date-time" },
+              "lastSeenAt": { "type": "string", "format": "date-time" },
               "sessionId": { "$ref": "#/$defs/sessionId" }
             }
           }
@@ -660,6 +670,7 @@
               "height": { "type": "integer", "minimum": 240, "maximum": 2160 },
               "fps": { "type": "integer", "minimum": 1, "maximum": 120 },
               "codec": { "$ref": "#/$defs/videoCodec" },
+              "hasAudio": { "type": "boolean" },
               "startedAt": { "type": "string", "format": "date-time" }
             }
           }

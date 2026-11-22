@@ -6,6 +6,7 @@ import {
   type CastoraPlatform,
   type DeviceCapabilities,
 } from '../types/protocol';
+import type { DetectedDeviceType } from '../types/studio';
 
 export type SignalingSocketState = 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -29,16 +30,29 @@ export interface BackendHealthResponse {
   activeDevices: number;
   activeRooms: number;
   maxReceiversPerRoom: number;
+  turnConfigured?: boolean;
+  turnMode?: 'ephemeral-hmac' | 'static' | 'disabled';
   timestamp: string;
+}
+
+export interface BackendIceServersResponse {
+  iceServers: RTCIceServer[];
+  turnConfigured: boolean;
+  turnMode: 'ephemeral-hmac' | 'static' | 'disabled';
+  transports: Array<'udp' | 'tcp' | 'tls'>;
+  ttlSeconds: number | null;
+  expiresAt: string | null;
 }
 
 export interface PendingRequestInfo {
   deviceId: string;
   deviceName: string;
   platform: CastoraPlatform;
+  deviceType?: DetectedDeviceType;
   pairingMethod: CastoraPairingMethod;
   connected: boolean;
   requestedAt: string;
+  lastSeenAt?: string;
   sessionId: string;
 }
 
@@ -46,9 +60,11 @@ export interface PairedReceiverInfo {
   deviceId: string;
   deviceName: string;
   platform: CastoraPlatform;
+  deviceType?: DetectedDeviceType;
   connected: boolean;
   assignedSlotIndex: number;
   pairedAt: string;
+  lastSeenAt?: string;
   sessionId: string;
 }
 
@@ -63,6 +79,7 @@ export interface ActiveRoomStreamInfo {
   height: number;
   fps: number;
   codec: string;
+  hasAudio?: boolean;
   startedAt: string;
 }
 
@@ -72,7 +89,9 @@ export interface RoomSnapshot {
   hostDeviceId: string;
   hostDeviceName: string;
   hostPlatform: CastoraPlatform;
+  hostDeviceType?: DetectedDeviceType;
   hostConnected: boolean;
+  hostLastSeenAt?: string;
   createdAt?: string;
   expiresAt: string;
   maxReceivers: number;
@@ -115,10 +134,36 @@ export async function fetchBackendHealth(): Promise<BackendHealthResponse> {
   return (await response.json()) as BackendHealthResponse;
 }
 
+export async function fetchBackendIceServers(params?: {
+  roomId?: string | null;
+  deviceId?: string | null;
+  token?: string | null;
+}): Promise<BackendIceServersResponse> {
+  const query = new URLSearchParams();
+  if (params?.roomId) query.set('roomId', params.roomId);
+  if (params?.deviceId) query.set('deviceId', params.deviceId);
+  const qs = query.toString();
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (params?.token) {
+    headers.Authorization = `Bearer ${params.token}`;
+  }
+  const response = await fetch(`/api/ice-servers${qs ? `?${qs}` : ''}`, {
+    method: 'GET',
+    headers,
+    cache: 'no-store',
+  });
+  const data = (await response.json()) as BackendIceServersResponse & { message?: string };
+  if (!response.ok) {
+    throw new Error(data.message ?? `Failed to load ICE servers (HTTP ${response.status})`);
+  }
+  return data;
+}
+
 export async function createBackendRoom(params: {
   hostDeviceId: string;
   hostDeviceName: string;
   hostPlatform: CastoraPlatform;
+  hostDeviceType?: DetectedDeviceType;
 }): Promise<CreateRoomResponse> {
   const response = await fetch('/api/rooms', {
     method: 'POST',
@@ -137,6 +182,7 @@ export async function submitBackendPairRequest(params: {
   receiverDeviceId: string;
   deviceName: string;
   platform: CastoraPlatform;
+  deviceType?: DetectedDeviceType;
   pairingMethod?: CastoraPairingMethod;
 }): Promise<SubmitPairRequestResponse> {
   const response = await fetch(
@@ -148,6 +194,7 @@ export async function submitBackendPairRequest(params: {
         receiverDeviceId: params.receiverDeviceId,
         deviceName: params.deviceName,
         platform: params.platform,
+        deviceType: params.deviceType,
         pairingMethod: params.pairingMethod ?? 'room_code',
       }),
     }
@@ -272,38 +319,153 @@ export async function closeBackendRoom(roomId: string, hostToken: string): Promi
   }
 }
 
+export async function renameBackendRoomDevice(params: {
+  roomId: string;
+  targetDeviceId: string;
+  deviceName: string;
+  token: string;
+}): Promise<RoomSnapshot> {
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/devices/${encodeURIComponent(params.targetDeviceId)}/name`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.token}`,
+      },
+      body: JSON.stringify({ deviceName: params.deviceName }),
+    }
+  );
+  const data = (await response.json()) as { room?: RoomSnapshot; message?: string };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Device rename failed (HTTP ${response.status})`);
+  }
+  return data.room;
+}
+
+export async function stopBackendDeviceStream(params: {
+  roomId: string;
+  targetDeviceId: string;
+  streamTargetDeviceId?: string;
+  token: string;
+}): Promise<RoomSnapshot> {
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/devices/${encodeURIComponent(params.targetDeviceId)}/stop-stream`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.token}`,
+      },
+      body: JSON.stringify(
+        params.streamTargetDeviceId
+          ? { streamTargetDeviceId: params.streamTargetDeviceId }
+          : {}
+      ),
+    }
+  );
+  const data = (await response.json()) as { room?: RoomSnapshot; message?: string };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Stop stream failed (HTTP ${response.status})`);
+  }
+  return data.room;
+}
+
+export async function requestBackendDeviceReconnect(params: {
+  roomId: string;
+  targetDeviceId: string;
+  token: string;
+}): Promise<RoomSnapshot> {
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/devices/${encodeURIComponent(params.targetDeviceId)}/reconnect`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${params.token}`,
+      },
+    }
+  );
+  const data = (await response.json()) as { room?: RoomSnapshot; message?: string };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Reconnect request failed (HTTP ${response.status})`);
+  }
+  return data.room;
+}
+
 export interface SignalingClientHandlers {
   onStateChange: (state: SignalingSocketState, detail?: string) => void;
   onEnvelope: (envelope: CastoraEnvelope) => void;
+  onReconnectScheduled?: (attempt: number, maxAttempts: number, delayMs: number) => void;
 }
 
 export class CastoraSignalingClient {
   private socket: WebSocket | null = null;
   private heartbeatTimer: number | null = null;
+  private reconnectTimer: number | null = null;
+  private reconnectAttempt = 0;
+  private manualDisconnect = false;
   private sequence = 0;
+  private lastConnectParams: {
+    deviceId: string;
+    deviceName: string;
+    platform: CastoraPlatform;
+    deviceType?: DetectedDeviceType;
+    capabilities: DeviceCapabilities;
+    roomId: string | null;
+    token?: string | null;
+    handlers: SignalingClientHandlers;
+    autoReconnect?: boolean;
+    maxReconnectAttempts?: number;
+  } | null = null;
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
 
   connect(params: {
     deviceId: string;
     deviceName: string;
     platform: CastoraPlatform;
+    deviceType?: DetectedDeviceType;
     capabilities: DeviceCapabilities;
     roomId: string | null;
     token?: string | null;
     handlers: SignalingClientHandlers;
+    autoReconnect?: boolean;
+    maxReconnectAttempts?: number;
   }): void {
+    this.clearReconnectTimer();
+    this.lastConnectParams = params;
     this.disconnect(false);
+    this.manualDisconnect = false;
+    this.reconnectAttempt = 0;
+    this.openSocket(params);
+  }
 
+  private openSocket(params: NonNullable<typeof this.lastConnectParams>): void {
     const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const tokenQuery = params.token ? `?token=${encodeURIComponent(params.token)}` : '';
-    const wsUrl = `${scheme}//${window.location.host}/castora${tokenQuery}`;
+    const qs = new URLSearchParams();
+    if (params.token) qs.set('token', params.token);
+    if (params.deviceType) qs.set('deviceType', params.deviceType);
+    const querySuffix = qs.toString() ? `?${qs.toString()}` : '';
+    const wsUrl = `${scheme}//${window.location.host}/castora${querySuffix}`;
 
-    params.handlers.onStateChange('connecting', 'Connecting to /castora signaling gateway...');
+    params.handlers.onStateChange(
+      'connecting',
+      this.reconnectAttempt > 0
+        ? `Reconnecting to /castora (attempt ${this.reconnectAttempt})...`
+        : 'Connecting to /castora signaling gateway...'
+    );
 
     const ws = new WebSocket(wsUrl);
     this.socket = ws;
 
     ws.onopen = () => {
       if (this.socket !== ws) return;
+      this.reconnectAttempt = 0;
       params.handlers.onStateChange('connected', 'Connected to /castora');
 
       const wsPort = Number(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
@@ -371,6 +533,27 @@ export class CastoraSignalingClient {
           'disconnected',
           evt.reason ? `Closed: ${evt.reason}` : 'Signaling socket closed'
         );
+
+        const maxAttempts = params.maxReconnectAttempts ?? 5;
+        const shouldReconnect =
+          !this.manualDisconnect &&
+          params.autoReconnect !== false &&
+          this.reconnectAttempt < maxAttempts &&
+          this.reconnectTimer === null &&
+          typeof window !== 'undefined';
+
+        if (shouldReconnect) {
+          this.reconnectAttempt += 1;
+          const attempt = this.reconnectAttempt;
+          const delayMs = Math.min(10_000, 1000 * Math.pow(2, attempt - 1));
+          params.handlers.onReconnectScheduled?.(attempt, maxAttempts, delayMs);
+          this.reconnectTimer = window.setTimeout(() => {
+            this.reconnectTimer = null;
+            if (!this.manualDisconnect && this.lastConnectParams === params) {
+              this.openSocket(params);
+            }
+          }, delayMs);
+        }
       }
     };
   }
@@ -400,6 +583,8 @@ export class CastoraSignalingClient {
   }
 
   disconnect(sendDisconnectEnvelope = true, deviceId?: string, roomId?: string | null): void {
+    this.manualDisconnect = true;
+    this.clearReconnectTimer();
     if (this.heartbeatTimer !== null) {
       window.clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;

@@ -1,19 +1,41 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import WebSocket from 'ws';
 import type { RoomSnapshot } from '../apps/web/src/services/backendClient.ts';
+import {
+  detectDeviceType,
+  validateDeviceDisplayName,
+} from '../apps/web/src/services/browserCapabilities.ts';
 import {
   ScreenCaptureError,
   buildDisplayMediaConstraints,
   startScreenCapture,
 } from '../apps/web/src/services/screenCaptureService.ts';
 import {
+  buildStageDiagnosticsSummary,
+  evaluateConnectionQuality,
+  evaluateQualityVerification,
+  formatDimensionsLabel,
+} from '../apps/web/src/services/streamingDiagnosticsService.ts';
+import {
+  WebRtcStatsCollector,
+  createEmptyTelemetry,
+} from '../apps/web/src/services/streamStatsService.ts';
+import {
+  AdaptiveBitrateController,
+  QUALITY_PROFILE_ORDER,
+  QUALITY_PROFILES,
   VIDEO_QUALITY_PRESETS,
+  applyQualityProfileToPreferences,
+  assessNetworkCondition,
   computeConcurrencyScaledBitrateKbps,
   orderVideoCodecsForPreference,
+  resolveProfileIdFromPreferences,
   resolveQualityTarget,
 } from '../apps/web/src/services/videoQualityService.ts';
+import { buildRtcConfiguration } from '../apps/web/src/services/webrtcPeerService.ts';
 import { WebRtcSignalingBridge } from '../apps/web/src/services/webrtcSignalingBridge.ts';
 import type { CapturePreferences } from '../apps/web/src/types/studio.ts';
 import type { CastoraEnvelope } from '../apps/web/src/types/protocol.ts';
@@ -144,13 +166,16 @@ async function connectAndAnnounce(params: {
   deviceId: string;
   deviceName: string;
   platform: 'macos' | 'android' | 'android-tv';
+  deviceType?: string;
   role: 'sender' | 'receiver' | 'both';
   roomId: string | null;
   token?: string;
 }): Promise<TestWsClient> {
-  const url = params.token
-    ? `${params.wsUrl}?token=${encodeURIComponent(params.token)}`
-    : params.wsUrl;
+  const qs = new URLSearchParams();
+  if (params.token) qs.set('token', params.token);
+  if (params.deviceType) qs.set('deviceType', params.deviceType);
+  const query = qs.toString();
+  const url = query ? `${params.wsUrl}?${query}` : params.wsUrl;
   const client = new TestWsClient(url);
   await client.waitForOpen();
   const ackPromise = client.waitForMessage(
@@ -1388,7 +1413,9 @@ async function main() {
 
     class FakeRtcPeerConnection {
       static instances: FakeRtcPeerConnection[] = [];
+      static closeEvents: FakeRtcPeerConnection[] = [];
 
+      rtcConfig: RTCConfiguration | null = null;
       signalingState: RTCSignalingState = 'stable';
       iceConnectionState: RTCIceConnectionState = 'connected';
       connectionState: RTCPeerConnectionState = 'connected';
@@ -1403,6 +1430,8 @@ async function main() {
       lastCodecPreferences: RTCRtpCodec[] | null = null;
       videoSetParametersCalls = 0;
       audioSetParametersCalls = 0;
+      restartIceCalls = 0;
+      createOfferCalls: Array<{ iceRestart?: boolean }> = [];
 
       private transceivers: Array<{
         direction: RTCRtpTransceiverDirection;
@@ -1416,7 +1445,8 @@ async function main() {
       }> = [];
       private deliveredRemoteStream: FakeMediaStream | null = null;
 
-      constructor() {
+      constructor(config?: RTCConfiguration) {
+        this.rtcConfig = config ?? null;
         FakeRtcPeerConnection.instances.push(this);
       }
 
@@ -1479,11 +1509,53 @@ async function main() {
         return this.transceivers.map((t) => t.sender);
       }
 
+      addTransceiver(kind: string, init?: { direction?: RTCRtpTransceiverDirection }) {
+        let senderParams: FakeSenderParameters = { encodings: [{}] };
+        const sender = {
+          track: null as { kind?: string } | null,
+          replaceTrack: async (next: { kind?: string } | null) => {
+            sender.track = next;
+          },
+          getParameters: () => ({
+            encodings: senderParams.encodings.map((e) => ({ ...e })),
+            degradationPreference: senderParams.degradationPreference,
+          }),
+          setParameters: async (params: FakeSenderParameters) => {
+            senderParams = {
+              encodings: params.encodings.map((e) => ({ ...e })),
+              degradationPreference: params.degradationPreference,
+            };
+          },
+        };
+        const tr = {
+          kind,
+          direction: init?.direction ?? ('recvonly' as RTCRtpTransceiverDirection),
+          setCodecPreferences: (codecs: RTCRtpCodec[]) => {
+            this.lastCodecPreferences = codecs;
+          },
+          sender,
+        };
+        this.transceivers.push(tr);
+        return tr;
+      }
+
       getTransceivers() {
         return this.transceivers;
       }
 
-      async createOffer() {
+      restartIce() {
+        this.restartIceCalls += 1;
+      }
+
+      emitConnectionDrop(nextState: 'disconnected' | 'failed' | 'connected') {
+        this.iceConnectionState = nextState;
+        this.connectionState = nextState;
+        this.oniceconnectionstatechange?.();
+        this.onconnectionstatechange?.();
+      }
+
+      async createOffer(options?: RTCOfferOptions) {
+        this.createOfferCalls.push({ iceRestart: Boolean(options?.iceRestart) });
         const activeSending = this.transceivers.some(
           (t) =>
             t.sender.track !== null &&
@@ -1559,6 +1631,12 @@ async function main() {
           }
         } else if (desc.type === 'answer') {
           this.signalingState = 'stable';
+          if (this.iceConnectionState === 'connected') {
+            queueMicrotask(() => {
+              this.oniceconnectionstatechange?.();
+              this.onconnectionstatechange?.();
+            });
+          }
         }
       }
 
@@ -1574,6 +1652,7 @@ async function main() {
         this.signalingState = 'closed';
         this.iceConnectionState = 'closed';
         this.connectionState = 'closed';
+        FakeRtcPeerConnection.closeEvents.push(this);
       }
     }
 
@@ -2630,6 +2709,1860 @@ async function main() {
     await cFriend1Ws.close();
     await cFriend2Ws.close();
 
+    // =========================================================================
+    // Stage 4D: Real Streaming Quality Diagnostics (Capture, Outbound RTP, Inbound RTP + <video>)
+    // =========================================================================
+    console.log('\nStarting Stage 4D Real Streaming Quality Diagnostics tests...');
+
+    // 4D.1: Missing & unavailable statistics must safely return null / "Statistics unavailable"
+    const emptyCollector = new WebRtcStatsCollector('bidirectional');
+    const emptyPc = new FakeRtcPeerConnection();
+    emptyPc.mockStatsMap = new Map();
+    const emptySample = await emptyCollector.sampleBidirectional({
+      pc: emptyPc as unknown as RTCPeerConnection,
+      outboundTargetFps: 60,
+      inboundTargetFps: 60,
+      connectionState: 'connected',
+      localVideoTrack: null,
+      hasInboundVideo: true,
+    });
+    assert.equal(emptySample.outbound.captureWidth, null);
+    assert.equal(emptySample.outbound.encodedWidth, null);
+    assert.equal(emptySample.outbound.framesSent, null);
+    assert.equal(emptySample.inbound.decodedWidth, null);
+    assert.equal(emptySample.inbound.framesDecoded, null);
+    assert.equal(formatDimensionsLabel(emptySample.outbound.encodedWidth, emptySample.outbound.encodedHeight), 'Unavailable');
+
+    // Outbound/inbound RTP present WITHOUT frameWidth/frameHeight
+    const partialStatsPc = new FakeRtcPeerConnection();
+    const partialStream = new FakeMediaStream('partial-cap', 'cap', { width: 3840, height: 2160, frameRate: 60 });
+    const partialTrack = partialStream.getVideoTracks()[0] as unknown as MediaStreamTrack;
+    partialStatsPc.mockStatsMap = new Map<string, Record<string, unknown>>([
+      ['out-partial', { type: 'outbound-rtp', kind: 'video', bytesSent: 12000, timestamp: 1000 }],
+      ['in-partial', { type: 'inbound-rtp', kind: 'video', bytesReceived: 12000, timestamp: 1000 }],
+    ]);
+    const partialSample = await emptyCollector.sampleBidirectional({
+      pc: partialStatsPc as unknown as RTCPeerConnection,
+      outboundTargetFps: 60,
+      inboundTargetFps: 60,
+      connectionState: 'connected',
+      localVideoTrack: partialTrack,
+      hasInboundVideo: true,
+    });
+    // Capture dimensions exist from getSettings(), while RTP dimensions stay honestly null
+    assert.equal(partialSample.outbound.captureWidth, 3840);
+    assert.equal(partialSample.outbound.captureHeight, 2160);
+    assert.equal(partialSample.outbound.encodedWidth, null);
+    assert.equal(partialSample.outbound.encodedHeight, null);
+    assert.equal(partialSample.outbound.framesSent, null);
+    assert.equal(partialSample.inbound.decodedWidth, null);
+    assert.equal(partialSample.inbound.framesDecoded, null);
+
+    const unavailableSummary = buildStageDiagnosticsSummary({
+      preferences: prefs4k,
+      connectionState: 'connected',
+      isSharingLocal: true,
+      localCaptureMeta: { width: 3840, height: 2160, fps: 60, hasAudio: false },
+      outboundTelemetry: partialSample.outbound,
+      primaryIncoming: null,
+    });
+    // Even though 4K capture happened, outbound RTP stats are missing -> never claim "4K verified"!
+    assert.equal(unavailableSummary.capture.verification.status, '4K verified');
+    assert.equal(unavailableSummary.outgoing.verification.status, 'Statistics unavailable');
+    assert.equal(unavailableSummary.overallVerification.status, 'Statistics unavailable');
+    assert.equal(unavailableSummary.incoming.verification.status, 'Statistics unavailable');
+    console.log('  [PASS] 4D.1. Missing & unavailable statistics safely reported without crashing or faking 4K verification');
+
+    // 4D.2: Requested 4K with actual 1080p stream -> "Requested quality not achieved"
+    const mismatchCollector = new WebRtcStatsCollector('bidirectional');
+    const mismatchPc = new FakeRtcPeerConnection();
+    const mismatchStream = new FakeMediaStream('mismatch-1080', 'cap', { width: 1920, height: 1080, frameRate: 60 });
+    const mismatchTrack = mismatchStream.getVideoTracks()[0] as unknown as MediaStreamTrack;
+    mismatchPc.mockStatsMap = new Map<string, Record<string, unknown>>([
+      ['codec-h264', { type: 'codec', id: 'codec-h264', mimeType: 'video/H264' }],
+      ['out-1', { type: 'outbound-rtp', kind: 'video', codecId: 'codec-h264', bytesSent: 1_000_000, timestamp: 1000, framesSent: 60, framesEncoded: 60, frameWidth: 1920, frameHeight: 1080, framesPerSecond: 60 }],
+      ['in-1', { type: 'inbound-rtp', kind: 'video', codecId: 'codec-h264', bytesReceived: 980_000, timestamp: 1000, framesDecoded: 60, frameWidth: 1920, frameHeight: 1080, framesPerSecond: 60 }],
+    ]);
+    const mismatchSample = await mismatchCollector.sampleBidirectional({
+      pc: mismatchPc as unknown as RTCPeerConnection,
+      outboundTargetFps: 60,
+      inboundTargetFps: 60,
+      connectionState: 'connected',
+      localVideoTrack: mismatchTrack,
+      hasInboundVideo: true,
+    });
+    const mismatchSummary = buildStageDiagnosticsSummary({
+      preferences: prefs4k,
+      connectionState: 'connected',
+      isSharingLocal: true,
+      localCaptureMeta: { width: 1920, height: 1080, fps: 60, hasAudio: false },
+      outboundTelemetry: mismatchSample.outbound,
+      primaryIncoming: {
+        streamMeta: { width: 3840, height: 2160, fps: 60, codec: 'H264' },
+        telemetry: mismatchSample.inbound,
+        renderedWidth: 1920,
+        renderedHeight: 1080,
+        phase: 'connected',
+      },
+    });
+    assert.equal(mismatchSummary.capture.verification.status, 'Requested quality not achieved');
+    assert.equal(mismatchSummary.outgoing.verification.status, 'Requested quality not achieved');
+    assert.equal(mismatchSummary.incoming.verification.status, 'Requested quality not achieved');
+    assert.equal(mismatchSummary.overallVerification.status, 'Requested quality not achieved');
+
+    // Also verify <video> render downscale guard: inbound-rtp decoded 4K, but DOM <video> is 1080p -> not 4K verified
+    const downscaledRenderCheck = evaluateQualityVerification({
+      stage: 'inbound',
+      requestedPreset: '4k',
+      requestedFps: 60,
+      width: 3840,
+      height: 2160,
+      actualFps: 60,
+      secondaryWidth: 1920,
+      secondaryHeight: 1080,
+    });
+    assert.equal(downscaledRenderCheck.status, 'Requested quality not achieved');
+    console.log('  [PASS] 4D.2. Requested 4K with actual 1080p RTP or downscaled <video> honestly reports "Requested quality not achieved"');
+
+    // 4D.3: Simulated RTP + <video> verification for 1080p, 1440p, and 4K + Bridge updateIncomingRenderedDimensions
+    const verifiedCollector = new WebRtcStatsCollector('bidirectional');
+    const verifiedPc = new FakeRtcPeerConnection();
+    const stream4kTrack = new FakeMediaStream('sim-4k', 'cap', { width: 3840, height: 2160, frameRate: 60 })
+      .getVideoTracks()[0] as unknown as MediaStreamTrack;
+    verifiedPc.mockStatsMap = new Map<string, Record<string, unknown>>([
+      ['codec-vp9', { type: 'codec', id: 'codec-vp9', mimeType: 'video/VP9' }],
+      ['out-4k', { type: 'outbound-rtp', kind: 'video', codecId: 'codec-vp9', bytesSent: 5_000_000, timestamp: 1000, framesSent: 240, framesEncoded: 240, frameWidth: 3840, frameHeight: 2160, framesPerSecond: 60 }],
+      ['in-4k', { type: 'inbound-rtp', kind: 'video', codecId: 'codec-vp9', bytesReceived: 4_900_000, timestamp: 1000, framesDecoded: 238, frameWidth: 3840, frameHeight: 2160, framesPerSecond: 60 }],
+    ]);
+    await verifiedCollector.sampleBidirectional({
+      pc: verifiedPc as unknown as RTCPeerConnection,
+      outboundTargetFps: 60,
+      inboundTargetFps: 60,
+      connectionState: 'connected',
+      localVideoTrack: stream4kTrack,
+      hasInboundVideo: true,
+    });
+    verifiedPc.mockStatsMap = new Map<string, Record<string, unknown>>([
+      ['codec-vp9', { type: 'codec', id: 'codec-vp9', mimeType: 'video/VP9' }],
+      ['out-4k', { type: 'outbound-rtp', kind: 'video', codecId: 'codec-vp9', bytesSent: 10_000_000, timestamp: 2000, framesSent: 300, framesEncoded: 300, frameWidth: 3840, frameHeight: 2160, framesPerSecond: 60 }],
+      ['in-4k', { type: 'inbound-rtp', kind: 'video', codecId: 'codec-vp9', bytesReceived: 9_900_000, timestamp: 2000, framesDecoded: 298, frameWidth: 3840, frameHeight: 2160, framesPerSecond: 60 }],
+    ]);
+    const sample4k = await verifiedCollector.sampleBidirectional({
+      pc: verifiedPc as unknown as RTCPeerConnection,
+      outboundTargetFps: 60,
+      inboundTargetFps: 60,
+      connectionState: 'connected',
+      localVideoTrack: stream4kTrack,
+      hasInboundVideo: true,
+    });
+    assert.equal(sample4k.outbound.framesSent, 300);
+    assert.equal(sample4k.inbound.framesDecoded, 298);
+    assert.equal(Math.round(sample4k.outbound.bitrateKbps ?? 0), 40_000);
+    assert.equal(Math.round(sample4k.inbound.bitrateKbps ?? 0), 40_000);
+
+    const verified4kSummary = buildStageDiagnosticsSummary({
+      preferences: prefs4k,
+      connectionState: 'connected',
+      isSharingLocal: true,
+      localCaptureMeta: { width: 3840, height: 2160, fps: 60, hasAudio: true },
+      outboundTelemetry: sample4k.outbound,
+      primaryIncoming: {
+        streamMeta: { width: 3840, height: 2160, fps: 60, codec: 'VP9' },
+        telemetry: sample4k.inbound,
+        renderedWidth: 3840,
+        renderedHeight: 2160,
+        phase: 'connected',
+      },
+    });
+    assert.equal(verified4kSummary.capture.verification.status, '4K verified');
+    assert.equal(verified4kSummary.outgoing.verification.status, '4K verified');
+    assert.equal(verified4kSummary.incoming.verification.status, '4K verified');
+    assert.equal(verified4kSummary.overallVerification.status, '4K verified');
+
+    assert.equal(
+      evaluateQualityVerification({
+        stage: 'outbound',
+        requestedPreset: '1440p',
+        width: 2560,
+        height: 1440,
+        actualFps: 60,
+      }).status,
+      '1440p verified'
+    );
+    assert.equal(
+      evaluateQualityVerification({
+        stage: 'outbound',
+        requestedPreset: '1080p',
+        width: 1920,
+        height: 1080,
+        actualFps: 60,
+      }).status,
+      '1080p verified'
+    );
+
+    // Verify WebRtcSignalingBridge renderedWidth/renderedHeight sync on an incoming stream
+    const diagRoomRes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: 'diag-host',
+        hostDeviceName: 'Diag Sender',
+        hostPlatform: 'macos',
+      }),
+    });
+    const diagRoomData = (await diagRoomRes.json()) as { room: RoomSnapshot; hostToken: string };
+    const diagRoomId = diagRoomData.room.roomId;
+    const diagRxJoin = (await (
+      await fetch(`${baseUrl}/api/rooms/${diagRoomId}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiverDeviceId: 'diag-rx',
+          deviceName: 'Diag Viewer',
+          platform: 'macos',
+        }),
+      })
+    ).json()) as { memberToken: string };
+    await fetch(`${baseUrl}/api/rooms/${diagRoomId}/pair-requests/diag-rx/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${diagRoomData.hostToken}` },
+    });
+    const diagHostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 'diag-host',
+      deviceName: 'Diag Sender',
+      platform: 'macos',
+      role: 'both',
+      roomId: diagRoomId,
+      token: diagRoomData.hostToken,
+    });
+    const diagRxWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 'diag-rx',
+      deviceName: 'Diag Viewer',
+      platform: 'macos',
+      role: 'both',
+      roomId: diagRoomId,
+      token: diagRxJoin.memberToken,
+    });
+    let diagRoomSnap = ((await (await fetch(`${baseUrl}/api/rooms/${diagRoomId}`)).json()) as { room: RoomSnapshot }).room;
+    const diagHostBridge = new WebRtcSignalingBridge({
+      deviceId: 'diag-host',
+      preferences: prefs4k,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(diagHostWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('diag-4k', { width: 3840, height: 2160, frameRate: 60 }),
+      rtcFactory: () => new FakeRtcPeerConnection() as unknown as RTCPeerConnection,
+    });
+    const diagRxBridge = new WebRtcSignalingBridge({
+      deviceId: 'diag-rx',
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(diagRxWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('diag-rx-cap', { width: 1920, height: 1080, frameRate: 60 }),
+      rtcFactory: () => new FakeRtcPeerConnection() as unknown as RTCPeerConnection,
+    });
+    const wireDiag = (wsClient: TestWsClient, bridge: WebRtcSignalingBridge, role: 'host' | 'receiver', devId: string, prefs: CapturePreferences) => {
+      wsClient.ws.on('message', (raw, isBinary) => {
+        if (isBinary) return;
+        const msg = JSON.parse(raw.toString('utf8')) as CastoraEnvelope;
+        if (msg.messageType === 'room_state' && msg.roomId === diagRoomId) {
+          diagRoomSnap = { ...diagRoomSnap, ...(msg.payload as Partial<RoomSnapshot>) };
+          bridge.updateContext({ deviceId: devId, activeRoom: diagRoomSnap, activeRoomRole: role, preferences: prefs, networkPrefs: netPrefs4b });
+        } else if (
+          msg.messageType === 'stream_start' ||
+          msg.messageType === 'session_offer' ||
+          msg.messageType === 'session_answer' ||
+          msg.messageType === 'ice_candidate' ||
+          msg.messageType === 'stream_stop'
+        ) {
+          void bridge.handleIncomingEnvelope(msg);
+        }
+      });
+    };
+    diagHostBridge.updateContext({ deviceId: 'diag-host', activeRoom: diagRoomSnap, activeRoomRole: 'host', preferences: prefs4k, networkPrefs: netPrefs4b });
+    diagRxBridge.updateContext({ deviceId: 'diag-rx', activeRoom: diagRoomSnap, activeRoomRole: 'receiver', preferences: default1080Prefs, networkPrefs: netPrefs4b });
+    wireDiag(diagHostWs, diagHostBridge, 'host', 'diag-host', prefs4k);
+    wireDiag(diagRxWs, diagRxBridge, 'receiver', 'diag-rx', default1080Prefs);
+
+    await diagHostBridge.startScreenSharing('diag-rx');
+    await waitUntil(
+      () => diagRxBridge.getSnapshot().incomingStreams.some((s) => s.senderDeviceId === 'diag-host' && s.stream !== null),
+      'Diag receiver gets incoming stream'
+    );
+    diagRxBridge.updateIncomingRenderedDimensions('diag-host', 3840, 2160);
+    const syncedIncoming = diagRxBridge.getSnapshot().incomingStreams.find((s) => s.senderDeviceId === 'diag-host')!;
+    assert.equal(syncedIncoming.renderedWidth, 3840);
+    assert.equal(syncedIncoming.renderedHeight, 2160);
+    assert.equal(syncedIncoming.telemetry.renderedWidth, 3840);
+    assert.equal(syncedIncoming.telemetry.renderedHeight, 2160);
+
+    diagRxBridge.updateIncomingRenderedDimensions('diag-host', null, null);
+    const clearedIncoming = diagRxBridge.getSnapshot().incomingStreams.find((s) => s.senderDeviceId === 'diag-host')!;
+    assert.equal(clearedIncoming.renderedWidth, null);
+    assert.equal(clearedIncoming.renderedHeight, null);
+
+    diagHostBridge.dispose();
+    diagRxBridge.dispose();
+    await fetch(`${baseUrl}/api/rooms/${diagRoomId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${diagRoomData.hostToken}` },
+    });
+    await diagHostWs.close();
+    await diagRxWs.close();
+    console.log('  [PASS] 4D.3. Simulated 1080p/1440p/4K diagnostics & <video> element dimension synchronization verified');
+
+    // =========================================================================
+    // Stage 4E: Connection Reliability, ICE Recovery, Backoff Retry & TURN Support
+    // =========================================================================
+    console.log('\nStarting Stage 4E Connection Reliability & TURN tests...');
+
+    // 4E.1: Unconfigured TURN fallback (default environment) + health & ice-servers endpoints
+    const defaultHealth = (await (await fetch(`${baseUrl}/api/health`)).json()) as {
+      turnConfigured: boolean;
+      turnMode: string;
+    };
+    assert.equal(defaultHealth.turnConfigured, false);
+    assert.equal(defaultHealth.turnMode, 'disabled');
+
+    const defaultIce = (await (await fetch(`${baseUrl}/api/ice-servers`)).json()) as {
+      iceServers: RTCIceServer[];
+      turnConfigured: boolean;
+      turnMode: string;
+    };
+    assert.equal(defaultIce.turnConfigured, false);
+    assert.equal(defaultIce.turnMode, 'disabled');
+    assert.equal(
+      defaultIce.iceServers.some((s) =>
+        (Array.isArray(s.urls) ? s.urls : [s.urls]).some((u) => u.startsWith('stun:'))
+      ),
+      true,
+      'STUN configuration preserved when TURN is unconfigured'
+    );
+
+    // Verify configured TURN over UDP + TCP + TLS with temporary HMAC-SHA1 backend credentials & authorization checks
+    const prevStunEnv = process.env.CASTORA_STUN_URLS;
+    const prevTurnUrlsEnv = process.env.CASTORA_TURN_URLS;
+    const prevTurnSecretEnv = process.env.CASTORA_TURN_AUTH_SECRET;
+    const prevTurnTtlEnv = process.env.CASTORA_TURN_TTL_SECONDS;
+    let turnTestRoomId = '';
+    let turnHostToken = '';
+    try {
+      const testTurnSecret = 'castora-ephemeral-turn-secret-key';
+      process.env.CASTORA_STUN_URLS = 'stun:stun.l.google.com:19302';
+      process.env.CASTORA_TURN_URLS =
+        'turn:turn.example.com:3478?transport=udp,turn:turn.example.com:3478?transport=tcp,turns:turn.example.com:5349?transport=tcp';
+      process.env.CASTORA_TURN_AUTH_SECRET = testTurnSecret;
+      process.env.CASTORA_TURN_TTL_SECONDS = '1800';
+
+      const turnHealth = (await (await fetch(`${baseUrl}/api/health`)).json()) as {
+        turnConfigured: boolean;
+        turnMode: string;
+      };
+      assert.equal(turnHealth.turnConfigured, true);
+      assert.equal(turnHealth.turnMode, 'ephemeral-hmac');
+
+      // Missing credentials/room token must be rejected when TURN is active
+      const unauthIceRes = await fetch(`${baseUrl}/api/ice-servers`);
+      assert.equal(unauthIceRes.status, 403, 'TURN credential endpoint rejects unauthenticated requests');
+
+      // Create room and test host vs pending vs approved receiver
+      const turnRoomRes = await fetch(`${baseUrl}/api/rooms`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hostDeviceId: 'turn-host',
+          hostDeviceName: 'TURN Host',
+          hostPlatform: 'macos',
+        }),
+      });
+      const turnRoomData = (await turnRoomRes.json()) as { room: RoomSnapshot; hostToken: string };
+      turnTestRoomId = turnRoomData.room.roomId;
+      turnHostToken = turnRoomData.hostToken;
+
+      const pendingJoin = (await (
+        await fetch(`${baseUrl}/api/rooms/${turnTestRoomId}/pair-requests`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            receiverDeviceId: 'turn-rx-pending',
+            deviceName: 'TURN Pending',
+            platform: 'macos',
+          }),
+        })
+      ).json()) as { memberToken: string };
+
+      const pendingIceRes = await fetch(
+        `${baseUrl}/api/ice-servers?roomId=${turnTestRoomId}&deviceId=turn-rx-pending`,
+        { headers: { Authorization: `Bearer ${pendingJoin.memberToken}` } }
+      );
+      assert.equal(pendingIceRes.status, 403, 'Unapproved pending participant cannot retrieve TURN credentials');
+
+      const hostIceRes = await fetch(
+        `${baseUrl}/api/ice-servers?roomId=${turnTestRoomId}&deviceId=turn-host`,
+        { headers: { Authorization: `Bearer ${turnHostToken}` } }
+      );
+      assert.equal(hostIceRes.status, 200);
+      assert.equal(hostIceRes.headers.get('cache-control'), 'no-store');
+      const hostIceBody = (await hostIceRes.json()) as {
+        iceServers: RTCIceServer[];
+        turnConfigured: boolean;
+        turnMode: string;
+        transports: string[];
+        ttlSeconds: number;
+        expiresAt: string;
+      };
+      assert.equal(hostIceBody.turnConfigured, true);
+      assert.equal(hostIceBody.turnMode, 'ephemeral-hmac');
+      assert.equal(hostIceBody.ttlSeconds, 1800);
+      assert.deepEqual(hostIceBody.transports.sort(), ['tcp', 'tls', 'udp']);
+      const turnEntry = hostIceBody.iceServers.find(
+        (entry) => typeof entry.username === 'string' && typeof entry.credential === 'string'
+      );
+      assert.ok(turnEntry, 'TURN entry with temporary username and credential returned');
+      assert.equal(
+        turnEntry.username!.endsWith(':turn-host'),
+        true,
+        'Temporary username binds expiry and device ID'
+      );
+      const expectedCred = crypto
+        .createHmac('sha1', testTurnSecret)
+        .update(turnEntry.username!)
+        .digest('base64');
+      assert.equal(turnEntry.credential, expectedCred, 'Ephemeral credential matches HMAC-SHA1 coturn digest');
+
+      const mergedRtcConfig = buildRtcConfiguration({
+        ...netPrefs4b,
+        serverIceServers: hostIceBody.iceServers,
+      });
+      const flatUrls = (mergedRtcConfig.iceServers ?? []).flatMap((srv) =>
+        Array.isArray(srv.urls) ? srv.urls : [srv.urls]
+      );
+      assert.equal(flatUrls.some((u) => u.startsWith('stun:')), true, 'STUN preserved after TURN merge');
+      assert.equal(flatUrls.some((u) => u.includes('transport=udp')), true, 'TURN UDP preserved');
+      assert.equal(flatUrls.some((u) => u.includes('transport=tcp')), true, 'TURN TCP preserved');
+      assert.equal(flatUrls.some((u) => u.startsWith('turns:')), true, 'TURN TLS preserved');
+    } finally {
+      if (turnTestRoomId && turnHostToken) {
+        await fetch(`${baseUrl}/api/rooms/${turnTestRoomId}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${turnHostToken}` },
+        });
+      }
+      if (prevStunEnv === undefined) delete process.env.CASTORA_STUN_URLS;
+      else process.env.CASTORA_STUN_URLS = prevStunEnv;
+      if (prevTurnUrlsEnv === undefined) delete process.env.CASTORA_TURN_URLS;
+      else process.env.CASTORA_TURN_URLS = prevTurnUrlsEnv;
+      if (prevTurnSecretEnv === undefined) delete process.env.CASTORA_TURN_AUTH_SECRET;
+      else process.env.CASTORA_TURN_AUTH_SECRET = prevTurnSecretEnv;
+      if (prevTurnTtlEnv === undefined) delete process.env.CASTORA_TURN_TTL_SECONDS;
+      else process.env.CASTORA_TURN_TTL_SECONDS = prevTurnTtlEnv;
+    }
+    console.log('  [PASS] 4E.1. TURN env parsing, STUN-only fallback, auth guard & ephemeral HMAC-SHA1 credentials verified');
+
+    // 4E.2: Temporary disconnection -> ICE restart -> recovery, Failed -> Exponential Backoff Retry Limit -> Manual Retry & Healthy Isolation
+    const rHostId = 'rel-host-1';
+    const rPeer1Id = 'rel-peer-1';
+    const rPeer2Id = 'rel-peer-2';
+    const rPeer3Id = 'rel-peer-3';
+    const rRoomRes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: rHostId,
+        hostDeviceName: 'Rel Host',
+        hostPlatform: 'macos',
+      }),
+    });
+    const rRoomData = (await rRoomRes.json()) as { room: RoomSnapshot; hostToken: string };
+    const rRoomId = rRoomData.room.roomId;
+
+    const rPeerTokens: Record<string, string> = {};
+    for (const pid of [rPeer1Id, rPeer2Id, rPeer3Id]) {
+      const join = (await (
+        await fetch(`${baseUrl}/api/rooms/${rRoomId}/pair-requests`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            receiverDeviceId: pid,
+            deviceName: `Device ${pid}`,
+            platform: 'macos',
+          }),
+        })
+      ).json()) as { memberToken: string };
+      rPeerTokens[pid] = join.memberToken;
+      await fetch(`${baseUrl}/api/rooms/${rRoomId}/pair-requests/${pid}/approve`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${rRoomData.hostToken}` },
+      });
+    }
+
+    const rHostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: rHostId,
+      deviceName: 'Rel Host',
+      platform: 'macos',
+      role: 'both',
+      roomId: rRoomId,
+      token: rRoomData.hostToken,
+    });
+    const rPeer1Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: rPeer1Id,
+      deviceName: `Device ${rPeer1Id}`,
+      platform: 'macos',
+      role: 'both',
+      roomId: rRoomId,
+      token: rPeerTokens[rPeer1Id],
+    });
+    const rPeer2Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: rPeer2Id,
+      deviceName: `Device ${rPeer2Id}`,
+      platform: 'macos',
+      role: 'both',
+      roomId: rRoomId,
+      token: rPeerTokens[rPeer2Id],
+    });
+    const rPeer3Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: rPeer3Id,
+      deviceName: `Device ${rPeer3Id}`,
+      platform: 'macos',
+      role: 'both',
+      roomId: rRoomId,
+      token: rPeerTokens[rPeer3Id],
+    });
+
+    let rRoomSnap = ((await (await fetch(`${baseUrl}/api/rooms/${rRoomId}`)).json()) as { room: RoomSnapshot }).room;
+    const hostPeerMap = new Map<string, FakeRtcPeerConnection>();
+    let rejectReplacementsForPeer1 = false;
+    const fastReconnectCfg = {
+      maxAttempts: 3,
+      baseDelayMs: 25,
+      maxDelayMs: 100,
+      iceDisconnectGraceMs: 25,
+      recoveryVerifyMs: 45,
+    };
+
+    const rHostBridge = new WebRtcSignalingBridge({
+      deviceId: rHostId,
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(rHostWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('rel-host-cap', { width: 1920, height: 1080, frameRate: 60 }),
+      reconnectConfig: fastReconnectCfg,
+      rtcFactory: (cfg) => {
+        const pc = new FakeRtcPeerConnection(cfg);
+        if (rejectReplacementsForPeer1) {
+          pc.iceConnectionState = 'failed';
+          pc.connectionState = 'failed';
+          pc.createOffer = async () => {
+            throw new Error('Simulated persistent ICE failure');
+          };
+        }
+        return pc as unknown as RTCPeerConnection;
+      },
+    });
+    const rPeer1Bridge = new WebRtcSignalingBridge({
+      deviceId: rPeer1Id,
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(rPeer1Ws),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('rel-p1-cap', { width: 1920, height: 1080, frameRate: 60 }),
+      reconnectConfig: fastReconnectCfg,
+      rtcFactory: (cfg) => new FakeRtcPeerConnection(cfg) as unknown as RTCPeerConnection,
+    });
+    const rPeer2Bridge = new WebRtcSignalingBridge({
+      deviceId: rPeer2Id,
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(rPeer2Ws),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('rel-p2-cap', { width: 1920, height: 1080, frameRate: 60 }),
+      reconnectConfig: fastReconnectCfg,
+      rtcFactory: (cfg) => new FakeRtcPeerConnection(cfg) as unknown as RTCPeerConnection,
+    });
+    const rPeer3Bridge = new WebRtcSignalingBridge({
+      deviceId: rPeer3Id,
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(rPeer3Ws),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('rel-p3-cap', { width: 1920, height: 1080, frameRate: 60 }),
+      reconnectConfig: fastReconnectCfg,
+      rtcFactory: (cfg) => new FakeRtcPeerConnection(cfg) as unknown as RTCPeerConnection,
+    });
+
+    const wireRel = (wsClient: TestWsClient, bridge: WebRtcSignalingBridge, role: 'host' | 'receiver', devId: string) => {
+      wsClient.ws.on('message', (raw, isBinary) => {
+        if (isBinary) return;
+        const msg = JSON.parse(raw.toString('utf8')) as CastoraEnvelope;
+        if (msg.messageType === 'room_state' && msg.roomId === rRoomId) {
+          rRoomSnap = { ...rRoomSnap, ...(msg.payload as Partial<RoomSnapshot>) };
+          bridge.updateContext({
+            deviceId: devId,
+            activeRoom: rRoomSnap,
+            activeRoomRole: role,
+            preferences: default1080Prefs,
+            networkPrefs: netPrefs4b,
+          });
+        } else if (
+          msg.messageType === 'stream_start' ||
+          msg.messageType === 'session_offer' ||
+          msg.messageType === 'session_answer' ||
+          msg.messageType === 'ice_candidate' ||
+          msg.messageType === 'stream_stop'
+        ) {
+          void bridge.handleIncomingEnvelope(msg);
+        }
+      });
+    };
+
+    for (const [b, r, d, w] of [
+      [rHostBridge, 'host', rHostId, rHostWs],
+      [rPeer1Bridge, 'receiver', rPeer1Id, rPeer1Ws],
+      [rPeer2Bridge, 'receiver', rPeer2Id, rPeer2Ws],
+      [rPeer3Bridge, 'receiver', rPeer3Id, rPeer3Ws],
+    ] as const) {
+      b.updateContext({
+        deviceId: d,
+        activeRoom: rRoomSnap,
+        activeRoomRole: r,
+        preferences: default1080Prefs,
+        networkPrefs: netPrefs4b,
+      });
+      wireRel(w, b, r, d);
+    }
+
+    // Host broadcasts to Peer 1, Peer 2, Peer 3 simultaneously
+    FakeRtcPeerConnection.instances = [];
+    FakeRtcPeerConnection.closeEvents = [];
+    await rHostBridge.startScreenSharing(null);
+    await waitUntil(
+      () =>
+        rHostBridge.getSnapshot().outboundPeers.length === 3 &&
+        rHostBridge.getSnapshot().outboundPeers.every((o) => o.phase === 'connected') &&
+        rPeer1Bridge.getSnapshot().incomingStreams.some((s) => s.stream !== null) &&
+        rPeer2Bridge.getSnapshot().incomingStreams.some((s) => s.stream !== null) &&
+        rPeer3Bridge.getSnapshot().incomingStreams.some((s) => s.stream !== null),
+      'All 3 peers connected cleanly'
+    );
+
+    const getRawPc = (bridge: WebRtcSignalingBridge, pid: string) =>
+      (bridge.getPeerInstance(pid) as unknown as { pc: FakeRtcPeerConnection }).pc;
+
+    hostPeerMap.set(rPeer1Id, getRawPc(rHostBridge, rPeer1Id));
+    hostPeerMap.set(rPeer2Id, getRawPc(rHostBridge, rPeer2Id));
+    hostPeerMap.set(rPeer3Id, getRawPc(rHostBridge, rPeer3Id));
+    const healthyPeer3PcBefore = hostPeerMap.get(rPeer3Id)!;
+
+    // Step A: Temporary disconnection on Peer 1 -> enters reconnecting -> restartIce() + ICE-restart offer -> heals back to connected without replacing PC
+    const peer1PcBefore = hostPeerMap.get(rPeer1Id)!;
+    peer1PcBefore.emitConnectionDrop('disconnected');
+    assert.equal(
+      rHostBridge.getSnapshot().outboundPeers.find((o) => o.targetDeviceId === rPeer1Id)?.phase,
+      'reconnecting',
+      'Temporary ICE disconnected moves peer phase cleanly to reconnecting'
+    );
+    await waitUntil(
+      () => peer1PcBefore.restartIceCalls >= 1 && peer1PcBefore.createOfferCalls.some((c) => c.iceRestart),
+      'Temporary disconnection triggers restartIce() and ICE-restart SDP offer'
+    );
+    peer1PcBefore.emitConnectionDrop('connected');
+    await waitUntil(
+      () =>
+        rHostBridge.getSnapshot().outboundPeers.find((o) => o.targetDeviceId === rPeer1Id)?.phase === 'connected' &&
+        (rHostBridge.getPeerRecoveryState(rPeer1Id)?.attempt ?? 0) === 0,
+      'Temporary disconnection recovers to connected and resets attempt counter'
+    );
+    assert.equal(getRawPc(rHostBridge, rPeer1Id), peer1PcBefore, 'Healthy ICE restart avoided unnecessary PC replacement');
+    assert.equal(healthyPeer3PcBefore.restartIceCalls, 0, 'Healthy Peer 3 untouched during Peer 1 temporary interruption');
+    console.log('  [PASS] 4E.2. Temporary ICE disconnect -> restartIce() -> clean recovery & healthy peer isolation verified');
+
+    // Step B: Permanent failure on Peer 1 with duplicate rapid failure triggers + retry exhaustion + manual Retry + clean old PC disposal before replacement
+    rejectReplacementsForPeer1 = true;
+    const pcBeforeExhaust = getRawPc(rHostBridge, rPeer1Id);
+    // Fire duplicate rapid failed notifications
+    pcBeforeExhaust.emitConnectionDrop('failed');
+    pcBeforeExhaust.emitConnectionDrop('failed');
+    pcBeforeExhaust.emitConnectionDrop('failed');
+    assert.equal(
+      rHostBridge.getPeerRecoveryState(rPeer1Id)?.attempt,
+      1,
+      'Duplicate rapid failure triggers must schedule only 1 attempt, not stack attempts'
+    );
+
+    await waitUntil(
+      () => rHostBridge.getPeerRecoveryState(rPeer1Id)?.exhausted === true,
+      'Exponential backoff exhausts after maxAttempts=3 and surfaces Retry state',
+      4000
+    );
+    const failedPeer1Entry = rHostBridge.getSnapshot().outboundPeers.find((o) => o.targetDeviceId === rPeer1Id)!;
+    assert.equal(failedPeer1Entry.phase, 'failed');
+    const exhaustedQuality = evaluateConnectionQuality({
+      phase: failedPeer1Entry.phase,
+      iceConnectionState: failedPeer1Entry.iceConnectionState,
+      telemetry: failedPeer1Entry.telemetry,
+      recovery: failedPeer1Entry.recovery,
+    });
+    assert.equal(exhaustedQuality.level, 'failed');
+
+    // Restore healthy factory and click manual Retry; verify old PC closed BEFORE new PC created
+    rejectReplacementsForPeer1 = false;
+    FakeRtcPeerConnection.instances = [];
+    FakeRtcPeerConnection.closeEvents = [];
+    const lastPcBeforeRetry = getRawPc(rHostBridge, rPeer1Id);
+    const retried = await rHostBridge.retryPeerConnection(rPeer1Id);
+    assert.equal(retried, true);
+    assert.equal(lastPcBeforeRetry.signalingState, 'closed', 'Old RTCPeerConnection closed cleanly on retry');
+    assert.equal(
+      FakeRtcPeerConnection.closeEvents.includes(lastPcBeforeRetry),
+      true,
+      'Old RTCPeerConnection closed before replacement completion'
+    );
+    await waitUntil(
+      () =>
+        rHostBridge.getSnapshot().outboundPeers.find((o) => o.targetDeviceId === rPeer1Id)?.phase === 'connected' &&
+        rPeer1Bridge.getSnapshot().incomingStreams.some((s) => s.stream !== null),
+      'Manual Retry restores full streaming after failure'
+    );
+    assert.equal(healthyPeer3PcBefore.restartIceCalls, 0, 'Healthy Peer 3 remained completely untouched across retries');
+    assert.equal(getRawPc(rHostBridge, rPeer3Id), healthyPeer3PcBefore, 'Healthy Peer 3 RTCPeerConnection never restarted');
+    console.log('  [PASS] 4E.3. Duplicate failure guard, max backoff exhaustion & manual Retry (close-before-create) verified');
+
+    // Step C: Multiple devices (Peer 1 and Peer 2) reconnecting simultaneously while Peer 3 remains untouched
+    const p1Cur = getRawPc(rHostBridge, rPeer1Id);
+    const p2Cur = getRawPc(rHostBridge, rPeer2Id);
+    p1Cur.emitConnectionDrop('failed');
+    p2Cur.emitConnectionDrop('disconnected');
+    await waitUntil(
+      () =>
+        rHostBridge.getSnapshot().outboundPeers.some((o) => o.targetDeviceId === rPeer1Id && o.phase === 'reconnecting') &&
+        rHostBridge.getSnapshot().outboundPeers.some((o) => o.targetDeviceId === rPeer2Id && o.phase === 'reconnecting'),
+      'Both Peer 1 and Peer 2 enter independent recovery simultaneously'
+    );
+    p2Cur.emitConnectionDrop('connected');
+    await waitUntil(
+      () =>
+        rHostBridge.getSnapshot().outboundPeers.find((o) => o.targetDeviceId === rPeer1Id)?.phase === 'connected' &&
+        rHostBridge.getSnapshot().outboundPeers.find((o) => o.targetDeviceId === rPeer2Id)?.phase === 'connected',
+      'Both simultaneous reconnecting peers recover independently'
+    );
+    assert.equal(getRawPc(rHostBridge, rPeer3Id), healthyPeer3PcBefore, 'Healthy Peer 3 remained unaffected during concurrent peer recovery');
+    assert.equal(healthyPeer3PcBefore.restartIceCalls, 0, 'Zero ICE restarts triggered on healthy Peer 3');
+
+    // Verify quality indicator helper across states
+    assert.equal(
+      evaluateConnectionQuality({
+        phase: 'connected',
+        telemetry: { ...createEmptyTelemetry(60, 'connected'), rttMs: 14, packetLossPct: 0 },
+      }).level,
+      'excellent'
+    );
+    assert.equal(
+      evaluateConnectionQuality({
+        phase: 'connected',
+        telemetry: { ...createEmptyTelemetry(60, 'connected'), rttMs: 280, packetLossPct: 7.5 },
+      }).level,
+      'poor'
+    );
+    console.log('  [PASS] 4E.4. Multi-device simultaneous reconnection & connection quality assessment verified');
+
+    rHostBridge.dispose();
+    rPeer1Bridge.dispose();
+    rPeer2Bridge.dispose();
+    rPeer3Bridge.dispose();
+    await fetch(`${baseUrl}/api/rooms/${rRoomId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${rRoomData.hostToken}` },
+    });
+    await rHostWs.close();
+    await rPeer1Ws.close();
+    await rPeer2Ws.close();
+    await rPeer3Ws.close();
+
+    // Verify createEmptyTelemetry initializes diagnostic stage fields cleanly to null
+    const blankTel = createEmptyTelemetry(60, 'idle');
+    assert.equal(blankTel.captureWidth, null);
+    assert.equal(blankTel.encodedWidth, null);
+    assert.equal(blankTel.framesSent, null);
+    assert.equal(blankTel.decodedWidth, null);
+    assert.equal(blankTel.framesDecoded, null);
+    assert.equal(blankTel.renderedWidth, null);
+    assert.equal(blankTel.networkCondition, null);
+    assert.equal(blankTel.lastAdjustmentReason, null);
+
+    // =========================================================================
+    // Stage 4F: Smart Adaptive Streaming Quality
+    // =========================================================================
+    console.log('\nStarting Stage 4F Smart Adaptive Streaming Quality tests...');
+
+    // 4F.1: Named quality profiles, High/1080p60 default preservation, and profile mapping
+    assert.deepEqual(QUALITY_PROFILE_ORDER, ['standard', 'high', 'ultra', 'maximum']);
+    assert.equal(QUALITY_PROFILES.standard.resolution, '1080p');
+    assert.equal(QUALITY_PROFILES.standard.targetFps, 30);
+    assert.equal(QUALITY_PROFILES.high.resolution, '1080p');
+    assert.equal(QUALITY_PROFILES.high.targetFps, 60);
+    assert.equal(QUALITY_PROFILES.high.isDefault, true);
+    assert.equal(QUALITY_PROFILES.ultra.resolution, '1440p');
+    assert.equal(QUALITY_PROFILES.ultra.targetFps, 60);
+    assert.equal(QUALITY_PROFILES.maximum.resolution, '4k');
+    assert.equal(QUALITY_PROFILES.maximum.targetFps, 60);
+
+    assert.equal(resolveProfileIdFromPreferences(default1080Prefs), 'high');
+    const switchedUltra = applyQualityProfileToPreferences(default1080Prefs, 'ultra');
+    assert.equal(resolveProfileIdFromPreferences(switchedUltra), 'ultra');
+    assert.equal(switchedUltra.maxBitrateKbps, 20_000);
+    const switchedStandard = applyQualityProfileToPreferences(switchedUltra, 'standard');
+    assert.equal(resolveProfileIdFromPreferences(switchedStandard), 'standard');
+    assert.equal(switchedStandard.maxBitrateKbps, 7_500);
+    const switchedMax = applyQualityProfileToPreferences(switchedStandard, 'maximum');
+    assert.equal(resolveProfileIdFromPreferences(switchedMax), 'maximum');
+    assert.equal(switchedMax.maxBitrateKbps, 40_000);
+    console.log('  [PASS] 4F.1. Quality profiles (Standard 1080p30, High 1080p60 default, Ultra 1440p60, Maximum 4K60) verified');
+
+    // 4F.2: Congestion detection (loss, jitter, RTT, dropped frames), bitrate-first reduction, hysteresis & cooldown, and Manual mode lock
+    const abrCtrl = new AdaptiveBitrateController(default1080Prefs);
+    const baseStats = {
+      ...createEmptyTelemetry(60, 'connected'),
+      rttMs: 14,
+      packetLossPct: 0.1,
+      jitterMs: 2.0,
+      encodedFps: 60,
+      droppedFrames: 0,
+      qualityLimitationReason: 'none' as const,
+      availableOutgoingBitrateKbps: 25_000,
+    };
+
+    const initDecision = abrCtrl.evaluate(baseStats, { activeOutboundPeers: 1, nowMs: 1_000 });
+    assert.equal(initDecision.networkCondition, 'healthy');
+    assert.equal(initDecision.targetBitrateKbps, 10_000);
+    assert.equal(initDecision.maxFramerate, 60);
+    assert.equal(initDecision.scaleResolutionDownBy, 1.0);
+
+    // Moderate congestion (high jitter + loss): reduces bitrate FIRST, preserving 60 FPS & 1.0x scale
+    const moderateDecision = abrCtrl.evaluate(
+      {
+        ...baseStats,
+        rttMs: 170,
+        packetLossPct: 2.2,
+        jitterMs: 32,
+        qualityLimitationReason: 'bandwidth',
+      },
+      { activeOutboundPeers: 1, nowMs: 3_000 }
+    );
+    assert.equal(moderateDecision.changed, true);
+    assert.equal(moderateDecision.networkCondition, 'moderate');
+    assert.equal(moderateDecision.targetBitrateKbps, 7_800, 'Bitrate stepped down first on congestion');
+    assert.equal(moderateDecision.maxFramerate, 60, 'Framerate preserved on initial moderate bitrate reduction');
+    assert.equal(moderateDecision.scaleResolutionDownBy, 1.0, 'Resolution scale preserved on initial moderate bitrate reduction');
+    assert.equal(moderateDecision.lastAdjustmentAction, 'reduced-bitrate');
+    assert.ok(moderateDecision.lastAdjustmentReason?.includes('jitter'));
+
+    // Rapid downgrade cooldown check (500ms later -> no flap)
+    const cooldownBlocked = abrCtrl.evaluate(
+      { ...baseStats, rttMs: 170, packetLossPct: 2.2, jitterMs: 32 },
+      { activeOutboundPeers: 1, nowMs: 3_500 }
+    );
+    assert.equal(cooldownBlocked.changed, false, 'Downgrade cooldown prevents rapid consecutive step-downs');
+
+    // Hysteresis & post-downgrade upgrade cooldown:
+    // Healthy spike 1.5s after downgrade MUST NOT immediately jump back up
+    const prematureHealthy1 = abrCtrl.evaluate(baseStats, { activeOutboundPeers: 1, nowMs: 4_500 });
+    assert.equal(prematureHealthy1.targetBitrateKbps, 7_800, 'Hysteresis holds bitrate stable during brief recovery');
+    const prematureHealthy2 = abrCtrl.evaluate(baseStats, { activeOutboundPeers: 1, nowMs: 6_000 });
+    assert.equal(prematureHealthy2.targetBitrateKbps, 7_800, 'Post-downgrade cooldown (5s) blocks premature restoration');
+
+    // After sustained healthy streak + cooldown (>= 8_000ms -> 5s elapsed since 3_000), steps up smoothly
+    const restoredStep = abrCtrl.evaluate(baseStats, { activeOutboundPeers: 1, nowMs: 8_200 });
+    assert.equal(restoredStep.changed, true);
+    assert.equal(restoredStep.targetBitrateKbps, 10_000, 'Quality gradually restored after cooldown & hysteresis');
+    assert.equal(restoredStep.lastAdjustmentAction, 'restored');
+    assert.ok(restoredStep.lastAdjustmentReason?.includes('Restored'));
+
+    // Sustained severe congestion + CPU/frame drops -> reduces bitrate to floor, then drops FPS & scaleResolutionDownBy
+    let severeResult = abrCtrl.evaluate(
+      {
+        ...baseStats,
+        rttMs: 290,
+        packetLossPct: 6.5,
+        jitterMs: 55,
+        droppedFrames: 25,
+        qualityLimitationReason: 'cpu',
+        availableOutgoingBitrateKbps: 2_600,
+      },
+      { activeOutboundPeers: 1, nowMs: 12_000 }
+    );
+    severeResult = abrCtrl.evaluate(
+      {
+        ...baseStats,
+        rttMs: 310,
+        packetLossPct: 7.5,
+        jitterMs: 65,
+        droppedFrames: 45,
+        qualityLimitationReason: 'cpu',
+        availableOutgoingBitrateKbps: 2_200,
+      },
+      { activeOutboundPeers: 1, nowMs: 14_000 }
+    );
+    assert.equal(severeResult.networkCondition, 'congested');
+    assert.equal(severeResult.maxFramerate, 30, 'FPS stepped down only after sustained severe/CPU pressure & low bitrate');
+    assert.equal(severeResult.scaleResolutionDownBy >= 1.5, true, 'Resolution scale reduced when bitrate hit smooth floor');
+
+    // Manual mode protection: under severe congestion, manual settings MUST NEVER be overridden
+    const manualPrefs: CapturePreferences = {
+      ...default1080Prefs,
+      adaptiveBitrate: false,
+      maxBitrateKbps: 10_000,
+    };
+    const manualDecision = abrCtrl.updatePreferences(manualPrefs, 1);
+    assert.equal(manualDecision.adaptiveMode, 'manual');
+    assert.equal(manualDecision.targetBitrateKbps, 10_000);
+    assert.equal(manualDecision.maxFramerate, 60);
+    assert.equal(manualDecision.scaleResolutionDownBy, 1.0);
+
+    const underCongestionManual = abrCtrl.evaluate(
+      {
+        ...baseStats,
+        rttMs: 400,
+        packetLossPct: 12,
+        jitterMs: 80,
+        droppedFrames: 90,
+        qualityLimitationReason: 'bandwidth',
+        availableOutgoingBitrateKbps: 1_500,
+      },
+      { activeOutboundPeers: 1, nowMs: 18_000 }
+    );
+    assert.equal(underCongestionManual.adaptiveMode, 'manual');
+    assert.equal(underCongestionManual.targetBitrateKbps, 10_000, 'Manual bitrate cap never overridden by congestion');
+    assert.equal(underCongestionManual.maxFramerate, 60, 'Manual FPS never overridden by congestion');
+    assert.equal(underCongestionManual.scaleResolutionDownBy, 1.0, 'Manual scale never overridden');
+    assert.equal(underCongestionManual.networkCondition, 'congested', 'Network condition still reported honestly');
+    assert.equal(underCongestionManual.lastAdjustmentAction, 'manual-locked');
+    console.log('  [PASS] 4F.2. Congestion signals (loss/jitter/RTT/drops), bitrate-first cascade, hysteresis/cooldown & Manual lock verified');
+
+    // 4F.3: Missing WebRTC stats & unsupported setParameters capabilities (partial fallback & full rejection)
+    const missingStats = createEmptyTelemetry(60, 'connected');
+    assert.equal(assessNetworkCondition(missingStats), 'unavailable');
+    const autoOnMissing = new AdaptiveBitrateController(default1080Prefs);
+    const missingEval = autoOnMissing.evaluate(missingStats, { nowMs: 5_000 });
+    assert.equal(missingEval.networkCondition, 'unavailable');
+    assert.equal(missingEval.changed, false, 'Missing WebRTC stats never causes blind quality drops');
+    assert.equal(missingEval.targetBitrateKbps, 10_000);
+
+    // remote-inbound-rtp packetsLost delta fallback when fractionLost is omitted
+    const deltaLossCollector = new WebRtcStatsCollector('sender');
+    const deltaLossPc = new FakeRtcPeerConnection();
+    const deltaTrack = new FakeMediaStream('dl-cap', 'cap', { width: 1920, height: 1080, frameRate: 60 })
+      .getVideoTracks()[0] as unknown as MediaStreamTrack;
+    deltaLossPc.mockStatsMap = new Map<string, Record<string, unknown>>([
+      ['out-dl', { type: 'outbound-rtp', kind: 'video', bytesSent: 1_000_000, packetsSent: 1000, timestamp: 1000, framesSent: 60 }],
+      ['rem-dl', { type: 'remote-inbound-rtp', kind: 'video', packetsLost: 10, roundTripTime: 0.02, jitter: 0.004 }],
+    ]);
+    await deltaLossCollector.sampleBidirectional({
+      pc: deltaLossPc as unknown as RTCPeerConnection,
+      outboundTargetFps: 60,
+      inboundTargetFps: 60,
+      connectionState: 'connected',
+      localVideoTrack: deltaTrack,
+      hasInboundVideo: false,
+    });
+    deltaLossPc.mockStatsMap = new Map<string, Record<string, unknown>>([
+      ['out-dl', { type: 'outbound-rtp', kind: 'video', bytesSent: 2_000_000, packetsSent: 2000, timestamp: 2000, framesSent: 120 }],
+      ['rem-dl', { type: 'remote-inbound-rtp', kind: 'video', packetsLost: 50, roundTripTime: 0.02, jitter: 0.004 }],
+    ]);
+    const deltaLossSample = await deltaLossCollector.sampleBidirectional({
+      pc: deltaLossPc as unknown as RTCPeerConnection,
+      outboundTargetFps: 60,
+      inboundTargetFps: 60,
+      connectionState: 'connected',
+      localVideoTrack: deltaTrack,
+      hasInboundVideo: false,
+    });
+    assert.equal(
+      Math.round((deltaLossSample.outbound.packetLossPct ?? 0) * 10) / 10,
+      4.0,
+      'Computed fallback packetLossPct from remote-inbound-rtp packetsLost when fractionLost omitted'
+    );
+
+    // Unsupported sender parameters fallback (scaleResolutionDownBy rejected -> falls back to { maxBitrate, maxFramerate }, then { maxBitrate }, then safe disable)
+    const capRoomRes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: 'cap-host',
+        hostDeviceName: 'Capability Host',
+        hostPlatform: 'macos',
+      }),
+    });
+    const capRoomData = (await capRoomRes.json()) as { room: RoomSnapshot; hostToken: string };
+    const capRoomId = capRoomData.room.roomId;
+    const capRxJoin = (await (
+      await fetch(`${baseUrl}/api/rooms/${capRoomId}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiverDeviceId: 'cap-rx',
+          deviceName: 'Cap Receiver',
+          platform: 'macos',
+        }),
+      })
+    ).json()) as { memberToken: string };
+    await fetch(`${baseUrl}/api/rooms/${capRoomId}/pair-requests/cap-rx/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${capRoomData.hostToken}` },
+    });
+    const capHostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 'cap-host',
+      deviceName: 'Capability Host',
+      platform: 'macos',
+      role: 'both',
+      roomId: capRoomId,
+      token: capRoomData.hostToken,
+    });
+    const capRxWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 'cap-rx',
+      deviceName: 'Cap Receiver',
+      platform: 'macos',
+      role: 'both',
+      roomId: capRoomId,
+      token: capRxJoin.memberToken,
+    });
+    const capRoomSnap = ((await (await fetch(`${baseUrl}/api/rooms/${capRoomId}`)).json()) as { room: RoomSnapshot }).room;
+
+    let setParamsMode: 'reject-scale' | 'reject-all' = 'reject-scale';
+    let capHostFakePc: FakeRtcPeerConnection | null = null;
+    const capHostBridge = new WebRtcSignalingBridge({
+      deviceId: 'cap-host',
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(capHostWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('cap-1080', { width: 1920, height: 1080, frameRate: 60 }),
+      rtcFactory: (cfg) => {
+        const pc = new FakeRtcPeerConnection(cfg);
+        const origAddTrack = pc.addTrack.bind(pc);
+        pc.addTrack = (track: { kind?: string }) => {
+          const sender = origAddTrack(track);
+          const origSetParams = sender.setParameters.bind(sender);
+          sender.setParameters = async (params) => {
+            if (track?.kind === 'video') {
+              if (setParamsMode === 'reject-all') {
+                throw new Error('NotSupportedError: setParameters blocked');
+              }
+              if (
+                setParamsMode === 'reject-scale' &&
+                params.encodings.some((e) => e.scaleResolutionDownBy !== undefined)
+              ) {
+                throw new Error('OperationError: scaleResolutionDownBy unsupported');
+              }
+            }
+            return origSetParams(params);
+          };
+          return sender;
+        };
+        capHostFakePc = pc;
+        return pc as unknown as RTCPeerConnection;
+      },
+    });
+    const capRxBridge = new WebRtcSignalingBridge({
+      deviceId: 'cap-rx',
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(capRxWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('cap-rx', { width: 1920, height: 1080, frameRate: 60 }),
+      rtcFactory: (cfg) => new FakeRtcPeerConnection(cfg) as unknown as RTCPeerConnection,
+    });
+    const wireCap = (wsClient: TestWsClient, bridge: WebRtcSignalingBridge) => {
+      wsClient.ws.on('message', (raw, isBinary) => {
+        if (isBinary) return;
+        const msg = JSON.parse(raw.toString('utf8')) as CastoraEnvelope;
+        if (
+          msg.messageType === 'stream_start' ||
+          msg.messageType === 'session_offer' ||
+          msg.messageType === 'session_answer' ||
+          msg.messageType === 'ice_candidate' ||
+          msg.messageType === 'stream_stop'
+        ) {
+          void bridge.handleIncomingEnvelope(msg);
+        }
+      });
+    };
+    capHostBridge.updateContext({
+      deviceId: 'cap-host',
+      activeRoom: capRoomSnap,
+      activeRoomRole: 'host',
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+    });
+    capRxBridge.updateContext({
+      deviceId: 'cap-rx',
+      activeRoom: capRoomSnap,
+      activeRoomRole: 'receiver',
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+    });
+    wireCap(capHostWs, capHostBridge);
+    wireCap(capRxWs, capRxBridge);
+
+    await capHostBridge.startScreenSharing('cap-rx');
+    await waitUntil(
+      () => capRxBridge.getSnapshot().incomingStreams.some((s) => s.stream !== null),
+      'Capability test stream connected'
+    );
+    const capPeerInst = capHostBridge.getPeerInstance('cap-rx')!;
+    const offersBeforeAdapt = capHostFakePc!.createOfferCalls.length;
+    capHostFakePc!.mockStatsMap = new Map<string, Record<string, unknown>>([
+      ['out-1', { type: 'outbound-rtp', kind: 'video', bytesSent: 1_000_000, timestamp: 1000, framesEncoded: 60, frameWidth: 1920, frameHeight: 1080, framesPerSecond: 60, qualityLimitationReason: 'bandwidth' }],
+      ['rem-1', { type: 'remote-inbound-rtp', kind: 'video', fractionLost: 0.03, jitter: 0.035, roundTripTime: 0.19 }],
+    ]);
+    const fallbackBitrateSample = await capPeerInst.sampleAndAdaptStats(20_000);
+    assert.equal(fallbackBitrateSample.outbound.supportedAdaptiveControls?.supportsSetParameters, true);
+    assert.equal(fallbackBitrateSample.outbound.supportedAdaptiveControls?.supportsMaxBitrate, true);
+    assert.equal(fallbackBitrateSample.outbound.supportedAdaptiveControls?.supportsScaleResolutionDownBy, false);
+    assert.equal(
+      (capHostFakePc!.getVideoSender()!.getParameters().encodings[0].maxBitrate ?? 99_999_000) < 10_000_000,
+      true,
+      'Bitrate fallback applied cleanly even when scaleResolutionDownBy rejected'
+    );
+
+    setParamsMode = 'reject-all';
+    capHostFakePc!.mockStatsMap = new Map<string, Record<string, unknown>>([
+      ['out-1', { type: 'outbound-rtp', kind: 'video', bytesSent: 1_500_000, timestamp: 2000, framesEncoded: 100, frameWidth: 1920, frameHeight: 1080, framesPerSecond: 40, qualityLimitationReason: 'bandwidth' }],
+      ['rem-1', { type: 'remote-inbound-rtp', kind: 'video', fractionLost: 0.06, jitter: 0.055, roundTripTime: 0.28 }],
+    ]);
+    const fullRejectSample = await capPeerInst.sampleAndAdaptStats(25_000);
+    assert.equal(fullRejectSample.outbound.supportedAdaptiveControls?.supportsSetParameters, false);
+    assert.ok(fullRejectSample.outbound.supportedAdaptiveControls?.lastError);
+    assert.equal(
+      capHostFakePc!.createOfferCalls.length,
+      offersBeforeAdapt,
+      'Quality adaptation & fallbacks must NEVER trigger unnecessary SDP renegotiation'
+    );
+
+    capHostBridge.dispose();
+    capRxBridge.dispose();
+    await fetch(`${baseUrl}/api/rooms/${capRoomId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${capRoomData.hostToken}` },
+    });
+    await capHostWs.close();
+    await capRxWs.close();
+    console.log('  [PASS] 4F.3. Missing stats, packetsLost fallback, unsupported setParameters fallbacks & zero SDP renegotiation verified');
+
+    // 4F.4: Independent multi-peer adaptation across 6 devices (1 host + 5 paired receivers) + bidirectional sharing + independent stop
+    const sixHostId = 'six-host-mac';
+    const sixRxIds = ['six-rx-1', 'six-rx-2', 'six-rx-3', 'six-rx-4', 'six-rx-5'];
+    const sixRoomRes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: sixHostId,
+        hostDeviceName: 'Studio Host (6-Dev)',
+        hostPlatform: 'macos',
+      }),
+    });
+    const sixRoomData = (await sixRoomRes.json()) as { room: RoomSnapshot; hostToken: string };
+    const sixRoomId = sixRoomData.room.roomId;
+
+    const sixHostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: sixHostId,
+      deviceName: 'Studio Host (6-Dev)',
+      platform: 'macos',
+      role: 'both',
+      roomId: sixRoomId,
+      token: sixRoomData.hostToken,
+    });
+    const sixRxWsList: TestWsClient[] = [];
+    const sixRxBridges: WebRtcSignalingBridge[] = [];
+
+    for (let i = 0; i < sixRxIds.length; i += 1) {
+      const rxId = sixRxIds[i];
+      const joinData = (await (
+        await fetch(`${baseUrl}/api/rooms/${sixRoomId}/pair-requests`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            receiverDeviceId: rxId,
+            deviceName: `Receiver Mac ${i + 1}`,
+            platform: 'macos',
+          }),
+        })
+      ).json()) as { memberToken: string };
+      const rxWs = await connectAndAnnounce({
+        wsUrl,
+        deviceId: rxId,
+        deviceName: `Receiver Mac ${i + 1}`,
+        platform: 'macos',
+        role: 'both',
+        roomId: sixRoomId,
+        token: joinData.memberToken,
+      });
+      await fetch(`${baseUrl}/api/rooms/${sixRoomId}/pair-requests/${rxId}/approve`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${sixRoomData.hostToken}` },
+      });
+      sixRxWsList.push(rxWs);
+    }
+
+    let sixRoomSnap = ((await (await fetch(`${baseUrl}/api/rooms/${sixRoomId}`)).json()) as { room: RoomSnapshot }).room;
+    assert.equal(sixRoomSnap.pairedReceivers.length, 5, '6-device room active (1 host + 5 paired receivers)');
+
+    const sixHostBridge = new WebRtcSignalingBridge({
+      deviceId: sixHostId,
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(sixHostWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('six-host-1080', { width: 1920, height: 1080, frameRate: 60 }),
+      rtcFactory: (cfg) => new FakeRtcPeerConnection(cfg) as unknown as RTCPeerConnection,
+    });
+    sixHostBridge.updateContext({
+      deviceId: sixHostId,
+      activeRoom: sixRoomSnap,
+      activeRoomRole: 'host',
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+    });
+
+    const wireSix = (
+      wsClient: TestWsClient,
+      bridge: WebRtcSignalingBridge,
+      role: 'host' | 'receiver',
+      devId: string
+    ) => {
+      wsClient.ws.on('message', (raw, isBinary) => {
+        if (isBinary) return;
+        const msg = JSON.parse(raw.toString('utf8')) as CastoraEnvelope;
+        if (msg.messageType === 'room_state' && msg.roomId === sixRoomId) {
+          sixRoomSnap = { ...sixRoomSnap, ...(msg.payload as Partial<RoomSnapshot>) };
+          bridge.updateContext({
+            deviceId: devId,
+            activeRoom: sixRoomSnap,
+            activeRoomRole: role,
+            preferences: default1080Prefs,
+            networkPrefs: netPrefs4b,
+          });
+        } else if (
+          msg.messageType === 'stream_start' ||
+          msg.messageType === 'session_offer' ||
+          msg.messageType === 'session_answer' ||
+          msg.messageType === 'ice_candidate' ||
+          msg.messageType === 'stream_stop'
+        ) {
+          void bridge.handleIncomingEnvelope(msg);
+        }
+      });
+    };
+    wireSix(sixHostWs, sixHostBridge, 'host', sixHostId);
+
+    for (let i = 0; i < sixRxIds.length; i += 1) {
+      const rxId = sixRxIds[i];
+      const rxBridge = new WebRtcSignalingBridge({
+        deviceId: rxId,
+        preferences: default1080Prefs,
+        networkPrefs: netPrefs4b,
+        getSignalingClient: () => wrapWsSender(sixRxWsList[i]),
+        callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+        captureFn: makeDynamicCapture(`six-rx-${i + 1}`, { width: 1920, height: 1080, frameRate: 60 }),
+        rtcFactory: (cfg) => new FakeRtcPeerConnection(cfg) as unknown as RTCPeerConnection,
+      });
+      rxBridge.updateContext({
+        deviceId: rxId,
+        activeRoom: sixRoomSnap,
+        activeRoomRole: 'receiver',
+        preferences: default1080Prefs,
+        networkPrefs: netPrefs4b,
+      });
+      wireSix(sixRxWsList[i], rxBridge, 'receiver', rxId);
+      sixRxBridges.push(rxBridge);
+    }
+
+    // Host shares screen to all 5 receivers simultaneously, AND Receiver 1 shares back bidirectionally
+    await sixHostBridge.startScreenSharing(null);
+    await sixRxBridges[0].startScreenSharing(sixHostId);
+
+    await waitUntil(
+      () =>
+        sixHostBridge.getSnapshot().outboundPeers.length === 5 &&
+        sixRxBridges.every((b) =>
+          b.getSnapshot().incomingStreams.some((s) => s.senderDeviceId === sixHostId && s.stream !== null)
+        ) &&
+        sixHostBridge.getSnapshot().incomingStreams.some((s) => s.senderDeviceId === sixRxIds[0] && s.stream !== null),
+      'All 6 devices connected in bidirectional multi-peer session'
+    );
+
+    // Expected 5-peer concurrency ceiling for High (10_000 kbps): 50% -> 5_000 kbps per peer
+    const fivePeerCeiling = computeConcurrencyScaledBitrateKbps(10_000, 5, 2_500);
+    assert.equal(fivePeerCeiling, 5_000);
+
+    // Inject severe congestion on rx-1 ONLY, while keeping rx-2..rx-5 completely healthy
+    const congestedPeer = sixHostBridge.getPeerInstance(sixRxIds[0])!;
+    const congestedPc = (congestedPeer as unknown as { pc: FakeRtcPeerConnection }).pc;
+    congestedPc.mockStatsMap = new Map<string, Record<string, unknown>>([
+      ['pair-1', { type: 'candidate-pair', state: 'succeeded', nominated: true, availableOutgoingBitrate: 2_200_000, currentRoundTripTime: 0.28 }],
+      ['out-1', { type: 'outbound-rtp', kind: 'video', bytesSent: 1_000_000, timestamp: 2000, framesEncoded: 60, frameWidth: 1920, frameHeight: 1080, framesPerSecond: 48, qualityLimitationReason: 'bandwidth' }],
+      ['rem-1', { type: 'remote-inbound-rtp', kind: 'video', fractionLost: 0.055, jitter: 0.048, roundTripTime: 0.28 }],
+    ]);
+
+    for (const healthyId of sixRxIds.slice(1)) {
+      const pInst = sixHostBridge.getPeerInstance(healthyId)!;
+      const pPc = (pInst as unknown as { pc: FakeRtcPeerConnection }).pc;
+      pPc.mockStatsMap = new Map<string, Record<string, unknown>>([
+        ['pair-1', { type: 'candidate-pair', state: 'succeeded', nominated: true, availableOutgoingBitrate: 40_000_000, currentRoundTripTime: 0.012 }],
+        ['out-1', { type: 'outbound-rtp', kind: 'video', bytesSent: 2_000_000, timestamp: 2000, framesEncoded: 60, frameWidth: 1920, frameHeight: 1080, framesPerSecond: 60, qualityLimitationReason: 'none' }],
+        ['rem-1', { type: 'remote-inbound-rtp', kind: 'video', fractionLost: 0.0, jitter: 0.002, roundTripTime: 0.012 }],
+      ]);
+      await pInst.sampleAndAdaptStats(30_000);
+    }
+    await congestedPeer.sampleAndAdaptStats(30_000);
+
+    const sixHostSnap = sixHostBridge.getSnapshot();
+    const rx1Out = sixHostSnap.outboundPeers.find((o) => o.targetDeviceId === sixRxIds[0])!;
+    assert.equal(rx1Out.telemetry.adaptationStatus, 'degraded', 'Congested Peer 1 degraded independently');
+    assert.equal(rx1Out.telemetry.networkCondition, 'congested');
+    assert.equal((rx1Out.telemetry.targetBitrateKbps ?? 99_999) < fivePeerCeiling, true);
+
+    for (const healthyId of sixRxIds.slice(1)) {
+      const healthyOut = sixHostSnap.outboundPeers.find((o) => o.targetDeviceId === healthyId)!;
+      assert.equal(healthyOut.telemetry.adaptationStatus, 'target', `Healthy peer ${healthyId} unaffected`);
+      assert.equal(healthyOut.telemetry.networkCondition, 'healthy');
+      assert.equal(healthyOut.telemetry.targetBitrateKbps, fivePeerCeiling);
+    }
+
+    // Receiver 1 stops its bidirectional share independently while Host keeps streaming to all 5 receivers
+    sixRxBridges[0].stopSharing('user_stopped');
+    await waitUntil(
+      () =>
+        sixRxBridges[0].getSnapshot().isSharingLocal === false &&
+        sixHostBridge.getSnapshot().incomingStreams.length === 0,
+      'Bidirectional receiver stopped cleanly without interrupting host 5-receiver broadcast'
+    );
+    assert.equal(sixHostBridge.getSnapshot().outboundPeers.length, 5);
+
+    sixHostBridge.dispose();
+    for (const b of sixRxBridges) b.dispose();
+    await fetch(`${baseUrl}/api/rooms/${sixRoomId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${sixRoomData.hostToken}` },
+    });
+    await sixHostWs.close();
+    for (const w of sixRxWsList) await w.close();
+    console.log('  [PASS] 4F.4. Independent 6-device adaptation, bidirectional sharing & independent stopping verified');
+
+    // =========================================================================
+    // STAGE 4G — Advanced Device Management System Tests
+    // =========================================================================
+    console.log('\n[Stage 4G] Running Advanced Device Management System checks...');
+
+    // 4G.1: Client device type detection never fabricates unknown devices + display name validation
+    assert.equal(detectDeviceType('', ''), 'Unknown');
+    assert.equal(detectDeviceType('CustomEmbeddedClient/1.0', ''), 'Unknown');
+    assert.equal(detectDeviceType('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)', 'MacIntel'), 'Mac');
+    assert.equal(detectDeviceType('Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Win32'), 'Windows');
+    assert.equal(detectDeviceType('Mozilla/5.0 (Linux; Android 14; Pixel 8)', 'Linux armv8l'), 'Android');
+    assert.equal(detectDeviceType('Mozilla/5.0 (SMART-TV; Linux; Tizen 7.0)', ''), 'TV');
+    assert.equal(validateDeviceDisplayName('Studio MacBook Pro'), null);
+    assert.notEqual(validateDeviceDisplayName('A'), null);
+    assert.notEqual(validateDeviceDisplayName('Host'), null);
+    assert.notEqual(validateDeviceDisplayName('Admin'), null);
+    assert.notEqual(validateDeviceDisplayName('Mac [Host]'), null);
+    assert.notEqual(validateDeviceDisplayName('Bad<Script>'), null);
+
+    // 4G.2: Reliable deviceType propagation + Unknown fallback + duplicate name / misleading label prevention
+    const dmHostId = 'dm-host-mac';
+    const dmRoomRes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: dmHostId,
+        hostDeviceName: 'Editing Suite Host',
+        hostPlatform: 'macos',
+        hostDeviceType: 'Mac',
+      }),
+    });
+    assert.equal(dmRoomRes.status, 201);
+    const dmRoomData = (await dmRoomRes.json()) as { room: RoomSnapshot; hostToken: string };
+    const dmRoomId = dmRoomData.room.roomId;
+    assert.equal(dmRoomData.room.hostDeviceType, 'Mac');
+    assert.equal(Boolean(dmRoomData.room.hostLastSeenAt), true);
+
+    const dmHostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: dmHostId,
+      deviceName: 'Editing Suite Host',
+      platform: 'macos',
+      deviceType: 'Mac',
+      role: 'both',
+      roomId: dmRoomId,
+      token: dmRoomData.hostToken,
+    });
+
+    // Reject misleading system label or duplicate host display name on join
+    const badJoinLabel = await fetch(`${baseUrl}/api/rooms/${dmRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        receiverDeviceId: 'dm-bad-label',
+        deviceName: 'Admin',
+        platform: 'macos',
+        deviceType: 'Mac',
+      }),
+    });
+    assert.equal(badJoinLabel.status, 400);
+
+    const dupNameOnJoin = await fetch(`${baseUrl}/api/rooms/${dmRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        receiverDeviceId: 'dm-dup-name',
+        deviceName: 'editing suite host',
+        platform: 'macos',
+        deviceType: 'Mac',
+      }),
+    });
+    assert.equal(dupNameOnJoin.status, 409);
+
+    // Join Participant 1 (Windows) and Participant 2 (Unknown / unrecognized deviceType)
+    const dmP1JoinRes = await fetch(`${baseUrl}/api/rooms/${dmRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        receiverDeviceId: 'dm-win-1',
+        deviceName: 'Colorist Workstation',
+        platform: 'macos',
+        deviceType: 'Windows',
+      }),
+    });
+    assert.equal(dmP1JoinRes.status, 200);
+    const dmP1Join = (await dmP1JoinRes.json()) as { memberToken: string };
+
+    const dmP2JoinRes = await fetch(`${baseUrl}/api/rooms/${dmRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        receiverDeviceId: 'dm-unk-2',
+        deviceName: 'Reference Monitor',
+        platform: 'android-tv',
+        deviceType: 'CustomUnrecognizedThing',
+      }),
+    });
+    assert.equal(dmP2JoinRes.status, 200);
+    const dmP2Join = (await dmP2JoinRes.json()) as { memberToken: string };
+
+    // Duplicate deviceId join rejected (409)
+    const dupIdJoin = await fetch(`${baseUrl}/api/rooms/${dmRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        receiverDeviceId: 'dm-win-1',
+        deviceName: 'Another Display Name',
+        platform: 'macos',
+      }),
+    });
+    assert.equal(dupIdJoin.status, 409);
+
+    const dmP1Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 'dm-win-1',
+      deviceName: 'Colorist Workstation',
+      platform: 'macos',
+      deviceType: 'Windows',
+      role: 'both',
+      roomId: dmRoomId,
+      token: dmP1Join.memberToken,
+    });
+    const dmP2Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 'dm-unk-2',
+      deviceName: 'Reference Monitor',
+      platform: 'android-tv',
+      role: 'both',
+      roomId: dmRoomId,
+      token: dmP2Join.memberToken,
+    });
+
+    // Non-host unauthorized to approve
+    const unauthApprove = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/pair-requests/dm-win-1/approve`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${dmP2Join.memberToken}` },
+      }
+    );
+    assert.equal(unauthApprove.status, 403);
+
+    await fetch(`${baseUrl}/api/rooms/${dmRoomId}/pair-requests/dm-win-1/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${dmRoomData.hostToken}` },
+    });
+    await fetch(`${baseUrl}/api/rooms/${dmRoomId}/pair-requests/dm-unk-2/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${dmRoomData.hostToken}` },
+    });
+
+    let dmSnap = ((await (await fetch(`${baseUrl}/api/rooms/${dmRoomId}`)).json()) as { room: RoomSnapshot }).room;
+    const p1Rec = dmSnap.pairedReceivers.find((r) => r.deviceId === 'dm-win-1')!;
+    const p2Rec = dmSnap.pairedReceivers.find((r) => r.deviceId === 'dm-unk-2')!;
+    assert.equal(p1Rec.deviceType, 'Windows');
+    assert.equal(p2Rec.deviceType, 'Unknown', 'Unrecognized deviceType falls back cleanly to Unknown');
+    assert.equal(Boolean(p1Rec.lastSeenAt), true);
+    console.log('  [PASS] 4G.1. Device type propagation, Unknown fallback, validation & unauthorized approval checks passed');
+
+    // 4G.3: Self-rename, host-assigned rename, session persistence, duplicate/misleading rejections & non-host rejection
+    const selfRenameRoomStatePromise = dmHostWs.waitForMessage(
+      (m) =>
+        m.messageType === 'room_state' &&
+        m.roomId === dmRoomId &&
+        Array.isArray((m.payload as JsonRecord).pairedReceivers) &&
+        ((m.payload as JsonRecord).pairedReceivers as Array<{ deviceId: string; deviceName: string }>).some(
+          (r) => r.deviceId === 'dm-win-1' && r.deviceName === 'HDR Grading Bay'
+        ),
+      3000,
+      'room_state after self-rename'
+    );
+    const selfRenameRes = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/devices/dm-win-1/name`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${dmP1Join.memberToken}`,
+        },
+        body: JSON.stringify({ deviceName: 'HDR Grading Bay' }),
+      }
+    );
+    assert.equal(selfRenameRes.status, 200);
+    await selfRenameRoomStatePromise;
+
+    // Non-host trying to rename another device -> 403
+    const unauthOtherRename = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/devices/dm-unk-2/name`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${dmP1Join.memberToken}`,
+        },
+        body: JSON.stringify({ deviceName: 'Hijacked Name' }),
+      }
+    );
+    assert.equal(unauthOtherRename.status, 403);
+
+    // Host-assigned rename of participant -> 200 and persisted
+    const hostAssignRenameRes = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/devices/dm-unk-2/name`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${dmRoomData.hostToken}`,
+        },
+        body: JSON.stringify({ deviceName: 'Client Lounge Display' }),
+      }
+    );
+    assert.equal(hostAssignRenameRes.status, 200);
+
+    // Misleading label on rename -> 400
+    const badRenameLabel = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/devices/dm-unk-2/name`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${dmRoomData.hostToken}`,
+        },
+        body: JSON.stringify({ deviceName: 'Display [Host]' }),
+      }
+    );
+    assert.equal(badRenameLabel.status, 400);
+
+    // Duplicate name on rename -> 409
+    const dupRenameRes = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/devices/dm-unk-2/name`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${dmRoomData.hostToken}`,
+        },
+        body: JSON.stringify({ deviceName: 'hdr grading bay' }),
+      }
+    );
+    assert.equal(dupRenameRes.status, 409);
+
+    dmSnap = ((await (await fetch(`${baseUrl}/api/rooms/${dmRoomId}`)).json()) as { room: RoomSnapshot }).room;
+    assert.equal(
+      dmSnap.pairedReceivers.find((r) => r.deviceId === 'dm-win-1')?.deviceName,
+      'HDR Grading Bay'
+    );
+    assert.equal(
+      dmSnap.pairedReceivers.find((r) => r.deviceId === 'dm-unk-2')?.deviceName,
+      'Client Lounge Display'
+    );
+    console.log('  [PASS] 4G.2. Self-rename, host-assigned rename, session persistence & authorization verified');
+
+    // 4G.4: Individual stream stop & reconnect authorization + lastSeenAt update + participant disconnect/removal
+    // Host starts stream to dm-win-1 and dm-unk-2 starts stream to host
+    dmHostWs.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'stream_start',
+      messageId: 'dm-s-1',
+      senderDeviceId: dmHostId,
+      receiverDeviceId: 'dm-win-1',
+      roomId: dmRoomId,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: 'sess-dm-host',
+        streamId: 'stream-dm-host',
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        codec: 'H264',
+      },
+    });
+    dmP2Ws.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'stream_start',
+      messageId: 'dm-s-2',
+      senderDeviceId: 'dm-unk-2',
+      receiverDeviceId: dmHostId,
+      roomId: dmRoomId,
+      timestamp: new Date().toISOString(),
+      payload: {
+        sessionId: 'sess-dm-p2',
+        streamId: 'stream-dm-p2',
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        codec: 'H264',
+      },
+    });
+    await waitUntil(async () => {
+      const snap = ((await (await fetch(`${baseUrl}/api/rooms/${dmRoomId}`)).json()) as { room: RoomSnapshot }).room;
+      return (snap.activeStreams?.length ?? 0) === 2;
+    }, 'Both independent room streams registered');
+
+    // Non-host cannot stop another participant's stream (403)
+    const unauthStop = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/devices/dm-unk-2/stop-stream`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${dmP1Join.memberToken}`,
+        },
+        body: JSON.stringify({}),
+      }
+    );
+    assert.equal(unauthStop.status, 403);
+
+    // Host stops dm-unk-2's stream ONLY -> dm-unk-2 gets stream_stop while host stream stays active
+    const p2StopNoticePromise = dmP2Ws.waitForMessage(
+      (m) =>
+        m.messageType === 'stream_stop' &&
+        m.senderDeviceId === dmHostId &&
+        m.receiverDeviceId === 'dm-unk-2' &&
+        (m.payload as JsonRecord).streamId === 'stream-dm-p2',
+      3000,
+      'host stop-stream notification to dm-unk-2'
+    );
+    const hostStopP2 = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/devices/dm-unk-2/stop-stream`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${dmRoomData.hostToken}`,
+        },
+        body: JSON.stringify({}),
+      }
+    );
+    assert.equal(hostStopP2.status, 200);
+    await p2StopNoticePromise;
+    const afterHostStopSnap = (await hostStopP2.json()) as { room: RoomSnapshot };
+    assert.equal(afterHostStopSnap.room.activeStreams?.length, 1);
+    assert.equal(afterHostStopSnap.room.activeStreams?.[0].publisherDeviceId, dmHostId);
+
+    // Unauthorized reconnect of another device -> 403; authorized host reconnect -> 200 + target notified + lastSeenAt bumped
+    const unauthReconnect = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/devices/dm-unk-2/reconnect`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${dmP1Join.memberToken}` },
+      }
+    );
+    assert.equal(unauthReconnect.status, 403);
+
+    const prevLastSeenP1 = Date.parse(
+      afterHostStopSnap.room.pairedReceivers.find((r) => r.deviceId === 'dm-win-1')?.lastSeenAt ?? ''
+    );
+    await new Promise((r) => setTimeout(r, 15));
+
+    const p1ReconnectMsg = dmP1Ws.waitForMessage(
+      (m) =>
+        m.messageType === 'error' &&
+        (m.payload as JsonRecord).code === 'WEBRTC_NEGOTIATION_FAILED',
+      3000,
+      'host reconnect notification to dm-win-1'
+    );
+    const authReconnect = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/devices/dm-win-1/reconnect`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${dmRoomData.hostToken}` },
+      }
+    );
+    assert.equal(authReconnect.status, 200);
+    await p1ReconnectMsg;
+    const afterReconnectSnap = (await authReconnect.json()) as { room: RoomSnapshot };
+    const nextLastSeenP1 = Date.parse(
+      afterReconnectSnap.room.pairedReceivers.find((r) => r.deviceId === 'dm-win-1')?.lastSeenAt ?? ''
+    );
+    assert.equal(nextLastSeenP1 >= prevLastSeenP1, true, 'lastSeenAt updates on reconnect action');
+
+    // Heartbeat status update bumps lastSeenAt
+    await new Promise((r) => setTimeout(r, 15));
+    dmP1Ws.sendJson({
+      protocolVersion: 'castora.v1',
+      messageType: 'heartbeat',
+      messageId: 'dm-hb-1',
+      senderDeviceId: 'dm-win-1',
+      receiverDeviceId: null,
+      roomId: dmRoomId,
+      timestamp: new Date().toISOString(),
+      payload: { uptimeSec: 12 },
+    });
+    await waitUntil(async () => {
+      const snap = ((await (await fetch(`${baseUrl}/api/rooms/${dmRoomId}`)).json()) as { room: RoomSnapshot }).room;
+      const ts = Date.parse(snap.pairedReceivers.find((r) => r.deviceId === 'dm-win-1')?.lastSeenAt ?? '');
+      return ts > nextLastSeenP1;
+    }, 'Heartbeat bumps lastSeenAt');
+
+    // Non-host cannot remove a participant (403); host removal disconnects removed participant cleanly
+    const unauthRemove = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/receivers/dm-unk-2`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${dmP1Join.memberToken}` },
+      }
+    );
+    assert.equal(unauthRemove.status, 403);
+
+    await dmHostWs.close();
+    await dmP1Ws.close();
+    await dmP2Ws.close();
+    await fetch(`${baseUrl}/api/rooms/${dmRoomId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${dmRoomData.hostToken}` },
+    });
+    console.log('  [PASS] 4G.3. Individual stream stop, reconnect authorization, heartbeat lastSeenAt & remove RBAC verified');
+
+    // 4G.5: Simultaneous concurrent join requests, duplicate prevention & 6-device capacity enforcement
+    const capDmRes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: 'cap-dm-host',
+        hostDeviceName: 'Capacity Host',
+        hostPlatform: 'macos',
+        hostDeviceType: 'Mac',
+      }),
+    });
+    const capDmData = (await capDmRes.json()) as { room: RoomSnapshot; hostToken: string };
+    const capDmRoomId = capDmData.room.roomId;
+
+    // Fire 8 concurrent join requests: 6 unique valid devices + 1 duplicate deviceId + 1 duplicate name
+    const concurrentRequests = [
+      { receiverDeviceId: 'conc-1', deviceName: 'Node One', platform: 'macos', deviceType: 'Mac' },
+      { receiverDeviceId: 'conc-2', deviceName: 'Node Two', platform: 'macos', deviceType: 'Windows' },
+      { receiverDeviceId: 'conc-3', deviceName: 'Node Three', platform: 'android', deviceType: 'Android' },
+      { receiverDeviceId: 'conc-4', deviceName: 'Node Four', platform: 'macos', deviceType: 'Linux' },
+      { receiverDeviceId: 'conc-5', deviceName: 'Node Five', platform: 'android-tv', deviceType: 'TV' },
+      { receiverDeviceId: 'conc-6', deviceName: 'Node Six', platform: 'macos', deviceType: 'iPad' },
+      { receiverDeviceId: 'conc-1', deviceName: 'Node One Duplicate ID', platform: 'macos', deviceType: 'Mac' },
+      { receiverDeviceId: 'conc-7', deviceName: 'node two', platform: 'macos', deviceType: 'Windows' },
+    ];
+    const joinResponses = await Promise.all(
+      concurrentRequests.map((body) =>
+        fetch(`${baseUrl}/api/rooms/${capDmRoomId}/pair-requests`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+      )
+    );
+    const joinStatuses = joinResponses.map((r) => r.status);
+    assert.equal(joinStatuses.filter((s) => s === 200).length, 6, 'Exactly 6 unique valid concurrent requests accepted');
+    assert.equal(joinStatuses.filter((s) => s === 409).length, 2, 'Duplicate ID and duplicate name rejected with 409');
+
+    // Add 7th unique valid pending request while all 6 are pending
+    const seventhJoin = await fetch(`${baseUrl}/api/rooms/${capDmRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        receiverDeviceId: 'conc-7-valid',
+        deviceName: 'Node Seven Overflow',
+        platform: 'macos',
+        deviceType: 'Mac',
+      }),
+    });
+    assert.equal(seventhJoin.status, 200);
+
+    // Concurrently approve all 7 pending requests -> exactly 6 succeed (200), 1 receives 409 ROOM_FULL
+    const approveResults = await Promise.all(
+      ['conc-1', 'conc-2', 'conc-3', 'conc-4', 'conc-5', 'conc-6', 'conc-7-valid'].map((id) =>
+        fetch(`${baseUrl}/api/rooms/${capDmRoomId}/pair-requests/${id}/approve`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${capDmData.hostToken}` },
+        })
+      )
+    );
+    const approveStatuses = approveResults.map((r) => r.status);
+    assert.equal(approveStatuses.filter((s) => s === 200).length, 6, 'Max 6 paired devices enforced under concurrent approvals');
+    assert.equal(approveStatuses.filter((s) => s === 409).length, 1, '7th concurrent approval rejected with 409 ROOM_FULL');
+
+    const fullSnap = ((await (await fetch(`${baseUrl}/api/rooms/${capDmRoomId}`)).json()) as { room: RoomSnapshot }).room;
+    assert.equal(fullSnap.pairedReceiverCount, 6);
+    const slotIndexes = fullSnap.pairedReceivers.map((r) => r.assignedSlotIndex).sort((a, b) => a - b);
+    assert.deepEqual(slotIndexes, [0, 1, 2, 3, 4, 5], 'All 6 receiver slots uniquely assigned');
+
+    // Remove conc-3, then approve conc-7-valid into freed slot cleanly
+    const removeConc3 = await fetch(`${baseUrl}/api/rooms/${capDmRoomId}/receivers/conc-3`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${capDmData.hostToken}` },
+    });
+    assert.equal(removeConc3.status, 200);
+    const approveSeventhAfterFree = await fetch(
+      `${baseUrl}/api/rooms/${capDmRoomId}/pair-requests/conc-7-valid/approve`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${capDmData.hostToken}` },
+      }
+    );
+    assert.equal(approveSeventhAfterFree.status, 200);
+    const slotFreedSnap = (await approveSeventhAfterFree.json()) as { room: RoomSnapshot };
+    assert.equal(slotFreedSnap.room.pairedReceiverCount, 6);
+    assert.equal(
+      slotFreedSnap.room.pairedReceivers.some((r) => r.deviceId === 'conc-7-valid'),
+      true
+    );
+
+    await fetch(`${baseUrl}/api/rooms/${capDmRoomId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${capDmData.hostToken}` },
+    });
+    console.log('  [PASS] 4G.4. Simultaneous concurrent joins, duplicate prevention, 6-device cap & slot reuse verified');
+
     // Rate limiting check (exceed 40 window attempts on lookup)
     let hit429 = false;
     for (let i = 0; i < 45; i += 1) {
@@ -2642,7 +4575,7 @@ async function main() {
     assert.equal(hit429, true, 'Rate limiter must return HTTP 429 after exceeding window limit');
     console.log('  [PASS] Extra. Room lookup rate limiting verified (HTTP 429)');
 
-    console.log('\nAll Stage 3 (14) + Stage 4A (10) + Stage 4B (10) + Stage 4C (4) backend, WebRTC quality, ABR & multi-peer tests passed!');
+    console.log('\nAll Stage 3 (14) + Stage 4A (10) + Stage 4B (10) + Stage 4C (4) + Stage 4D (3) + Stage 4E (4) + Stage 4F (4) + Stage 4G (4) backend, WebRTC & Device Management tests passed!');
   } finally {
     await instance.close();
   }

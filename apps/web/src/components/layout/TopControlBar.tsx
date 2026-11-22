@@ -12,6 +12,7 @@ interface NavDestinationItem {
 const NAV_ITEMS: NavDestinationItem[] = [
   { id: 'control-room', label: 'Home', matches: ['control-room'] },
   { id: 'receivers', label: 'Rooms', matches: ['receivers'] },
+  { id: 'devices', label: 'Devices', matches: ['devices'] },
   { id: 'multi-view', label: 'Screens', matches: ['multi-view', 'cast'] },
   { id: 'settings', label: 'Settings', matches: ['settings', 'activity'] },
 ];

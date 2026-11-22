@@ -14,6 +14,7 @@ interface VideoSurfaceProps {
   highlight?: boolean;
   allowFullscreen?: boolean;
   large?: boolean;
+  onVideoDimensionsChange?: (width: number | null, height: number | null) => void;
 }
 
 type FullscreenDocument = Document & {
@@ -70,28 +71,57 @@ export function VideoSurface({
   highlight = false,
   allowFullscreen = true,
   large = false,
+  onVideoDimensionsChange,
 }: VideoSurfaceProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const videoViewportRef = useRef<HTMLDivElement | null>(null);
+  const onVideoDimensionsChangeRef = useRef(onVideoDimensionsChange);
+  onVideoDimensionsChangeRef.current = onVideoDimensionsChange;
+  const lastReportedDimsRef = useRef<{ width: number | null; height: number | null }>({
+    width: null,
+    height: null,
+  });
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const emitVideoDimensions = useCallback((width: number | null, height: number | null) => {
+    const last = lastReportedDimsRef.current;
+    if (last.width === width && last.height === height) return;
+    lastReportedDimsRef.current = { width, height };
+    onVideoDimensionsChangeRef.current?.(width, height);
+  }, []);
+
+  const syncVideoDimensions = useCallback(() => {
+    const el = videoRef.current;
+    if (!el || el.videoWidth <= 0 || el.videoHeight <= 0) {
+      emitVideoDimensions(null, null);
+      return;
+    }
+    emitVideoDimensions(el.videoWidth, el.videoHeight);
+  }, [emitVideoDimensions]);
 
   useEffect(() => {
     const el = videoRef.current;
-    if (!el) return;
+    if (!el) {
+      emitVideoDimensions(null, null);
+      return;
+    }
     if (stream) {
       el.srcObject = stream;
       void el.play().catch(() => {
         // Autoplay policy may hold unmuted playback until user gesture
       });
+      syncVideoDimensions();
     } else {
       el.srcObject = null;
+      emitVideoDimensions(null, null);
     }
     return () => {
       if (el) {
         el.srcObject = null;
       }
+      emitVideoDimensions(null, null);
     };
-  }, [stream]);
+  }, [emitVideoDimensions, stream, syncVideoDimensions]);
 
   const handleExitFullscreen = useCallback(async () => {
     const videoEl = videoRef.current as FullscreenVideoElement | null;
@@ -263,6 +293,8 @@ export function VideoSurface({
             autoPlay
             playsInline
             muted={muted}
+            onLoadedMetadata={syncVideoDimensions}
+            onResize={syncVideoDimensions}
             onDoubleClick={allowFullscreen ? () => void handleFullscreen() : undefined}
             className={
               isFullscreen

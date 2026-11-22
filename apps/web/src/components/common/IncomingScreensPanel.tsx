@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Monitor, Volume2, VolumeX } from 'lucide-react';
+import { Monitor, RotateCcw, Volume2, VolumeX } from 'lucide-react';
+import { evaluateConnectionQuality } from '../../services/streamingDiagnosticsService';
 import type { IncomingScreenEntry } from '../../services/webrtcSignalingBridge';
-import type { WebRtcConnectionPhase } from '../../types/studio';
+import type { PeerConnectionRecoveryInfo, WebRtcConnectionPhase } from '../../types/studio';
 import { SignalBadge, type SignalTone } from './SignalBadge';
 import { TelemetryStrip } from './TelemetryStrip';
 import { VideoSurface } from './VideoSurface';
@@ -11,12 +12,28 @@ interface IncomingScreensPanelProps {
   emptyMessage?: string;
   compactTelemetry?: boolean;
   hideTelemetry?: boolean;
+  mutedByPeerId?: Record<string, boolean>;
+  onToggleMutePeer?: (peerDeviceId: string) => void;
+  onRetryPeer?: (peerDeviceId: string) => void;
+  onIncomingVideoDimensions?: (
+    senderDeviceId: string,
+    width: number | null,
+    height: number | null
+  ) => void;
 }
 
 function incomingBadge(
   phase: WebRtcConnectionPhase,
-  hasStream: boolean
+  hasStream: boolean,
+  recovery?: PeerConnectionRecoveryInfo | null
 ): { label: string; tone: SignalTone; pulse?: boolean } {
+  if (phase === 'reconnecting' || recovery?.reconnecting) {
+    const suffix =
+      recovery && recovery.attempt > 0
+        ? ` (${recovery.attempt}/${recovery.maxAttempts})`
+        : '';
+    return { label: `Reconnecting${suffix}`, tone: 'warn', pulse: true };
+  }
   if (hasStream && phase === 'connected') {
     return { label: 'Live', tone: 'active' };
   }
@@ -25,10 +42,8 @@ function incomingBadge(
       return { label: 'Connected', tone: 'active' };
     case 'connecting':
       return { label: 'Connecting', tone: 'signal', pulse: true };
-    case 'reconnecting':
-      return { label: 'Reconnecting', tone: 'warn', pulse: true };
     case 'failed':
-      return { label: 'Error', tone: 'fault' };
+      return { label: 'Failed', tone: 'fault' };
     case 'disconnected':
       return { label: 'Disconnected', tone: 'warn' };
     default:
@@ -41,6 +56,10 @@ export function IncomingScreensPanel({
   emptyMessage = 'No incoming participant screens right now. When another participant shares their screen, their video appears here automatically.',
   compactTelemetry = false,
   hideTelemetry = false,
+  mutedByPeerId,
+  onToggleMutePeer,
+  onRetryPeer,
+  onIncomingVideoDimensions,
 }: IncomingScreensPanelProps) {
   const [mutedMap, setMutedMap] = useState<Record<string, boolean>>({});
 
@@ -71,8 +90,22 @@ export function IncomingScreensPanel({
       ) : (
         <div className={`grid gap-4 ${gridClass}`}>
           {streams.map((entry, idx) => {
-            const muted = mutedMap[entry.senderDeviceId] ?? true;
-            const badge = incomingBadge(entry.phase, entry.stream !== null);
+            const muted =
+              mutedByPeerId !== undefined
+                ? (mutedByPeerId[entry.senderDeviceId] ?? true)
+                : (mutedMap[entry.senderDeviceId] ?? true);
+            const badge = incomingBadge(entry.phase, entry.stream !== null, entry.recovery);
+            const quality = evaluateConnectionQuality({
+              phase: entry.phase,
+              iceConnectionState: entry.iceConnectionState,
+              telemetry: entry.telemetry,
+              recovery: entry.recovery,
+            });
+            const canRetry =
+              Boolean(onRetryPeer) &&
+              (entry.phase === 'failed' ||
+                entry.phase === 'disconnected' ||
+                Boolean(entry.recovery?.exhausted));
             const hasAudio = Boolean(entry.stream?.getAudioTracks().length);
 
             return (
@@ -86,6 +119,9 @@ export function IncomingScreensPanel({
                   allowFullscreen
                   large={streams.length === 1}
                   highlight={entry.phase === 'connected' && entry.stream !== null}
+                  onVideoDimensionsChange={(width, height) =>
+                    onIncomingVideoDimensions?.(entry.senderDeviceId, width, height)
+                  }
                   standbyReason={
                     entry.errorMessage ??
                     entry.statusDetail ??
@@ -100,45 +136,81 @@ export function IncomingScreensPanel({
                   }
                   footerMeta={
                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                      <div className="text-xs text-[#64748B] tabular-metrics">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-[#64748B] tabular-metrics">
                         <span>ICE: {entry.iceConnectionState ?? 'idle'}</span>
+                        <span aria-hidden="true">·</span>
+                        <span title={quality.detail}>
+                          Quality:{' '}
+                          <strong className="font-semibold text-[#172033]">
+                            {quality.label}
+                          </strong>
+                        </span>
                         {entry.streamMeta && (
                           <span>
-                            {' '}
                             · {entry.streamMeta.width}×{entry.streamMeta.height} @{' '}
                             {entry.streamMeta.fps} FPS ({entry.streamMeta.codec})
                           </span>
                         )}
                       </div>
-                      <button
-                        type="button"
-                        disabled={!entry.stream || !hasAudio}
-                        onClick={() =>
-                          setMutedMap((prev) => ({
-                            ...prev,
-                            [entry.senderDeviceId]: !muted,
-                          }))
-                        }
-                        className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-45"
-                      >
-                        {muted ? (
-                          <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
-                        ) : (
-                          <Volume2 className="h-3.5 w-3.5 text-[#2563EB]" aria-hidden="true" />
+                      <div className="flex items-center gap-1.5">
+                        {canRetry && (
+                          <button
+                            type="button"
+                            onClick={() => onRetryPeer?.(entry.senderDeviceId)}
+                            className="inline-flex h-7 items-center gap-1 rounded-lg border border-[#DC2626]/30 bg-[#FEF2F2] px-2.5 text-xs font-semibold text-[#DC2626] hover:bg-[#FEE2E2]"
+                          >
+                            <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                            <span>Retry</span>
+                          </button>
                         )}
-                        <span>{hasAudio ? (muted ? 'Unmute' : 'Mute') : 'No audio'}</span>
-                      </button>
+                        <button
+                          type="button"
+                          disabled={!entry.stream || !hasAudio}
+                          onClick={() => {
+                            if (onToggleMutePeer) {
+                              onToggleMutePeer(entry.senderDeviceId);
+                            } else {
+                              setMutedMap((prev) => ({
+                                ...prev,
+                                [entry.senderDeviceId]: !muted,
+                              }));
+                            }
+                          }}
+                          className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-45"
+                        >
+                          {muted ? (
+                            <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
+                          ) : (
+                            <Volume2 className="h-3.5 w-3.5 text-[#2563EB]" aria-hidden="true" />
+                          )}
+                          <span>{hasAudio ? (muted ? 'Unmute' : 'Mute') : 'No audio'}</span>
+                        </button>
+                      </div>
                     </div>
                   }
                 />
 
-                {entry.errorMessage && (
+                {(entry.errorMessage || (entry.recovery?.exhausted && !entry.errorMessage)) && (
                   <div
                     role="alert"
                     data-castora-chrome
-                    className="rounded-lg border border-[#DC2626]/30 bg-[#FEF2F2] px-3 py-2 text-xs text-[#DC2626]"
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#DC2626]/30 bg-[#FEF2F2] px-3 py-2 text-xs text-[#DC2626]"
                   >
-                    {entry.errorMessage}
+                    <span>
+                      {entry.errorMessage ??
+                        entry.recovery?.lastError ??
+                        `Connection to ${entry.senderName} failed.`}
+                    </span>
+                    {canRetry && (
+                      <button
+                        type="button"
+                        onClick={() => onRetryPeer?.(entry.senderDeviceId)}
+                        className="inline-flex h-7 items-center gap-1 rounded-md border border-[#DC2626]/30 bg-white px-2.5 font-semibold text-[#DC2626] hover:bg-[#FEE2E2]"
+                      >
+                        <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                        <span>Retry</span>
+                      </button>
+                    )}
                   </div>
                 )}
 

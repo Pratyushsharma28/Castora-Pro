@@ -1,6 +1,16 @@
 import type { WebSocket } from 'ws';
 
 export type CastoraPlatform = 'macos' | 'android' | 'android-tv';
+export type DetectedDeviceType =
+  | 'Mac'
+  | 'Windows'
+  | 'Linux'
+  | 'iPad'
+  | 'iPhone'
+  | 'Android'
+  | 'TV'
+  | 'Chromebook'
+  | 'Unknown';
 export type CastoraDeviceRole = 'sender' | 'receiver' | 'both';
 export type CastoraVideoCodec = 'H264' | 'HEVC' | 'VP8' | 'VP9' | 'AV1';
 export type PairingMethod = 'qr' | 'room_code' | 'manual_ip';
@@ -17,6 +27,7 @@ export interface RegisteredDevice {
   deviceId: string;
   deviceName: string;
   platform: CastoraPlatform;
+  deviceType: DetectedDeviceType;
   role: CastoraDeviceRole;
   wsPort: number;
   capabilities: DeviceCapabilities;
@@ -31,10 +42,12 @@ export interface PendingPairRequest {
   deviceId: string;
   deviceName: string;
   platform: CastoraPlatform;
+  deviceType: DetectedDeviceType;
   pairingMethod: PairingMethod;
   tokenHash: string;
   connected: boolean;
   requestedAt: number;
+  lastSeenAt: number;
   sessionId: string;
 }
 
@@ -42,6 +55,7 @@ export interface PairedReceiverMember {
   deviceId: string;
   deviceName: string;
   platform: CastoraPlatform;
+  deviceType: DetectedDeviceType;
   tokenHash: string;
   connected: boolean;
   assignedSlotIndex: number;
@@ -61,6 +75,7 @@ export interface ActiveRoomStream {
   height: number;
   fps: number;
   codec: CastoraVideoCodec;
+  hasAudio?: boolean;
   startedAt: number;
 }
 
@@ -75,6 +90,7 @@ export interface PublicActiveStream {
   height: number;
   fps: number;
   codec: CastoraVideoCodec;
+  hasAudio?: boolean;
   startedAt: string;
 }
 
@@ -83,8 +99,10 @@ export interface CastoraRoom {
   hostDeviceId: string;
   hostDeviceName: string;
   hostPlatform: CastoraPlatform;
+  hostDeviceType: DetectedDeviceType;
   hostTokenHash: string;
   hostConnected: boolean;
+  hostLastSeenAt: number;
   createdAt: number;
   expiresAt: number;
   ttlMs: number;
@@ -98,9 +116,11 @@ export interface PublicPendingRequest {
   deviceId: string;
   deviceName: string;
   platform: CastoraPlatform;
+  deviceType: DetectedDeviceType;
   pairingMethod: PairingMethod;
   connected: boolean;
   requestedAt: string;
+  lastSeenAt: string;
   sessionId: string;
 }
 
@@ -108,9 +128,11 @@ export interface PublicPairedReceiver {
   deviceId: string;
   deviceName: string;
   platform: CastoraPlatform;
+  deviceType: DetectedDeviceType;
   connected: boolean;
   assignedSlotIndex: number;
   pairedAt: string;
+  lastSeenAt: string;
   sessionId: string;
 }
 
@@ -120,7 +142,9 @@ export interface PublicRoomSnapshot {
   hostDeviceId: string;
   hostDeviceName: string;
   hostPlatform: CastoraPlatform;
+  hostDeviceType: DetectedDeviceType;
   hostConnected: boolean;
+  hostLastSeenAt: string;
   createdAt: string;
   expiresAt: string;
   maxReceivers: number;
@@ -143,5 +167,7 @@ export interface BackendHealthStatus {
   activeDevices: number;
   activeRooms: number;
   maxReceiversPerRoom: number;
+  turnConfigured?: boolean;
+  turnMode?: 'ephemeral-hmac' | 'static' | 'disabled';
   timestamp: string;
 }

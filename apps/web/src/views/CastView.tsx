@@ -19,6 +19,7 @@ import type {
 } from '../types/studio';
 import { IncomingScreensPanel } from '../components/common/IncomingScreensPanel';
 import { SignalBadge, type SignalTone } from '../components/common/SignalBadge';
+import { StreamingQualityDiagnosticsPanel } from '../components/common/StreamingQualityDiagnosticsPanel';
 import { TelemetryStrip } from '../components/common/TelemetryStrip';
 import { VideoSurface } from '../components/common/VideoSurface';
 
@@ -35,6 +36,11 @@ interface CastViewProps {
   onConnectReceiver: (targetPeerId: string) => Promise<void>;
   onStopSharing: () => void;
   onNavigate: (destination: StudioDestination) => void;
+  onIncomingVideoDimensions?: (
+    senderDeviceId: string,
+    width: number | null,
+    height: number | null
+  ) => void;
   onLogEvent: (
     category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error',
     title: string,
@@ -104,6 +110,7 @@ export function CastView({
   onConnectReceiver,
   onStopSharing,
   onNavigate,
+  onIncomingVideoDimensions,
   onLogEvent,
 }: CastViewProps) {
   const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
@@ -560,7 +567,10 @@ export function CastView({
         </section>
 
         <section className="min-w-0 space-y-4 lg:col-span-7" aria-label="Preview and Incoming">
-          <IncomingScreensPanel streams={webrtcState.incomingStreams} />
+          <IncomingScreensPanel
+            streams={webrtcState.incomingStreams}
+            onIncomingVideoDimensions={onIncomingVideoDimensions}
+          />
 
           <VideoSurface
             slotLabel="My Screen"
@@ -586,6 +596,11 @@ export function CastView({
           <TelemetryStrip telemetry={webrtcState.outboundTelemetry} compact />
         </section>
       </div>
+
+      <StreamingQualityDiagnosticsPanel
+        preferences={preferences}
+        webrtcState={webrtcState}
+      />
     </div>
   );
 }

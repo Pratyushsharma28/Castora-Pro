@@ -7,6 +7,7 @@ import {
   MonitorPlay,
   Plus,
   RefreshCw,
+  RotateCcw,
   ShieldAlert,
   Square,
   Users,
@@ -49,7 +50,16 @@ interface ControlRoomViewProps {
   onStartSharing: (targetSelection: string | string[] | null) => Promise<void>;
   onStopSharing: () => void;
   onReconnectBackend: () => void;
+  onRetryPeer?: (peerDeviceId: string) => void;
+  onRetryAllFailed?: () => void;
+  mutedByPeerId?: Record<string, boolean>;
+  onToggleMutePeer?: (peerDeviceId: string) => void;
   onNavigate: (destination: StudioDestination) => void;
+  onIncomingVideoDimensions?: (
+    senderDeviceId: string,
+    width: number | null,
+    height: number | null
+  ) => void;
 }
 
 const MAX_INITIAL_RECEIVERS = 6;
@@ -92,7 +102,12 @@ export function ControlRoomView({
   onStartSharing,
   onStopSharing,
   onReconnectBackend,
+  onRetryPeer,
+  onRetryAllFailed,
+  mutedByPeerId,
+  onToggleMutePeer,
   onNavigate,
+  onIncomingVideoDimensions,
 }: ControlRoomViewProps) {
   const [shareBusy, setShareBusy] = useState(false);
   const [roomBusy, setRoomBusy] = useState(false);
@@ -390,9 +405,21 @@ export function ControlRoomView({
       {(actionError || webrtcState.errorMessage || backendError) && (
         <div
           role="alert"
-          className="rounded-xl border border-[#DC2626]/30 bg-[#FEF2F2] px-4 py-3 text-sm text-[#B91C1C]"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#DC2626]/30 bg-[#FEF2F2] px-4 py-3 text-sm text-[#B91C1C]"
         >
-          {actionError ?? webrtcState.errorMessage ?? backendError}
+          <span>{actionError ?? webrtcState.errorMessage ?? backendError}</span>
+          {onRetryAllFailed &&
+            (webrtcState.incomingStreams.some((s) => s.phase === 'failed' || s.recovery?.exhausted) ||
+              webrtcState.outboundPeers.some((o) => o.phase === 'failed' || o.recovery?.exhausted)) && (
+              <button
+                type="button"
+                onClick={onRetryAllFailed}
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-[#DC2626]/30 bg-white px-3 text-xs font-semibold text-[#DC2626] hover:bg-[#FEE2E2]"
+              >
+                <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Retry Failed Connections</span>
+              </button>
+            )}
         </div>
       )}
 
@@ -510,6 +537,10 @@ export function ControlRoomView({
               streams={webrtcState.incomingStreams}
               compactTelemetry
               hideTelemetry
+              mutedByPeerId={mutedByPeerId}
+              onToggleMutePeer={onToggleMutePeer}
+              onRetryPeer={onRetryPeer}
+              onIncomingVideoDimensions={onIncomingVideoDimensions}
             />
           )}
 

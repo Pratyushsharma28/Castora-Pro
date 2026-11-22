@@ -8,12 +8,18 @@ import {
   validateCastoraEnvelope,
   type CastoraEnvelope,
 } from './protocolValidator.ts';
-import { toRoomStatePayload, type RoomManager, type TerminatedStreamNotice } from './roomManager.ts';
+import {
+  normalizeDeviceType,
+  toRoomStatePayload,
+  type RoomManager,
+  type TerminatedStreamNotice,
+} from './roomManager.ts';
 import type { SlidingWindowRateLimiter } from './security.ts';
 import type {
   CastoraDeviceRole,
   CastoraPlatform,
   CastoraVideoCodec,
+  DetectedDeviceType,
   DeviceCapabilities,
   PairingMethod,
   PublicRoomSnapshot,
@@ -48,6 +54,19 @@ function extractBearerOrQueryToken(req: IncomingMessage): string | undefined {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const token = url.searchParams.get('token')?.trim();
     if (token) return token;
+  } catch {
+    // Ignore malformed query
+  }
+  return undefined;
+}
+
+function extractDeviceTypeFromQuery(req: IncomingMessage): DetectedDeviceType | undefined {
+  try {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const raw = url.searchParams.get('deviceType');
+    if (raw) {
+      return normalizeDeviceType(raw);
+    }
   } catch {
     // Ignore malformed query
   }
@@ -122,6 +141,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
     {
       remoteAddress: string;
       token?: string;
+      deviceType?: DetectedDeviceType;
       boundDeviceId?: string;
       isAlive: boolean;
     }
@@ -144,6 +164,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
       socketMeta.set(ws, {
         remoteAddress: extractClientAddress(req),
         token: extractBearerOrQueryToken(req),
+        deviceType: extractDeviceTypeFromQuery(req),
         isAlive: true,
       });
       wss.emit('connection', ws, req);
@@ -300,7 +321,12 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
 
   function handleValidatedEnvelope(
     ws: WebSocket,
-    meta: { remoteAddress: string; token?: string; boundDeviceId?: string },
+    meta: {
+      remoteAddress: string;
+      token?: string;
+      deviceType?: DetectedDeviceType;
+      boundDeviceId?: string;
+    },
     envelope: CastoraEnvelope
   ): void {
     switch (envelope.messageType) {
@@ -319,6 +345,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
           deviceId: envelope.senderDeviceId,
           deviceName: payload.deviceName,
           platform: payload.platform,
+          deviceType: meta.deviceType,
           role: payload.role,
           wsPort: payload.wsPort,
           capabilities: payload.capabilities,
@@ -459,6 +486,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
           receiverDeviceId: envelope.senderDeviceId,
           deviceName: payload.deviceName,
           platform: payload.platform,
+          deviceType: meta.deviceType,
           pairingMethod: payload.pairingMethod,
         });
 
@@ -472,7 +500,9 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
                 submitResult.code === 'ROOM_FULL'
                   ? 'SESSION_FULL'
                   : submitResult.code === 'DUPLICATE_PAIR_REQUEST' ||
-                      submitResult.code === 'ALREADY_PAIRED'
+                      submitResult.code === 'ALREADY_PAIRED' ||
+                      submitResult.code === 'INVALID_DEVICE_NAME' ||
+                      submitResult.code === 'DUPLICATE_DEVICE_NAME'
                     ? 'INVALID_MESSAGE'
                     : 'INVALID_ROOM_ID',
               message: submitResult.message,

@@ -2,6 +2,7 @@ import type { CastoraEnvelope, CastoraPlatform, CastoraVideoCodec } from '../typ
 import type {
   CapturePreferences,
   NetworkPreferences,
+  PeerConnectionRecoveryInfo,
   StreamTelemetrySnapshot,
   WebRtcConnectionPhase,
 } from '../types/studio';
@@ -15,6 +16,14 @@ import { createEmptyTelemetry } from './streamStatsService';
 import { resolveQualityTarget } from './videoQualityService';
 import { CastoraWebRtcPeer } from './webrtcPeerService';
 
+export interface ReconnectPolicyConfig {
+  maxAttempts?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  iceDisconnectGraceMs?: number;
+  recoveryVerifyMs?: number;
+}
+
 export interface IncomingScreenEntry {
   senderDeviceId: string;
   senderName: string;
@@ -25,6 +34,7 @@ export interface IncomingScreenEntry {
   iceConnectionState: RTCIceConnectionState | null;
   statusDetail: string | null;
   errorMessage: string | null;
+  recovery?: PeerConnectionRecoveryInfo | null;
   stream: MediaStream | null;
   streamMeta: {
     width: number;
@@ -33,7 +43,10 @@ export interface IncomingScreenEntry {
     codec: CastoraVideoCodec;
   } | null;
   telemetry: StreamTelemetrySnapshot;
+  renderedWidth: number | null;
+  renderedHeight: number | null;
   startedAt: string;
+  lastActivityAt: number;
 }
 
 export interface OutboundPeerEntry {
@@ -46,8 +59,10 @@ export interface OutboundPeerEntry {
   iceConnectionState: RTCIceConnectionState | null;
   statusDetail: string | null;
   errorMessage: string | null;
+  recovery?: PeerConnectionRecoveryInfo | null;
   telemetry: StreamTelemetrySnapshot;
   qualityOverride?: Partial<CapturePreferences> | null;
+  lastActivityAt: number;
 }
 
 export interface WebRtcSessionSnapshot {
@@ -121,15 +136,23 @@ export class WebRtcSignalingBridge {
   private callbacks: WebRtcBridgeCallbacks;
   private captureFn: typeof startScreenCapture;
   private rtcFactory?: (config: RTCConfiguration) => RTCPeerConnection;
+  private onRefreshIceServers?: () => Promise<NetworkPreferences | null>;
+  private reconnectConfig: Required<ReconnectPolicyConfig>;
 
   private captureSession: CapturedScreenSession | null = null;
   private outboundStreamId: string | null = null;
   private autoBroadcastToRoom = false;
+  private desiredOutboundTargets = new Set<string>();
   private pendingAutoPublishPeers = new Set<string>();
   private peers = new Map<string, CastoraWebRtcPeer>();
   private incomingMap = new Map<string, IncomingScreenEntry>();
   private outboundMap = new Map<string, OutboundPeerEntry>();
   private peerQualityOverrides = new Map<string, Partial<CapturePreferences>>();
+  private recoveryMap = new Map<string, PeerConnectionRecoveryInfo>();
+  private reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private verifyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private reconnectingPeers = new Set<string>();
+  private disposed = false;
   private statusDetail: string | null = null;
   private errorMessage: string | null = null;
 
@@ -141,6 +164,8 @@ export class WebRtcSignalingBridge {
     callbacks: WebRtcBridgeCallbacks;
     captureFn?: typeof startScreenCapture;
     rtcFactory?: (config: RTCConfiguration) => RTCPeerConnection;
+    reconnectConfig?: ReconnectPolicyConfig;
+    onRefreshIceServers?: () => Promise<NetworkPreferences | null>;
   }) {
     this.deviceId = params.deviceId;
     this.preferences = params.preferences;
@@ -149,6 +174,19 @@ export class WebRtcSignalingBridge {
     this.callbacks = params.callbacks;
     this.captureFn = params.captureFn ?? startScreenCapture;
     this.rtcFactory = params.rtcFactory;
+    this.onRefreshIceServers = params.onRefreshIceServers;
+    this.reconnectConfig = {
+      maxAttempts: Math.max(1, params.reconnectConfig?.maxAttempts ?? 3),
+      baseDelayMs: Math.max(10, params.reconnectConfig?.baseDelayMs ?? 1000),
+      maxDelayMs: Math.max(20, params.reconnectConfig?.maxDelayMs ?? 8000),
+      iceDisconnectGraceMs: Math.max(0, params.reconnectConfig?.iceDisconnectGraceMs ?? 1500),
+      recoveryVerifyMs: Math.max(50, params.reconnectConfig?.recoveryVerifyMs ?? 3500),
+    };
+  }
+
+  getPeerRecoveryState(peerDeviceId: string): PeerConnectionRecoveryInfo | null {
+    const rec = this.recoveryMap.get(peerDeviceId);
+    return rec ? { ...rec } : null;
   }
 
   getPeerCount(): number {
@@ -161,6 +199,31 @@ export class WebRtcSignalingBridge {
 
   getPeerInstance(peerDeviceId: string): CastoraWebRtcPeer | undefined {
     return this.peers.get(peerDeviceId);
+  }
+
+  updateIncomingRenderedDimensions(
+    senderDeviceId: string,
+    width: number | null,
+    height: number | null
+  ): void {
+    const entry = this.incomingMap.get(senderDeviceId);
+    if (!entry) return;
+    const normalizedW =
+      typeof width === 'number' && Number.isFinite(width) && width > 0 ? Math.round(width) : null;
+    const normalizedH =
+      typeof height === 'number' && Number.isFinite(height) && height > 0 ? Math.round(height) : null;
+    if (entry.renderedWidth === normalizedW && entry.renderedHeight === normalizedH) {
+      return;
+    }
+    entry.renderedWidth = normalizedW;
+    entry.renderedHeight = normalizedH;
+    entry.telemetry = {
+      ...entry.telemetry,
+      renderedWidth: normalizedW,
+      renderedHeight: normalizedH,
+    };
+    this.incomingMap.set(senderDeviceId, entry);
+    this.emit();
   }
 
   getEffectivePreferencesForPeer(peerDeviceId: string): CapturePreferences {
@@ -204,10 +267,21 @@ export class WebRtcSignalingBridge {
         height: this.captureSession?.actualHeight,
       });
       if (outEntry) {
+        const abrState = peer.getAdaptiveState();
         outEntry.telemetry = {
           ...outEntry.telemetry,
+          targetFps: effectivePrefs.targetFps,
+          targetFramerate: abrState?.targetFramerate ?? effectivePrefs.targetFps,
           configuredMaxBitrateKbps: target.configuredMaxBitrateKbps,
-          targetBitrateKbps: target.configuredMaxBitrateKbps,
+          targetBitrateKbps: abrState?.targetBitrateKbps ?? target.configuredMaxBitrateKbps,
+          scaleResolutionDownBy: abrState?.scaleResolutionDownBy ?? 1.0,
+          adaptationStatus: abrState?.adaptationStatus ?? 'target',
+          adaptiveMode: target.adaptiveEnabled ? 'auto' : 'manual',
+          lastAdjustmentReason: abrState?.lastAdjustmentReason ?? null,
+          lastAdjustmentAt: abrState?.lastAdjustmentAt ?? null,
+          lastAdjustmentAction:
+            abrState?.lastAdjustmentAction ?? (target.adaptiveEnabled ? 'none' : 'manual-locked'),
+          supportedAdaptiveControls: peer.getSupportedAdaptiveControls(),
         };
         this.outboundMap.set(peerDeviceId, outEntry);
       }
@@ -285,11 +359,22 @@ export class WebRtcSignalingBridge {
           height: this.captureSession?.actualHeight,
         });
         if (outEntry) {
+          const abrState = peer.getAdaptiveState();
           outEntry.telemetry = {
             ...outEntry.telemetry,
             targetFps: effectivePrefs.targetFps,
+            targetFramerate: abrState?.targetFramerate ?? effectivePrefs.targetFps,
             configuredMaxBitrateKbps: resolved.configuredMaxBitrateKbps,
-            targetBitrateKbps: resolved.configuredMaxBitrateKbps,
+            targetBitrateKbps: abrState?.targetBitrateKbps ?? resolved.configuredMaxBitrateKbps,
+            scaleResolutionDownBy: abrState?.scaleResolutionDownBy ?? 1.0,
+            adaptationStatus: abrState?.adaptationStatus ?? 'target',
+            adaptiveMode: resolved.adaptiveEnabled ? 'auto' : 'manual',
+            lastAdjustmentReason: abrState?.lastAdjustmentReason ?? null,
+            lastAdjustmentAt: abrState?.lastAdjustmentAt ?? null,
+            lastAdjustmentAction:
+              abrState?.lastAdjustmentAction ??
+              (resolved.adaptiveEnabled ? 'none' : 'manual-locked'),
+            supportedAdaptiveControls: peer.getSupportedAdaptiveControls(),
             resolution:
               this.captureSession?.actualWidth && this.captureSession?.actualHeight
                 ? `${this.captureSession.actualWidth}×${this.captureSession.actualHeight}`
@@ -354,30 +439,68 @@ export class WebRtcSignalingBridge {
 
     const primaryOutbound = outboundPeers[0] ?? null;
     const primaryInbound = incomingStreams.find((i) => i.stream !== null) ?? incomingStreams[0] ?? null;
+
+    // Read fresh Stage 1 MediaStreamTrack.getSettings() when capturing locally
+    let liveCapWidth: number | null = this.captureSession?.actualWidth ?? null;
+    let liveCapHeight: number | null = this.captureSession?.actualHeight ?? null;
+    let liveCapFps: number | null = this.captureSession?.actualFrameRate ?? null;
+    if (this.captureSession?.videoTrack && typeof this.captureSession.videoTrack.getSettings === 'function') {
+      const settings = this.captureSession.videoTrack.getSettings();
+      if (typeof settings.width === 'number' && settings.width > 0) {
+        liveCapWidth = settings.width;
+        this.captureSession.actualWidth = settings.width;
+      }
+      if (typeof settings.height === 'number' && settings.height > 0) {
+        liveCapHeight = settings.height;
+        this.captureSession.actualHeight = settings.height;
+      }
+      if (typeof settings.frameRate === 'number' && settings.frameRate > 0) {
+        liveCapFps = settings.frameRate;
+        this.captureSession.actualFrameRate = settings.frameRate;
+      }
+    }
+
     const resolvedGlobal = resolveQualityTarget(this.preferences, {
-      width: this.captureSession?.actualWidth,
-      height: this.captureSession?.actualHeight,
+      width: liveCapWidth,
+      height: liveCapHeight,
     });
 
     const outboundTelemetry: StreamTelemetrySnapshot = primaryOutbound
-      ? primaryOutbound.telemetry
+      ? {
+          ...primaryOutbound.telemetry,
+          captureWidth: primaryOutbound.telemetry.captureWidth ?? liveCapWidth,
+          captureHeight: primaryOutbound.telemetry.captureHeight ?? liveCapHeight,
+          captureFps: primaryOutbound.telemetry.captureFps ?? liveCapFps,
+        }
       : {
           ...createEmptyTelemetry(this.preferences.targetFps, this.captureSession ? phase : 'idle'),
-          captureFps: this.captureSession?.actualFrameRate ?? null,
+          captureFps: liveCapFps,
+          captureWidth: liveCapWidth,
+          captureHeight: liveCapHeight,
           resolution:
-            this.captureSession?.actualWidth && this.captureSession?.actualHeight
-              ? `${this.captureSession.actualWidth}×${this.captureSession.actualHeight}`
-              : null,
+            liveCapWidth && liveCapHeight ? `${liveCapWidth}×${liveCapHeight}` : null,
           configuredMaxBitrateKbps: this.captureSession
             ? resolvedGlobal.configuredMaxBitrateKbps
             : null,
           targetBitrateKbps: this.captureSession
             ? resolvedGlobal.configuredMaxBitrateKbps
             : null,
+          targetFramerate: resolvedGlobal.targetFps,
+          adaptiveMode: resolvedGlobal.adaptiveEnabled ? 'auto' : 'manual',
+          scaleResolutionDownBy: this.captureSession ? 1.0 : null,
+          adaptationStatus: this.captureSession ? 'target' : null,
+          lastAdjustmentAction: resolvedGlobal.adaptiveEnabled ? 'none' : 'manual-locked',
+          lastAdjustmentReason: resolvedGlobal.adaptiveEnabled
+            ? null
+            : 'Manual quality locked — automatic adaptation paused.',
         };
 
     const inboundTelemetry: StreamTelemetrySnapshot = primaryInbound
-      ? primaryInbound.telemetry
+      ? {
+          ...primaryInbound.telemetry,
+          renderedWidth: primaryInbound.renderedWidth,
+          renderedHeight: primaryInbound.renderedHeight,
+        }
       : createEmptyTelemetry(this.preferences.targetFps, 'idle');
 
     const telemetry = this.captureSession ? outboundTelemetry : inboundTelemetry;
@@ -393,9 +516,9 @@ export class WebRtcSignalingBridge {
       localStream: this.captureSession?.stream ?? null,
       localCaptureMeta: this.captureSession
         ? {
-            width: this.captureSession.actualWidth,
-            height: this.captureSession.actualHeight,
-            fps: this.captureSession.actualFrameRate,
+            width: liveCapWidth,
+            height: liveCapHeight,
+            fps: liveCapFps,
             hasAudio: this.captureSession.hasAudio,
           }
         : null,
@@ -433,6 +556,7 @@ export class WebRtcSignalingBridge {
       targetFps: this.preferences.targetFps,
       networkPrefs: this.networkPrefs,
       rtcFactory: this.rtcFactory,
+      iceDisconnectGraceMs: this.reconnectConfig.iceDisconnectGraceMs,
       callbacks: {
         onOfferCreated: (offer) => {
           const signaling = this.getSignalingClient();
@@ -486,6 +610,7 @@ export class WebRtcSignalingBridge {
           const existingEntry = this.incomingMap.get(peerDeviceId);
           if (stream) {
             const meta = this.resolveParticipantMeta(peerDeviceId);
+            const now = Date.now();
             const entry: IncomingScreenEntry = existingEntry ?? {
               senderDeviceId: peerDeviceId,
               senderName: meta?.deviceName ?? peerDeviceId,
@@ -496,20 +621,27 @@ export class WebRtcSignalingBridge {
               iceConnectionState: null,
               statusDetail: 'Receiving live remote screen.',
               errorMessage: null,
+              recovery: this.getPeerRecoveryState(peerDeviceId),
               stream,
               streamMeta: null,
               telemetry: createEmptyTelemetry(this.preferences.targetFps, 'connected'),
-              startedAt: new Date().toISOString(),
+              renderedWidth: null,
+              renderedHeight: null,
+              startedAt: new Date(now).toISOString(),
+              lastActivityAt: now,
             };
             entry.stream = stream;
             entry.phase = 'connected';
             entry.errorMessage = null;
+            entry.lastActivityAt = now;
             entry.statusDetail = `Receiving live screen from ${entry.senderName}.`;
             this.incomingMap.set(peerDeviceId, entry);
             this.statusDetail = `Receiving live screen from ${entry.senderName}.`;
           } else if (existingEntry) {
             existingEntry.stream = null;
-            if (!peer.getActiveInboundStreamId()) {
+            existingEntry.renderedWidth = null;
+            existingEntry.renderedHeight = null;
+            if (!peer.getActiveInboundStreamId() && !this.reconnectingPeers.has(peerDeviceId)) {
               this.incomingMap.delete(peerDeviceId);
             } else {
               this.incomingMap.set(peerDeviceId, existingEntry);
@@ -518,17 +650,40 @@ export class WebRtcSignalingBridge {
           this.emit();
         },
         onPhaseChange: (phase, detail) => {
+          if (phase === 'connected') {
+            this.resetPeerRecovery(peerDeviceId);
+          }
+          const rec = this.getPeerRecoveryState(peerDeviceId);
+          const effectivePhase =
+            rec?.reconnecting && phase === 'disconnected' ? 'reconnecting' : phase;
+
           const outEntry = this.outboundMap.get(peerDeviceId);
           if (outEntry) {
-            outEntry.phase = phase;
+            outEntry.phase = effectivePhase;
             outEntry.statusDetail = detail;
+            outEntry.recovery = rec;
+            if (phase === 'connected') {
+              outEntry.errorMessage = null;
+            }
             this.outboundMap.set(peerDeviceId, outEntry);
           }
           const inEntry = this.incomingMap.get(peerDeviceId);
           if (inEntry) {
-            inEntry.phase = phase;
+            inEntry.phase = effectivePhase;
             inEntry.statusDetail = detail;
+            inEntry.recovery = rec;
+            if (phase === 'connected') {
+              inEntry.errorMessage = null;
+            }
             this.incomingMap.set(peerDeviceId, inEntry);
+          }
+          if (phase === 'connected') {
+            const anyFailed =
+              Array.from(this.outboundMap.values()).some((o) => o.phase === 'failed') ||
+              Array.from(this.incomingMap.values()).some((i) => i.phase === 'failed');
+            if (!anyFailed) {
+              this.errorMessage = null;
+            }
           }
           this.statusDetail = detail;
           this.emit();
@@ -546,15 +701,25 @@ export class WebRtcSignalingBridge {
           }
           this.emit();
         },
+        onConnectionFailure: (reason) => {
+          this.schedulePeerRecovery(peerDeviceId, reason);
+        },
         onStats: (dualStats) => {
+          const now = Date.now();
           const outEntry = this.outboundMap.get(peerDeviceId);
           if (outEntry) {
             outEntry.telemetry = dualStats.outbound;
+            outEntry.lastActivityAt = now;
             this.outboundMap.set(peerDeviceId, outEntry);
           }
           const inEntry = this.incomingMap.get(peerDeviceId);
           if (inEntry) {
-            inEntry.telemetry = dualStats.inbound;
+            inEntry.telemetry = {
+              ...dualStats.inbound,
+              renderedWidth: inEntry.renderedWidth,
+              renderedHeight: inEntry.renderedHeight,
+            };
+            inEntry.lastActivityAt = now;
             this.incomingMap.set(peerDeviceId, inEntry);
           }
           this.emit();
@@ -581,7 +746,380 @@ export class WebRtcSignalingBridge {
     return peer;
   }
 
+  private clearPeerRecoveryTimers(peerDeviceId: string): void {
+    const t = this.reconnectTimers.get(peerDeviceId);
+    if (t !== undefined) {
+      globalThis.clearTimeout(t);
+      this.reconnectTimers.delete(peerDeviceId);
+    }
+    const v = this.verifyTimers.get(peerDeviceId);
+    if (v !== undefined) {
+      globalThis.clearTimeout(v);
+      this.verifyTimers.delete(peerDeviceId);
+    }
+  }
+
+  private resetPeerRecovery(peerDeviceId: string): void {
+    this.clearPeerRecoveryTimers(peerDeviceId);
+    const existing = this.recoveryMap.get(peerDeviceId);
+    if (!existing || (!existing.reconnecting && !existing.exhausted && existing.attempt === 0)) {
+      return;
+    }
+    const cleared: PeerConnectionRecoveryInfo = {
+      attempt: 0,
+      maxAttempts: this.reconnectConfig.maxAttempts,
+      reconnecting: false,
+      exhausted: false,
+      lastError: null,
+      mode: 'idle',
+      nextRetryAt: null,
+    };
+    this.recoveryMap.set(peerDeviceId, cleared);
+    const outEntry = this.outboundMap.get(peerDeviceId);
+    if (outEntry) {
+      outEntry.recovery = { ...cleared };
+      outEntry.errorMessage = null;
+      this.outboundMap.set(peerDeviceId, outEntry);
+    }
+    const inEntry = this.incomingMap.get(peerDeviceId);
+    if (inEntry) {
+      inEntry.recovery = { ...cleared };
+      inEntry.errorMessage = null;
+      this.incomingMap.set(peerDeviceId, inEntry);
+    }
+  }
+
+  private syncRecoveryToEntries(
+    peerDeviceId: string,
+    rec: PeerConnectionRecoveryInfo,
+    phaseOverride?: WebRtcConnectionPhase,
+    detailOverride?: string
+  ): void {
+    const outEntry = this.outboundMap.get(peerDeviceId);
+    if (outEntry) {
+      outEntry.recovery = { ...rec };
+      if (phaseOverride) outEntry.phase = phaseOverride;
+      if (detailOverride) outEntry.statusDetail = detailOverride;
+      if (rec.exhausted && rec.lastError) outEntry.errorMessage = rec.lastError;
+      this.outboundMap.set(peerDeviceId, outEntry);
+    }
+    const inEntry = this.incomingMap.get(peerDeviceId);
+    if (inEntry) {
+      inEntry.recovery = { ...rec };
+      if (phaseOverride) inEntry.phase = phaseOverride;
+      if (detailOverride) inEntry.statusDetail = detailOverride;
+      if (rec.exhausted && rec.lastError) inEntry.errorMessage = rec.lastError;
+      this.incomingMap.set(peerDeviceId, inEntry);
+    }
+  }
+
+  private schedulePeerRecovery(peerDeviceId: string, reason: string): void {
+    if (this.disposed || !this.activeRoom || !this.isSelfAuthorizedInRoom()) return;
+
+    const existingPeer = this.peers.get(peerDeviceId);
+    if (existingPeer?.isHealthy()) {
+      return;
+    }
+
+    const meta = this.resolveParticipantMeta(peerDeviceId);
+    if (!meta || !meta.connected) {
+      return;
+    }
+
+    // Prevent duplicate reconnection attempts for the same peer
+    if (this.reconnectTimers.has(peerDeviceId) || this.reconnectingPeers.has(peerDeviceId)) {
+      return;
+    }
+
+    const prev = this.recoveryMap.get(peerDeviceId) ?? {
+      attempt: 0,
+      maxAttempts: this.reconnectConfig.maxAttempts,
+      reconnecting: false,
+      exhausted: false,
+      lastError: null,
+      mode: 'idle' as const,
+      nextRetryAt: null,
+    };
+
+    if (prev.attempt >= prev.maxAttempts) {
+      const exhaustedRec: PeerConnectionRecoveryInfo = {
+        ...prev,
+        reconnecting: false,
+        exhausted: true,
+        lastError: reason,
+        mode: 'idle',
+        nextRetryAt: null,
+      };
+      this.recoveryMap.set(peerDeviceId, exhaustedRec);
+      this.syncRecoveryToEntries(peerDeviceId, exhaustedRec, 'failed', reason);
+      this.errorMessage = `Connection to ${meta.deviceName} failed after ${prev.maxAttempts} recovery attempts. Click Retry to reconnect.`;
+      this.callbacks.onLogEvent(
+        'error',
+        `Automatic reconnection exhausted (${meta.deviceName})`,
+        reason
+      );
+      this.emit();
+      return;
+    }
+
+    const nextAttempt = prev.attempt + 1;
+    const delayMs = Math.min(
+      this.reconnectConfig.maxDelayMs,
+      this.reconnectConfig.baseDelayMs * Math.pow(2, nextAttempt - 1)
+    );
+    const diag = existingPeer?.getConnectionDiagnostics();
+    const mode: 'ice-restart' | 'peer-replace' =
+      nextAttempt === 1 && existingPeer && diag && diag.signalingState !== 'closed'
+        ? 'ice-restart'
+        : 'peer-replace';
+
+    const nextRec: PeerConnectionRecoveryInfo = {
+      attempt: nextAttempt,
+      maxAttempts: prev.maxAttempts,
+      reconnecting: true,
+      exhausted: false,
+      lastError: reason,
+      mode,
+      nextRetryAt: Date.now() + delayMs,
+    };
+    this.recoveryMap.set(peerDeviceId, nextRec);
+    this.syncRecoveryToEntries(
+      peerDeviceId,
+      nextRec,
+      'reconnecting',
+      `Reconnecting to ${meta.deviceName} (attempt ${nextAttempt}/${nextRec.maxAttempts})...`
+    );
+    this.callbacks.onLogEvent(
+      'webrtc',
+      `Scheduled reconnection for ${meta.deviceName}`,
+      `Attempt ${nextAttempt}/${nextRec.maxAttempts} (${mode}) in ${delayMs} ms`
+    );
+    this.emit();
+
+    const timer = globalThis.setTimeout(() => {
+      this.reconnectTimers.delete(peerDeviceId);
+      void this.executePeerRecovery(peerDeviceId, nextAttempt, mode, reason);
+    }, delayMs);
+    this.reconnectTimers.set(peerDeviceId, timer);
+  }
+
+  private async executePeerRecovery(
+    peerDeviceId: string,
+    attempt: number,
+    mode: 'ice-restart' | 'peer-replace',
+    reason: string
+  ): Promise<void> {
+    if (this.disposed || !this.activeRoom || !this.isSelfAuthorizedInRoom()) return;
+    if (this.reconnectingPeers.has(peerDeviceId)) return;
+
+    this.reconnectingPeers.add(peerDeviceId);
+    let failedErrMsg: string | null = null;
+    try {
+      if (this.onRefreshIceServers) {
+        try {
+          const freshPrefs = await this.onRefreshIceServers();
+          if (freshPrefs) {
+            this.networkPrefs = freshPrefs;
+          }
+        } catch {
+          // Proceed with current ICE config if refresh fails transiently
+        }
+      }
+
+      if (this.disposed || !this.activeRoom) return;
+      const meta = this.resolveParticipantMeta(peerDeviceId);
+      if (!meta || !meta.connected) return;
+
+      const currentPeer = this.peers.get(peerDeviceId);
+      if (currentPeer?.isHealthy()) {
+        this.resetPeerRecovery(peerDeviceId);
+        this.emit();
+        return;
+      }
+
+      const activeRec: PeerConnectionRecoveryInfo = {
+        attempt,
+        maxAttempts: this.reconnectConfig.maxAttempts,
+        reconnecting: true,
+        exhausted: false,
+        lastError: reason,
+        mode,
+        nextRetryAt: null,
+      };
+      this.recoveryMap.set(peerDeviceId, activeRec);
+
+      if (mode === 'ice-restart' && currentPeer) {
+        const restarted = await currentPeer.triggerIceRestart();
+        if (restarted) {
+          this.syncRecoveryToEntries(
+            peerDeviceId,
+            activeRec,
+            'reconnecting',
+            `ICE restart sent to ${meta.deviceName} (attempt ${attempt}/${activeRec.maxAttempts})...`
+          );
+          this.emit();
+
+          // Arm verification check: if peer has not recovered cleanly, advance retry state
+          const vTimer = globalThis.setTimeout(() => {
+            this.verifyTimers.delete(peerDeviceId);
+            if (this.disposed) return;
+            const checkedPeer = this.peers.get(peerDeviceId);
+            if (checkedPeer?.isHealthy()) {
+              this.resetPeerRecovery(peerDeviceId);
+              this.emit();
+              return;
+            }
+            const cur = this.recoveryMap.get(peerDeviceId);
+            if (cur?.reconnecting) {
+              this.schedulePeerRecovery(peerDeviceId, reason);
+            }
+          }, this.reconnectConfig.recoveryVerifyMs);
+          this.verifyTimers.set(peerDeviceId, vTimer);
+          return;
+        }
+      }
+
+      // Full peer replacement: snapshot state, clean up old RTCPeerConnection BEFORE creating replacement
+      const prevOut = this.outboundMap.get(peerDeviceId) ?? null;
+      const prevIn = this.incomingMap.get(peerDeviceId) ?? null;
+      const hadOutbound = Boolean(
+        this.captureSession && (prevOut || this.desiredOutboundTargets.has(peerDeviceId))
+      );
+      const expectedInboundStreamId =
+        currentPeer?.getActiveInboundStreamId() ?? prevIn?.streamId ?? null;
+      const sessionId = prevOut?.sessionId ?? prevIn?.sessionId ?? meta.sessionId;
+
+      if (currentPeer) {
+        this.peers.delete(peerDeviceId);
+        currentPeer.close('Replacing failed peer connection');
+      }
+
+      if (prevIn) {
+        this.incomingMap.set(peerDeviceId, {
+          ...prevIn,
+          stream: null,
+          phase: 'reconnecting',
+          errorMessage: null,
+          recovery: { ...activeRec, mode: 'peer-replace' },
+          statusDetail: `Replacing connection to ${meta.deviceName}...`,
+        });
+      }
+      if (prevOut) {
+        this.outboundMap.set(peerDeviceId, {
+          ...prevOut,
+          phase: 'reconnecting',
+          errorMessage: null,
+          recovery: { ...activeRec, mode: 'peer-replace' },
+          statusDetail: `Replacing connection to ${meta.deviceName}...`,
+        });
+      }
+
+      const replacement = this.getOrCreatePeer(peerDeviceId, sessionId);
+      if (hadOutbound && this.captureSession) {
+        await this.publishActiveCaptureToPeer(
+          peerDeviceId,
+          Math.max(1, this.outboundMap.size)
+        );
+      } else if (prevIn) {
+        replacement.markInboundStreamExpected(
+          expectedInboundStreamId ?? sessionId,
+          prevIn.streamMeta?.fps ?? this.preferences.targetFps
+        );
+        await replacement.requestInboundRecoveryOffer();
+      }
+
+      this.callbacks.onLogEvent(
+        'webrtc',
+        `Replaced failed peer connection for ${meta.deviceName}`,
+        `Cleanly closed prior RTCPeerConnection and started replacement handshake (attempt ${attempt}/${activeRec.maxAttempts}).`
+      );
+      this.emit();
+
+      // Verify replacement progresses to connected; otherwise schedule next attempt up to maxAttempts
+      const vTimer = globalThis.setTimeout(() => {
+        this.verifyTimers.delete(peerDeviceId);
+        if (this.disposed) return;
+        const checkedPeer = this.peers.get(peerDeviceId);
+        if (checkedPeer?.isHealthy()) {
+          this.resetPeerRecovery(peerDeviceId);
+          this.emit();
+          return;
+        }
+        const cur = this.recoveryMap.get(peerDeviceId);
+        if (cur?.reconnecting) {
+          this.schedulePeerRecovery(peerDeviceId, reason);
+        }
+      }, this.reconnectConfig.recoveryVerifyMs);
+      this.verifyTimers.set(peerDeviceId, vTimer);
+    } catch (err) {
+      failedErrMsg = err instanceof Error ? err.message : reason;
+    } finally {
+      this.reconnectingPeers.delete(peerDeviceId);
+    }
+    if (failedErrMsg !== null && !this.disposed) {
+      this.schedulePeerRecovery(peerDeviceId, failedErrMsg);
+    }
+  }
+
+  async retryPeerConnection(peerDeviceId: string): Promise<boolean> {
+    if (this.disposed || !this.activeRoom || !this.isSelfAuthorizedInRoom()) {
+      return false;
+    }
+    const existing = this.peers.get(peerDeviceId);
+    if (existing?.isHealthy()) {
+      return false;
+    }
+    const meta = this.resolveParticipantMeta(peerDeviceId);
+    if (!meta || !meta.connected) {
+      return false;
+    }
+
+    this.clearPeerRecoveryTimers(peerDeviceId);
+    this.recoveryMap.set(peerDeviceId, {
+      attempt: 1,
+      maxAttempts: this.reconnectConfig.maxAttempts,
+      reconnecting: true,
+      exhausted: false,
+      lastError: null,
+      mode: 'peer-replace',
+      nextRetryAt: null,
+    });
+    this.errorMessage = null;
+    await this.executePeerRecovery(peerDeviceId, 1, 'peer-replace', 'Manual connection retry');
+    return true;
+  }
+
+  async retryAllFailedConnections(): Promise<number> {
+    const candidates = new Set<string>();
+    for (const [id, entry] of this.incomingMap.entries()) {
+      if (entry.phase === 'failed' || entry.recovery?.exhausted) {
+        candidates.add(id);
+      }
+    }
+    for (const [id, entry] of this.outboundMap.entries()) {
+      if (entry.phase === 'failed' || entry.recovery?.exhausted) {
+        candidates.add(id);
+      }
+    }
+    for (const [id, rec] of this.recoveryMap.entries()) {
+      if (rec.exhausted) {
+        candidates.add(id);
+      }
+    }
+
+    let triggered = 0;
+    for (const peerId of candidates) {
+      if (await this.retryPeerConnection(peerId)) {
+        triggered += 1;
+      }
+    }
+    return triggered;
+  }
+
   private removePeerConnection(peerDeviceId: string, reason: string): void {
+    this.clearPeerRecoveryTimers(peerDeviceId);
+    this.reconnectingPeers.delete(peerDeviceId);
+    this.recoveryMap.delete(peerDeviceId);
     const peer = this.peers.get(peerDeviceId);
     if (peer) {
       this.peers.delete(peerDeviceId);
@@ -618,6 +1156,7 @@ export class WebRtcSignalingBridge {
       }
       this.outboundStreamId = null;
       this.autoBroadcastToRoom = false;
+      this.desiredOutboundTargets.clear();
       this.pendingAutoPublishPeers.clear();
       this.statusDetail = null;
       this.errorMessage = null;
@@ -629,7 +1168,24 @@ export class WebRtcSignalingBridge {
 
     // Close only peers that left the room or dropped their signaling connection;
     // keep all other peer streams and local capture completely undisturbed.
+    // Also synchronize renamed participant display names onto live incoming/outbound entries.
     let changed = false;
+    for (const [peerId, inEntry] of this.incomingMap.entries()) {
+      const meta = this.resolveParticipantMeta(peerId);
+      if (meta && inEntry.senderName !== meta.deviceName) {
+        inEntry.senderName = meta.deviceName;
+        this.incomingMap.set(peerId, inEntry);
+        changed = true;
+      }
+    }
+    for (const [peerId, outEntry] of this.outboundMap.entries()) {
+      const meta = this.resolveParticipantMeta(peerId);
+      if (meta && outEntry.targetName !== meta.deviceName) {
+        outEntry.targetName = meta.deviceName;
+        this.outboundMap.set(peerId, outEntry);
+        changed = true;
+      }
+    }
     for (const peerId of Array.from(this.peers.keys())) {
       const meta = this.resolveParticipantMeta(peerId);
       if (!meta || !meta.connected) {
@@ -647,7 +1203,7 @@ export class WebRtcSignalingBridge {
           .map((s) => s.publisherDeviceId)
       );
       for (const [senderId, entry] of this.incomingMap.entries()) {
-        if (!serverInboundPublishers.has(senderId)) {
+        if (!serverInboundPublishers.has(senderId) && !this.reconnectingPeers.has(senderId)) {
           const peer = this.peers.get(senderId);
           peer?.clearInboundStream(`${entry.senderName} stopped screen sharing.`);
           this.incomingMap.delete(senderId);
@@ -656,13 +1212,15 @@ export class WebRtcSignalingBridge {
       }
     }
 
-    if (
-      this.captureSession &&
-      this.autoBroadcastToRoom &&
-      this.isSelfAuthorizedInRoom()
-    ) {
-      const roomPeers = this.resolvePublishTargets('ALL');
-      for (const peerId of roomPeers) {
+    // Resume sharing automatically when a target or room participant reconnects
+    if (this.captureSession && this.isSelfAuthorizedInRoom()) {
+      const candidates = this.autoBroadcastToRoom
+        ? this.resolvePublishTargets('ALL')
+        : Array.from(this.desiredOutboundTargets).filter((id) => {
+            const m = this.resolveParticipantMeta(id);
+            return Boolean(m?.connected);
+          });
+      for (const peerId of candidates) {
         if (
           !this.outboundMap.has(peerId) &&
           !this.pendingAutoPublishPeers.has(peerId)
@@ -782,6 +1340,7 @@ export class WebRtcSignalingBridge {
     );
 
     const targets = this.resolvePublishTargets(targetSelection);
+    this.desiredOutboundTargets = new Set(targets);
     if (targets.length === 0) {
       if (!this.statusDetail) {
         this.statusDetail = this.activeRoom
@@ -826,6 +1385,7 @@ export class WebRtcSignalingBridge {
     if (!this.activeRoom || !this.isSelfAuthorizedInRoom()) {
       throw new Error('Create or join an approved room before transmitting your screen.');
     }
+    this.desiredOutboundTargets.add(targetPeerDeviceId);
     await this.publishActiveCaptureToPeer(
       targetPeerDeviceId,
       Math.max(1, this.outboundMap.size + 1)
@@ -873,10 +1433,20 @@ export class WebRtcSignalingBridge {
       statusDetail: `Connecting outbound stream to ${meta.deviceName}...`,
       errorMessage: null,
       qualityOverride: this.peerQualityOverrides.get(targetPeerDeviceId) ?? null,
+      lastActivityAt: Date.now(),
       telemetry: {
         ...createEmptyTelemetry(effectivePrefs.targetFps, 'connecting'),
         configuredMaxBitrateKbps: resolvedQuality.configuredMaxBitrateKbps,
         targetBitrateKbps: resolvedQuality.configuredMaxBitrateKbps,
+        targetFramerate: effectivePrefs.targetFps,
+        scaleResolutionDownBy: 1.0,
+        adaptationStatus: 'target',
+        adaptiveMode: resolvedQuality.adaptiveEnabled ? 'auto' : 'manual',
+        networkCondition: 'unavailable',
+        lastAdjustmentAction: resolvedQuality.adaptiveEnabled ? 'none' : 'manual-locked',
+        lastAdjustmentReason: resolvedQuality.adaptiveEnabled
+          ? null
+          : 'Manual quality locked — automatic adaptation paused.',
         resolution:
           this.captureSession.actualWidth && this.captureSession.actualHeight
             ? `${this.captureSession.actualWidth}×${this.captureSession.actualHeight}`
@@ -956,6 +1526,7 @@ export class WebRtcSignalingBridge {
     }
 
     this.outboundMap.delete(targetPeerDeviceId);
+    this.desiredOutboundTargets.delete(targetPeerDeviceId);
     const peer = this.peers.get(targetPeerDeviceId);
     if (peer) {
       await peer.stopLocalStream();
@@ -976,8 +1547,25 @@ export class WebRtcSignalingBridge {
     }
   }
 
+  async stopOutgoingStreamToPeer(targetPeerDeviceId: string): Promise<void> {
+    const outEntry = this.outboundMap.get(targetPeerDeviceId);
+    const targetName = outEntry?.targetName ?? targetPeerDeviceId;
+    this.autoBroadcastToRoom = false;
+    await this.stopPublishingToPeer(targetPeerDeviceId, 'user_stopped');
+    this.statusDetail = `Stopped outgoing stream to ${targetName}.`;
+    this.callbacks.onLogEvent(
+      'webrtc',
+      `Stopped outgoing stream to ${targetName}`,
+      this.outboundMap.size > 0
+        ? `Remaining ${this.outboundMap.size} outbound stream(s) unaffected.`
+        : 'Local screen preview remains ready.'
+    );
+    this.emit();
+  }
+
   stopSharing(reason: 'user_stopped' | 'capture_revoked' = 'user_stopped'): void {
     this.autoBroadcastToRoom = false;
+    this.desiredOutboundTargets.clear();
     this.pendingAutoPublishPeers.clear();
     const activeTargetIds = Array.from(this.outboundMap.keys());
     for (const peerId of activeTargetIds) {
@@ -1041,6 +1629,7 @@ export class WebRtcSignalingBridge {
       peer.markInboundStreamExpected(p.streamId, p.fps);
 
       const existing = this.incomingMap.get(envelope.senderDeviceId);
+      const now = Date.now();
       this.incomingMap.set(envelope.senderDeviceId, {
         senderDeviceId: envelope.senderDeviceId,
         senderName: senderMeta.deviceName,
@@ -1059,7 +1648,10 @@ export class WebRtcSignalingBridge {
           codec: p.codec,
         },
         telemetry: existing?.telemetry ?? createEmptyTelemetry(p.fps, 'connecting'),
-        startedAt: existing?.startedAt ?? new Date().toISOString(),
+        renderedWidth: existing?.renderedWidth ?? null,
+        renderedHeight: existing?.renderedHeight ?? null,
+        startedAt: existing?.startedAt ?? new Date(now).toISOString(),
+        lastActivityAt: now,
       });
       this.statusDetail = `Receiving stream announcement from ${senderMeta.deviceName}...`;
       this.callbacks.onLogEvent(
@@ -1161,7 +1753,41 @@ export class WebRtcSignalingBridge {
     }
 
     if (envelope.messageType === 'stream_stop') {
-      const p = envelope.payload as { reason?: string };
+      const p = envelope.payload as { reason?: string; streamId?: string };
+
+      // Host-initiated remote stop of our own outbound stream
+      const matchingOutbound = Array.from(this.outboundMap.values()).find(
+        (o) => (p.streamId && o.streamId === p.streamId) || o.targetDeviceId === envelope.senderDeviceId
+      );
+      if (
+        matchingOutbound &&
+        envelope.receiverDeviceId === this.deviceId &&
+        envelope.senderDeviceId === this.activeRoom?.hostDeviceId
+      ) {
+        const stoppedTargets = Array.from(this.outboundMap.entries())
+          .filter(([, o]) => !p.streamId || o.streamId === p.streamId)
+          .map(([id]) => id);
+        for (const targetId of stoppedTargets) {
+          this.outboundMap.delete(targetId);
+          this.desiredOutboundTargets.delete(targetId);
+          const peer = this.peers.get(targetId);
+          if (peer) {
+            await peer.stopLocalStream();
+          }
+        }
+        if (this.outboundMap.size === 0 && this.captureSession) {
+          this.captureSession.stop();
+          this.captureSession = null;
+          this.outboundStreamId = null;
+          this.autoBroadcastToRoom = false;
+        }
+        const hostReason = 'Your outgoing screen share was stopped by the room host.';
+        this.statusDetail = hostReason;
+        this.callbacks.onLogEvent('webrtc', 'Outgoing stream stopped by host', hostReason);
+        this.emit();
+        return;
+      }
+
       const reasonText =
         p.reason === 'capture_revoked'
           ? `${senderMeta.deviceName} ended screen sharing via browser controls.`
@@ -1180,13 +1806,18 @@ export class WebRtcSignalingBridge {
   }
 
   dispose(): void {
+    this.disposed = true;
     for (const peerId of Array.from(this.peers.keys())) {
       this.removePeerConnection(peerId, 'Session disposed');
+    }
+    for (const peerId of Array.from(this.reconnectTimers.keys())) {
+      this.clearPeerRecoveryTimers(peerId);
     }
     if (this.captureSession) {
       this.captureSession.stop();
       this.captureSession = null;
     }
     this.outboundStreamId = null;
+    this.desiredOutboundTargets.clear();
   }
 }
