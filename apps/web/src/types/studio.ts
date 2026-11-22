@@ -4,10 +4,13 @@ export type StudioDestination =
   | 'control-room'
   | 'cast'
   | 'receivers'
+  | 'sessions'
   | 'devices'
   | 'multi-view'
   | 'activity'
   | 'settings';
+
+export type RoomPrivacyMode = 'private' | 'approval_required' | 'open';
 
 export type DetectedDeviceType =
   | 'Mac'
@@ -235,7 +238,7 @@ export interface ManagedDeviceRecord {
   resolution: string | null;
   fps: number | null;
   bitrateKbps: number | null;
-  audioStatus: 'Sharing audio' | 'Video only' | 'Off';
+  audioStatus: 'Sharing audio' | 'Video only' | 'Off' | 'Unavailable';
   hasIncomingAudioTrack: boolean;
   incomingMuted: boolean;
   adaptiveLocked: boolean | null;

@@ -1,3 +1,4 @@
+import { AlertTriangle, RefreshCw } from 'lucide-react';
 import type { RoomSnapshot, SignalingSocketState } from '../services/backendClient';
 import type { WebRtcSessionSnapshot } from '../services/webrtcSignalingBridge';
 import type {
@@ -13,6 +14,9 @@ interface DevicesViewProps {
   capabilities: BrowserCapabilityReport;
   preferences: CapturePreferences;
   signalingState: SignalingSocketState;
+  backendError?: string | null;
+  isLoading?: boolean;
+  lastSignalingActivityAt?: string | null;
   activeRoom: RoomSnapshot | null;
   activeRoomRole: 'host' | 'receiver' | null;
   webrtcState: WebRtcSessionSnapshot;
@@ -34,6 +38,7 @@ interface DevicesViewProps {
   ) => Promise<void>;
   onViewStream: (senderDeviceId: string) => void;
   onRefresh: () => Promise<void>;
+  onReconnectBackend?: () => void;
   onNavigate: (destination: StudioDestination) => void;
 }
 
@@ -43,6 +48,9 @@ export function DevicesView({
   capabilities,
   preferences,
   signalingState,
+  backendError = null,
+  isLoading = false,
+  lastSignalingActivityAt = null,
   activeRoom,
   activeRoomRole,
   webrtcState,
@@ -57,6 +65,7 @@ export function DevicesView({
   onToggleAdaptiveLock,
   onViewStream,
   onRefresh,
+  onReconnectBackend,
   onNavigate,
 }: DevicesViewProps) {
   return (
@@ -72,6 +81,30 @@ export function DevicesView({
         </div>
       </div>
 
+      {(backendError || signalingState === 'error') && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#DC2626]/30 bg-[#FEF2F2] px-4 py-3 text-xs text-[#B91C1C]"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-[#DC2626]" aria-hidden="true" />
+            <span>
+              {backendError ?? 'Signaling connection error. Device status updates may be stale.'}
+            </span>
+          </div>
+          {onReconnectBackend && (
+            <button
+              type="button"
+              onClick={onReconnectBackend}
+              className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-[#DC2626]/30 bg-white px-2.5 text-xs font-semibold text-[#DC2626] hover:bg-[#FEE2E2]"
+            >
+              <RefreshCw className="h-3 w-3" aria-hidden="true" />
+              <span>Reconnect</span>
+            </button>
+          )}
+        </div>
+      )}
+
       <DeviceManagerPanel
         deviceId={deviceId}
         deviceName={deviceName}
@@ -82,6 +115,8 @@ export function DevicesView({
         activeRoomRole={activeRoomRole}
         webrtcState={webrtcState}
         mutedByPeerId={mutedByPeerId}
+        isLoading={isLoading}
+        lastSignalingActivityAt={lastSignalingActivityAt}
         onRenameDevice={onRenameDevice}
         onApproveReceiver={onApproveReceiver}
         onRejectReceiver={onRejectReceiver}
@@ -92,6 +127,7 @@ export function DevicesView({
         onToggleAdaptiveLock={onToggleAdaptiveLock}
         onViewStream={onViewStream}
         onRefresh={onRefresh}
+        onReconnectBackend={onReconnectBackend}
         onNavigate={onNavigate}
       />
     </div>

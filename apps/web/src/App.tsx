@@ -4,20 +4,30 @@ import { TopControlBar } from './components/layout/TopControlBar';
 import {
   CastoraSignalingClient,
   approveBackendPairRequest,
+  cancelBackendHostTransfer,
   closeBackendRoom,
   createBackendRoom,
   fetchBackendHealth,
   fetchBackendIceServers,
   fetchBackendRoom,
+  fetchBackendRoomInvitation,
+  initiateBackendHostTransfer,
   leaveBackendRoom,
   rejectBackendPairRequest,
   removeBackendReceiver,
+  renameBackendRoom,
   renameBackendRoomDevice,
   requestBackendDeviceReconnect,
+  respondBackendHostTransfer,
+  restoreBackendSession,
+  rotateBackendRoomInvitation,
   stopBackendDeviceStream,
   submitBackendPairRequest,
+  updateBackendRoomSettings,
+  validateBackendInvitation,
   type BackendHealthResponse,
   type PairingLifecycleStatus,
+  type PublicHostTransfer,
   type RoomSnapshot,
   type SignalingSocketState,
 } from './services/backendClient';
@@ -41,6 +51,7 @@ import type {
   ConnectedReceiverSlot,
   MultiViewLayout,
   NetworkPreferences,
+  RoomPrivacyMode,
   SessionSummaryRecord,
   StudioDestination,
 } from './types/studio';
@@ -49,6 +60,7 @@ import { ControlRoomView } from './views/ControlRoomView';
 import { DevicesView } from './views/DevicesView';
 import { MultiViewView } from './views/MultiViewView';
 import { ReceiversView } from './views/ReceiversView';
+import { SessionView } from './views/SessionView';
 import { SettingsView } from './views/SettingsView';
 
 function formatClockTime(date: Date): string {
@@ -58,41 +70,46 @@ function formatClockTime(date: Date): string {
 function getInitialRouteState(): {
   destination: StudioDestination;
   roomCode: string;
+  inviteCode: string;
 } {
   if (typeof window === 'undefined') {
-    return { destination: 'control-room', roomCode: '' };
+    return { destination: 'control-room', roomCode: '', inviteCode: '' };
   }
   const params = new URLSearchParams(window.location.search);
   const room = (params.get('room') ?? '')
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, '')
     .slice(0, 6);
+  const inviteCode = (params.get('invite') ?? '').trim().slice(0, 128);
 
   if (window.location.pathname.includes('/join') || room.length > 0) {
-    return { destination: 'receivers', roomCode: room };
+    return { destination: 'receivers', roomCode: room, inviteCode };
   }
 
   const viewParam = (params.get('view') ?? '').toLowerCase();
   if (viewParam === 'rooms' || viewParam === 'receivers') {
-    return { destination: 'receivers', roomCode: '' };
+    return { destination: 'receivers', roomCode: '', inviteCode: '' };
+  }
+  if (viewParam === 'sessions' || viewParam === 'session') {
+    return { destination: 'sessions', roomCode: '', inviteCode: '' };
   }
   if (viewParam === 'devices') {
-    return { destination: 'devices', roomCode: '' };
+    return { destination: 'devices', roomCode: '', inviteCode: '' };
   }
   if (viewParam === 'screens' || viewParam === 'multi-view') {
-    return { destination: 'multi-view', roomCode: '' };
+    return { destination: 'multi-view', roomCode: '', inviteCode: '' };
   }
   if (viewParam === 'cast') {
-    return { destination: 'cast', roomCode: '' };
+    return { destination: 'cast', roomCode: '', inviteCode: '' };
   }
   if (viewParam === 'settings') {
-    return { destination: 'settings', roomCode: '' };
+    return { destination: 'settings', roomCode: '', inviteCode: '' };
   }
   if (viewParam === 'activity') {
-    return { destination: 'activity', roomCode: '' };
+    return { destination: 'activity', roomCode: '', inviteCode: '' };
   }
 
-  return { destination: 'control-room', roomCode: '' };
+  return { destination: 'control-room', roomCode: '', inviteCode: '' };
 }
 
 function toProtocolCapabilities(
@@ -150,6 +167,20 @@ function parseRoomSnapshotFromEnvelope(
 
   return {
     roomId,
+    roomName: typeof payload.roomName === 'string' ? payload.roomName : undefined,
+    createdAt: typeof payload.createdAt === 'string' ? payload.createdAt : undefined,
+    privacyMode:
+      payload.privacyMode === 'private' ||
+      payload.privacyMode === 'approval_required' ||
+      payload.privacyMode === 'open'
+        ? payload.privacyMode
+        : undefined,
+    passwordProtected:
+      typeof payload.passwordProtected === 'boolean' ? payload.passwordProtected : undefined,
+    hostTransfer:
+      payload.hostTransfer && typeof payload.hostTransfer === 'object'
+        ? (payload.hostTransfer as PublicHostTransfer)
+        : null,
     status: (payload.status as RoomSnapshot['status']) ?? 'active',
     hostDeviceId: String(payload.hostDeviceId ?? ''),
     hostDeviceName: String(payload.hostDeviceName ?? ''),
@@ -204,8 +235,13 @@ export function App() {
   const [backendHealth, setBackendHealth] = useState<BackendHealthResponse | null>(null);
   const [backendError, setBackendError] = useState<string | null>(null);
   const [signalingState, setSignalingState] = useState<SignalingSocketState>('disconnected');
+  const [lastSignalingActivityAt, setLastSignalingActivityAt] = useState<string | null>(null);
+  const [focusedStreamDeviceId, setFocusedStreamDeviceId] = useState<string | null>(null);
   const [activeRoom, setActiveRoom] = useState<RoomSnapshot | null>(null);
   const [activeRoomRole, setActiveRoomRole] = useState<'host' | 'receiver' | null>(null);
+  const [hostInviteCode, setHostInviteCode] = useState<string | null>(null);
+  const [inviteValidationMessage, setInviteValidationMessage] = useState<string | null>(null);
+  const [transferActionBusy, setTransferActionBusy] = useState<boolean>(false);
   const [pairingStatus, setPairingStatus] = useState<PairingLifecycleStatus>('Available');
   const [pairingDetail, setPairingDetail] = useState<string | null>(null);
 
@@ -371,6 +407,7 @@ export function App() {
         roomTokenRef.current = null;
         activeRoomIdRef.current = null;
         activeRoomRoleRef.current = null;
+        setHostInviteCode(null);
         setActiveRoom(null);
         setActiveRoomRole(null);
         setPairingStatus('Expired');
@@ -387,6 +424,7 @@ export function App() {
         roomTokenRef.current = null;
         activeRoomIdRef.current = null;
         activeRoomRoleRef.current = null;
+        setHostInviteCode(null);
         setActiveRoom(null);
         setActiveRoomRole(null);
         setPairingStatus('Disconnected');
@@ -401,7 +439,40 @@ export function App() {
 
       setActiveRoom(snapshot);
 
-      if (activeRoomRoleRef.current === 'host') {
+      const previousRole = activeRoomRoleRef.current;
+      const computedRole: 'host' | 'receiver' =
+        snapshot.hostDeviceId === deviceId ? 'host' : 'receiver';
+
+      if (computedRole !== previousRole) {
+        activeRoomRoleRef.current = computedRole;
+        setActiveRoomRole(computedRole);
+        if (computedRole === 'host') {
+          logEvent(
+            'signaling',
+            'Host ownership transferred to this device',
+            `You are now the host of room ${snapshot.roomId}. Active streams remain live.`
+          );
+          if (roomTokenRef.current) {
+            void fetchBackendRoomInvitation({
+              roomId: snapshot.roomId,
+              hostToken: roomTokenRef.current,
+            })
+              .then((inv) => setHostInviteCode(inv.inviteCode))
+              .catch(() => {
+                // Non-fatal; user can sync manually if needed
+              });
+          }
+        } else {
+          setHostInviteCode(null);
+          logEvent(
+            'signaling',
+            'Host ownership transferred',
+            `${snapshot.hostDeviceName} is now the host of room ${snapshot.roomId}.`
+          );
+        }
+      }
+
+      if (computedRole === 'host') {
         if (snapshot.pairedReceiverCount > 0) {
           setPairingStatus('Paired');
           setPairingDetail(
@@ -417,41 +488,40 @@ export function App() {
         return;
       }
 
-      if (activeRoomRoleRef.current === 'receiver') {
-        const isPaired = snapshot.pairedReceivers.some((r) => r.deviceId === deviceId);
-        const isPending = snapshot.pendingRequests.some((r) => r.deviceId === deviceId);
+      const isPaired = snapshot.pairedReceivers.some((r) => r.deviceId === deviceId);
+      const isPending = snapshot.pendingRequests.some((r) => r.deviceId === deviceId);
 
-        if (isPaired) {
-          if (!snapshot.hostConnected) {
-            setPairingStatus('Disconnected');
-            setPairingDetail('Host disconnected temporarily. Waiting for host reconnect or room expiry.');
-          } else {
-            setPairingStatus('Paired');
-            setPairingDetail(`Paired with ${snapshot.hostDeviceName} in room ${snapshot.roomId}.`);
-            if (!networkPrefsRef.current.turnExpiresAt) {
-              void refreshIceServerConfig(snapshot.roomId, roomTokenRef.current);
-            }
-          }
-        } else if (isPending) {
-          setPairingStatus('Awaiting approval');
-          setPairingDetail(`Request pending approval from ${snapshot.hostDeviceName}.`);
-        } else {
-          roomTokenRef.current = null;
-          activeRoomIdRef.current = null;
-          activeRoomRoleRef.current = null;
-          setActiveRoom(null);
-          setActiveRoomRole(null);
+      if (isPaired) {
+        if (!snapshot.hostConnected) {
           setPairingStatus('Disconnected');
-          setPairingDetail('Removed from room.');
-          setNetworkPrefs((prev) => ({
-            ...prev,
-            serverIceServers: undefined,
-            turnExpiresAt: null,
-          }));
+          setPairingDetail('Host disconnected temporarily. Waiting for host reconnect or room expiry.');
+        } else {
+          setPairingStatus('Paired');
+          setPairingDetail(`Paired with ${snapshot.hostDeviceName} in room ${snapshot.roomId}.`);
+          if (!networkPrefsRef.current.turnExpiresAt) {
+            void refreshIceServerConfig(snapshot.roomId, roomTokenRef.current);
+          }
         }
+      } else if (isPending) {
+        setPairingStatus('Awaiting approval');
+        setPairingDetail(`Request pending approval from ${snapshot.hostDeviceName}.`);
+      } else {
+        roomTokenRef.current = null;
+        activeRoomIdRef.current = null;
+        activeRoomRoleRef.current = null;
+        setHostInviteCode(null);
+        setActiveRoom(null);
+        setActiveRoomRole(null);
+        setPairingStatus('Disconnected');
+        setPairingDetail('Removed from room.');
+        setNetworkPrefs((prev) => ({
+          ...prev,
+          serverIceServers: undefined,
+          turnExpiresAt: null,
+        }));
       }
     },
-    [deviceId, refreshIceServerConfig]
+    [deviceId, logEvent, refreshIceServerConfig]
   );
 
   const connectSignaling = useCallback(
@@ -471,6 +541,7 @@ export function App() {
           onStateChange: (nextState, detail) => {
             setSignalingState(nextState);
             if (nextState === 'connected') {
+              setLastSignalingActivityAt(new Date().toISOString());
               logEvent('signaling', 'Connected to /castora', detail ?? 'Device registered on server.');
               void refreshHealth();
               if (activeRoomIdRef.current && roomTokenRef.current) {
@@ -499,6 +570,7 @@ export function App() {
             );
           },
           onEnvelope: (envelope) => {
+            setLastSignalingActivityAt(new Date().toISOString());
             if (envelope.messageType === 'room_state' && envelope.roomId) {
               const snapshot = parseRoomSnapshotFromEnvelope(envelope.roomId, envelope.payload);
               syncReceiverLifecycleFromSnapshot(snapshot);
@@ -534,12 +606,28 @@ export function App() {
             }
 
             if (envelope.messageType === 'error') {
-              const payload = envelope.payload as { code?: string; message?: string };
+              const payload = envelope.payload as { code?: string; message?: string; recoverable?: boolean };
               logEvent(
                 'error',
                 `Server error (${payload.code ?? 'UNKNOWN'})`,
                 payload.message ?? 'Signaling error received'
               );
+              if (
+                payload.recoverable === false &&
+                activeRoomIdRef.current &&
+                envelope.roomId === activeRoomIdRef.current &&
+                (payload.code === 'INVALID_ROOM_ID' || payload.code === 'APPROVAL_DECLINED')
+              ) {
+                roomTokenRef.current = null;
+                activeRoomIdRef.current = null;
+                activeRoomRoleRef.current = null;
+                setHostInviteCode(null);
+                setActiveRoom(null);
+                setActiveRoomRole(null);
+                setPairingStatus('Expired');
+                setPairingDetail(payload.message ?? 'Session expired or no longer valid.');
+                return;
+              }
               if (
                 payload.code === 'WEBRTC_NEGOTIATION_FAILED' &&
                 typeof payload.message === 'string' &&
@@ -560,6 +648,7 @@ export function App() {
                 roomTokenRef.current = null;
                 activeRoomIdRef.current = null;
                 activeRoomRoleRef.current = null;
+                setHostInviteCode(null);
                 setActiveRoom(null);
                 setActiveRoomRole(null);
                 setPairingStatus('Expired');
@@ -568,6 +657,7 @@ export function App() {
                 roomTokenRef.current = null;
                 activeRoomIdRef.current = null;
                 activeRoomRoleRef.current = null;
+                setHostInviteCode(null);
                 setActiveRoom(null);
                 setActiveRoomRole(null);
                 setPairingStatus('Disconnected');
@@ -609,6 +699,26 @@ export function App() {
     void refreshHealth();
     void refreshIceServerConfig(null, null);
     connectSignaling(null, null);
+
+    if (initialRoute.roomCode.length === 6) {
+      void validateBackendInvitation({
+        roomId: initialRoute.roomCode,
+        inviteCode: initialRoute.inviteCode || undefined,
+      })
+        .then((res) => {
+          const roomLabel = res.room.roomName || `Room ${res.room.roomId}`;
+          const pwdNote = res.room.passwordProtected ? ' · Password required' : '';
+          setInviteValidationMessage(
+            `${roomLabel} (${res.availableSlots} of ${res.room.maxReceivers} slots open${pwdNote})`
+          );
+        })
+        .catch((err) => {
+          setInviteValidationMessage(
+            err instanceof Error ? err.message : 'Invitation link could not be verified'
+          );
+        });
+    }
+
     const healthTimer = window.setInterval(() => {
       void refreshHealth();
     }, 15_000);
@@ -628,65 +738,95 @@ export function App() {
     connectSignaling(activeRoomIdRef.current, roomTokenRef.current);
   }, [connectSignaling, refreshHealth, refreshIceServerConfig]);
 
-  const handleCreateRoom = useCallback(async () => {
-    const created = await createBackendRoom({
-      hostDeviceId: deviceId,
-      hostDeviceName: deviceName,
-      hostPlatform: capabilities.detectedPlatform,
-      hostDeviceType: capabilities.detectedDeviceType,
-    });
-    roomTokenRef.current = created.hostToken;
-    activeRoomIdRef.current = created.room.roomId;
-    activeRoomRoleRef.current = 'host';
-    setActiveRoom(created.room);
-    setActiveRoomRole('host');
-    setPairingStatus('Available');
-    setPairingDetail(`Room ${created.room.roomId} active. Waiting for receiver pairing requests.`);
-    connectSignaling(created.room.roomId, created.hostToken);
-    logEvent(
-      'signaling',
-      `Created room ${created.room.roomId}`,
-      `Expires at ${new Date(created.room.expiresAt).toLocaleTimeString()}.`
-    );
-    void refreshHealth();
-    void refreshIceServerConfig(created.room.roomId, created.hostToken);
-    return created.room;
-  }, [
-    capabilities.detectedDeviceType,
-    capabilities.detectedPlatform,
-    connectSignaling,
-    deviceId,
-    deviceName,
-    logEvent,
-    refreshHealth,
-    refreshIceServerConfig,
-  ]);
+  const handleCreateRoom = useCallback(
+    async (options?: {
+      roomName?: string;
+      privacyMode?: RoomPrivacyMode;
+      password?: string;
+    }) => {
+      const created = await createBackendRoom({
+        hostDeviceId: deviceId,
+        hostDeviceName: deviceName,
+        hostPlatform: capabilities.detectedPlatform,
+        hostDeviceType: capabilities.detectedDeviceType,
+        ...(options?.roomName ? { roomName: options.roomName } : {}),
+        ...(options?.privacyMode ? { privacyMode: options.privacyMode } : {}),
+        ...(options?.password ? { password: options.password } : {}),
+      });
+      roomTokenRef.current = created.hostToken;
+      activeRoomIdRef.current = created.room.roomId;
+      activeRoomRoleRef.current = 'host';
+      setHostInviteCode(created.inviteCode);
+      setActiveRoom(created.room);
+      setActiveRoomRole('host');
+      setPairingStatus('Available');
+      setPairingDetail(`Room ${created.room.roomId} active. Waiting for receiver pairing requests.`);
+      connectSignaling(created.room.roomId, created.hostToken);
+      logEvent(
+        'signaling',
+        `Created room ${created.room.roomId}`,
+        `Privacy=${created.room.privacyMode ?? 'approval_required'} · Expires at ${new Date(created.room.expiresAt).toLocaleTimeString()}.`
+      );
+      void refreshHealth();
+      void refreshIceServerConfig(created.room.roomId, created.hostToken);
+      return created.room;
+    },
+    [
+      capabilities.detectedDeviceType,
+      capabilities.detectedPlatform,
+      connectSignaling,
+      deviceId,
+      deviceName,
+      logEvent,
+      refreshHealth,
+      refreshIceServerConfig,
+    ]
+  );
 
   const handleSubmitPairRequest = useCallback(
-    async (roomId: string) => {
+    async (
+      roomId: string,
+      options?: { inviteCode?: string; password?: string }
+    ) => {
       setPairingStatus('Request pending');
       setPairingDetail(`Submitting pairing request for room ${roomId}...`);
       try {
+        const effectiveInvite =
+          options?.inviteCode ?? (initialRoute.roomCode === roomId ? initialRoute.inviteCode : '');
         const submitted = await submitBackendPairRequest({
           roomId,
           receiverDeviceId: deviceId,
           deviceName,
           platform: capabilities.detectedPlatform,
           deviceType: capabilities.detectedDeviceType,
-          pairingMethod: 'room_code',
+          pairingMethod: effectiveInvite ? 'qr' : 'room_code',
+          ...(effectiveInvite ? { inviteCode: effectiveInvite } : {}),
+          ...(options?.password ? { password: options.password } : {}),
         });
         roomTokenRef.current = submitted.memberToken;
         activeRoomIdRef.current = submitted.room.roomId;
         activeRoomRoleRef.current = 'receiver';
+        setHostInviteCode(null);
         setActiveRoom(submitted.room);
         setActiveRoomRole('receiver');
-        setPairingStatus('Awaiting approval');
-        setPairingDetail(`Waiting for ${submitted.room.hostDeviceName} to approve pairing.`);
+        setInviteValidationMessage(null);
+        if (submitted.requestStatus === 'paired') {
+          setPairingStatus('Paired');
+          setPairingDetail(`Joined ${submitted.room.roomName ?? submitted.room.roomId} via Open access.`);
+          void refreshIceServerConfig(submitted.room.roomId, submitted.memberToken);
+        } else {
+          setPairingStatus('Awaiting approval');
+          setPairingDetail(`Waiting for ${submitted.room.hostDeviceName} to approve pairing.`);
+        }
         connectSignaling(submitted.room.roomId, submitted.memberToken);
         logEvent(
           'signaling',
-          `Pairing request submitted (${submitted.room.roomId})`,
-          `Awaiting host approval from ${submitted.room.hostDeviceName}.`
+          submitted.requestStatus === 'paired'
+            ? `Joined open room ${submitted.room.roomId}`
+            : `Pairing request submitted (${submitted.room.roomId})`,
+          submitted.requestStatus === 'paired'
+            ? `Assigned slot ${(submitted.assignedSlotIndex ?? 0) + 1}.`
+            : `Awaiting host approval from ${submitted.room.hostDeviceName}.`
         );
         void refreshHealth();
         return submitted.room;
@@ -707,10 +847,158 @@ export function App() {
       connectSignaling,
       deviceId,
       deviceName,
+      initialRoute.inviteCode,
+      initialRoute.roomCode,
       logEvent,
       refreshHealth,
+      refreshIceServerConfig,
     ]
   );
+
+  const handleRenameRoom = useCallback(
+    async (roomName: string) => {
+      if (!activeRoom || !roomTokenRef.current) {
+        throw new Error('Authorized host session required');
+      }
+      const updated = await renameBackendRoom({
+        roomId: activeRoom.roomId,
+        roomName,
+        hostToken: roomTokenRef.current,
+      });
+      syncReceiverLifecycleFromSnapshot(updated);
+      logEvent('signaling', 'Room renamed', `Room ${updated.roomId} renamed to "${updated.roomName ?? ''}".`);
+      return updated;
+    },
+    [activeRoom, logEvent, syncReceiverLifecycleFromSnapshot]
+  );
+
+  const handleUpdatePrivacyMode = useCallback(
+    async (privacyMode: RoomPrivacyMode) => {
+      if (!activeRoom || !roomTokenRef.current) {
+        throw new Error('Authorized host session required');
+      }
+      const updated = await updateBackendRoomSettings({
+        roomId: activeRoom.roomId,
+        hostToken: roomTokenRef.current,
+        privacyMode,
+      });
+      syncReceiverLifecycleFromSnapshot(updated);
+      logEvent('signaling', 'Room privacy updated', `Room ${updated.roomId} mode set to ${privacyMode}.`);
+      return updated;
+    },
+    [activeRoom, logEvent, syncReceiverLifecycleFromSnapshot]
+  );
+
+  const handleUpdateRoomPassword = useCallback(
+    async (password: string | null) => {
+      if (!activeRoom || !roomTokenRef.current) {
+        throw new Error('Authorized host session required');
+      }
+      const updated = await updateBackendRoomSettings({
+        roomId: activeRoom.roomId,
+        hostToken: roomTokenRef.current,
+        password,
+      });
+      syncReceiverLifecycleFromSnapshot(updated);
+      logEvent(
+        'signaling',
+        password === null ? 'Room password removed' : 'Room password configured',
+        `Updated password protection on room ${updated.roomId}.`
+      );
+      return updated;
+    },
+    [activeRoom, logEvent, syncReceiverLifecycleFromSnapshot]
+  );
+
+  const handleRotateInvitation = useCallback(async () => {
+    if (!activeRoom || !roomTokenRef.current) {
+      throw new Error('Authorized host session required');
+    }
+    const rotated = await rotateBackendRoomInvitation({
+      roomId: activeRoom.roomId,
+      hostToken: roomTokenRef.current,
+    });
+    setHostInviteCode(rotated.inviteCode);
+    syncReceiverLifecycleFromSnapshot(rotated.room);
+    logEvent('signaling', 'Invitation link rotated', `Revoked previous invite links for ${rotated.room.roomId}.`);
+    return rotated.inviteCode;
+  }, [activeRoom, logEvent, syncReceiverLifecycleFromSnapshot]);
+
+  const handleInitiateHostTransfer = useCallback(
+    async (targetDeviceId: string) => {
+      if (!activeRoom || !roomTokenRef.current) {
+        throw new Error('Authorized host session required');
+      }
+      const updated = await initiateBackendHostTransfer({
+        roomId: activeRoom.roomId,
+        targetDeviceId,
+        hostToken: roomTokenRef.current,
+      });
+      syncReceiverLifecycleFromSnapshot(updated);
+      logEvent(
+        'signaling',
+        'Host transfer initiated',
+        `Requested ownership transfer to ${updated.hostTransfer?.targetDeviceName ?? targetDeviceId}.`
+      );
+      return updated;
+    },
+    [activeRoom, logEvent, syncReceiverLifecycleFromSnapshot]
+  );
+
+  const handleCancelHostTransfer = useCallback(async () => {
+    if (!activeRoom || !roomTokenRef.current) {
+      throw new Error('Authorized host session required');
+    }
+    const updated = await cancelBackendHostTransfer({
+      roomId: activeRoom.roomId,
+      hostToken: roomTokenRef.current,
+    });
+    syncReceiverLifecycleFromSnapshot(updated);
+    logEvent('signaling', 'Host transfer cancelled', `Cancelled pending transfer in room ${updated.roomId}.`);
+    return updated;
+  }, [activeRoom, logEvent, syncReceiverLifecycleFromSnapshot]);
+
+  const handleRespondHostTransfer = useCallback(
+    async (accept: boolean) => {
+      if (!activeRoom || !roomTokenRef.current) {
+        throw new Error('Active participant session token required');
+      }
+      setTransferActionBusy(true);
+      try {
+        const res = await respondBackendHostTransfer({
+          roomId: activeRoom.roomId,
+          accept,
+          token: roomTokenRef.current,
+        });
+        syncReceiverLifecycleFromSnapshot(res.room);
+        logEvent(
+          'signaling',
+          accept ? 'Accepted host transfer' : 'Declined host transfer',
+          accept
+            ? `Ownership of room ${res.room.roomId} transferred cleanly.`
+            : `Declined host ownership for room ${res.room.roomId}.`
+        );
+      } finally {
+        setTransferActionBusy(false);
+      }
+    },
+    [activeRoom, logEvent, syncReceiverLifecycleFromSnapshot]
+  );
+
+  const handleRestoreSession = useCallback(async () => {
+    if (!activeRoomIdRef.current || !roomTokenRef.current) {
+      throw new Error('No active authenticated room session to verify');
+    }
+    const restored = await restoreBackendSession({
+      roomId: activeRoomIdRef.current,
+      token: roomTokenRef.current,
+    });
+    if (restored.role === 'host' && restored.inviteCode) {
+      setHostInviteCode(restored.inviteCode);
+    }
+    syncReceiverLifecycleFromSnapshot(restored.room);
+    connectSignaling(restored.room.roomId, roomTokenRef.current);
+  }, [connectSignaling, syncReceiverLifecycleFromSnapshot]);
 
   const handleApproveReceiver = useCallback(
     async (receiverDeviceId: string) => {
@@ -778,6 +1066,7 @@ export function App() {
     roomTokenRef.current = null;
     activeRoomIdRef.current = null;
     activeRoomRoleRef.current = null;
+    setHostInviteCode(null);
     setActiveRoom(null);
     setActiveRoomRole(null);
     setPairingStatus('Available');
@@ -799,6 +1088,7 @@ export function App() {
     roomTokenRef.current = null;
     activeRoomIdRef.current = null;
     activeRoomRoleRef.current = null;
+    setHostInviteCode(null);
     setActiveRoom(null);
     setActiveRoomRole(null);
     setPairingStatus('Available');
@@ -1032,7 +1322,7 @@ export function App() {
 
   const handleReconnectDevice = useCallback(
     async (targetDeviceId: string) => {
-      await bridgeRef.current?.retryPeerConnection(targetDeviceId);
+      const localRetried = await bridgeRef.current?.retryPeerConnection(targetDeviceId);
       if (
         activeRoom &&
         roomTokenRef.current &&
@@ -1044,10 +1334,21 @@ export function App() {
           token: roomTokenRef.current,
         });
         syncReceiverLifecycleFromSnapshot(updated);
+      } else if (!localRetried) {
+        throw new Error('Peer connection is already healthy or unavailable for local retry.');
       }
       logEvent('webrtc', 'Requested device reconnection', `Target device: ${targetDeviceId}`);
     },
     [activeRoom, activeRoomRole, deviceId, logEvent, syncReceiverLifecycleFromSnapshot]
+  );
+
+  const handleViewDeviceStream = useCallback(
+    (senderDeviceId: string) => {
+      setFocusedStreamDeviceId(senderDeviceId);
+      setDestination('multi-view');
+      logEvent('ui', 'Focused participant stream', `Viewing stream from ${senderDeviceId}.`);
+    },
+    [logEvent]
   );
 
   const receivers: ConnectedReceiverSlot[] = (() => {
@@ -1125,6 +1426,16 @@ export function App() {
     telemetry: entry.telemetry,
   }));
 
+  const sessionDeviceName = (() => {
+    if (!activeRoom) return deviceName;
+    if (activeRoom.hostDeviceId === deviceId) return activeRoom.hostDeviceName;
+    const pairedSelf = activeRoom.pairedReceivers.find((r) => r.deviceId === deviceId);
+    if (pairedSelf) return pairedSelf.deviceName;
+    const pendingSelf = activeRoom.pendingRequests.find((r) => r.deviceId === deviceId);
+    if (pendingSelf) return pendingSelf.deviceName;
+    return deviceName;
+  })();
+
   const isApprovedInRoom =
     Boolean(activeRoom) &&
     (activeRoomRole === 'host' ||
@@ -1161,10 +1472,50 @@ export function App() {
       />
 
       <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 pb-24 sm:px-6 md:pb-8">
+        {activeRoom?.hostTransfer && activeRoom.hostTransfer.targetDeviceId === deviceId && (
+          <div
+            data-castora-chrome
+            role="status"
+            className="mb-6 flex flex-col gap-3 rounded-xl border border-[#2563EB]/40 bg-[#EFF6FF] px-5 py-4 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <div>
+              <p className="text-sm font-semibold text-[#172033]">
+                {activeRoom.hostDeviceName} invited you to become the host of{' '}
+                {activeRoom.roomName || `Room ${activeRoom.roomId}`}
+              </p>
+              <p className="text-xs text-[#64748B]">
+                Accepting transfers room ownership and host controls immediately while keeping active WebRTC streams live.
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                disabled={transferActionBusy}
+                onClick={() => {
+                  void handleRespondHostTransfer(true);
+                }}
+                className="inline-flex h-9 items-center rounded-lg bg-[#2563EB] px-4 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+              >
+                {transferActionBusy ? 'Updating...' : 'Accept Host Role'}
+              </button>
+              <button
+                type="button"
+                disabled={transferActionBusy}
+                onClick={() => {
+                  void handleRespondHostTransfer(false);
+                }}
+                className="inline-flex h-9 items-center rounded-lg border border-[#E2E8F0] bg-white px-3.5 text-xs font-medium text-[#172033] hover:bg-[#F8FAFC] disabled:opacity-50"
+              >
+                Decline
+              </button>
+            </div>
+          </div>
+        )}
+
         {destination === 'control-room' && (
           <ControlRoomView
             deviceId={deviceId}
-            deviceName={deviceName}
+            deviceName={sessionDeviceName}
             capabilities={capabilities}
             preferences={preferences}
             receivers={receivers}
@@ -1176,8 +1527,8 @@ export function App() {
             activeRoom={activeRoom}
             activeRoomRole={activeRoomRole}
             pairingStatus={pairingStatus}
-            onCreateRoom={handleCreateRoom}
-            onSubmitPairRequest={handleSubmitPairRequest}
+            onCreateRoom={() => handleCreateRoom()}
+            onSubmitPairRequest={(code) => handleSubmitPairRequest(code)}
             onStartSharing={handleStartSharing}
             onStopSharing={handleStopSharing}
             onReconnectBackend={handleReconnectBackend}
@@ -1193,10 +1544,13 @@ export function App() {
         {destination === 'receivers' && (
           <ReceiversView
             deviceId={deviceId}
-            deviceName={deviceName}
+            deviceName={sessionDeviceName}
             capabilities={capabilities}
             preferences={preferences}
             initialRoomCode={initialRoute.roomCode}
+            initialInviteCode={initialRoute.inviteCode}
+            hostInviteCode={hostInviteCode}
+            inviteValidationMessage={inviteValidationMessage}
             activePhase={webrtcState.phase}
             signalingState={signalingState}
             activeRoom={activeRoom}
@@ -1222,18 +1576,46 @@ export function App() {
             onStopSharing={handleStopSharing}
             onReconnectBackend={handleReconnectBackend}
             onRetryPeer={handleRetryPeer}
+            onViewStream={handleViewDeviceStream}
+            lastSignalingActivityAt={lastSignalingActivityAt}
             onNavigate={setDestination}
             onLogEvent={logEvent}
+          />
+        )}
+
+        {destination === 'sessions' && (
+          <SessionView
+            deviceId={deviceId}
+            activeRoom={activeRoom}
+            activeRoomRole={activeRoomRole}
+            inviteCode={hostInviteCode}
+            signalingState={signalingState}
+            backendHealth={backendHealth}
+            webrtcState={webrtcState}
+            onCreateRoom={handleCreateRoom}
+            onRenameRoom={handleRenameRoom}
+            onUpdatePrivacyMode={handleUpdatePrivacyMode}
+            onUpdateRoomPassword={handleUpdateRoomPassword}
+            onRotateInvitation={handleRotateInvitation}
+            onInitiateHostTransfer={handleInitiateHostTransfer}
+            onCancelHostTransfer={handleCancelHostTransfer}
+            onRespondHostTransfer={handleRespondHostTransfer}
+            onRestoreSession={handleRestoreSession}
+            onCloseRoom={handleCloseRoom}
+            onLeaveRoom={handleLeaveRoom}
+            onNavigate={setDestination}
           />
         )}
 
         {destination === 'devices' && (
           <DevicesView
             deviceId={deviceId}
-            deviceName={deviceName}
+            deviceName={sessionDeviceName}
             capabilities={capabilities}
             preferences={preferences}
             signalingState={signalingState}
+            backendError={backendError}
+            lastSignalingActivityAt={lastSignalingActivityAt}
             activeRoom={activeRoom}
             activeRoomRole={activeRoomRole}
             webrtcState={webrtcState}
@@ -1246,8 +1628,9 @@ export function App() {
             onReconnectDevice={handleReconnectDevice}
             onToggleMutePeer={handleToggleMutePeer}
             onToggleAdaptiveLock={handleToggleAdaptiveLock}
-            onViewStream={() => setDestination('multi-view')}
+            onViewStream={handleViewDeviceStream}
             onRefresh={handleRefreshDevices}
+            onReconnectBackend={handleReconnectBackend}
             onNavigate={setDestination}
           />
         )}
@@ -1259,7 +1642,7 @@ export function App() {
             slots={multiViewSlots}
             capabilities={capabilities}
             deviceId={deviceId}
-            deviceName={deviceName}
+            deviceName={sessionDeviceName}
             preferences={preferences}
             onUpdatePreferences={(next) => {
               void handleUpdatePreferences(next);
@@ -1279,6 +1662,8 @@ export function App() {
             onRetryAllFailed={handleRetryAllFailed}
             onNavigate={setDestination}
             defaultShowSharePanel={destination === 'cast'}
+            focusedDeviceId={focusedStreamDeviceId}
+            onClearFocusedDevice={() => setFocusedStreamDeviceId(null)}
             onToggleMute={(slotIndex) => {
               const targetId = multiViewSlots[slotIndex]?.receiverDeviceId ?? String(slotIndex);
               setMutedSlots((prev) => ({ ...prev, [targetId]: !(prev[targetId] ?? true) }));

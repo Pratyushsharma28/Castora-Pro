@@ -61,6 +61,8 @@ interface DeviceManagerPanelProps {
   ) => Promise<void>;
   onViewStream?: (senderDeviceId: string) => void;
   onRefresh?: () => Promise<void> | void;
+  onReconnectBackend?: () => void;
+  lastSignalingActivityAt?: string | null;
   onNavigate?: (destination: StudioDestination) => void;
 }
 
@@ -74,7 +76,7 @@ const FILTER_OPTIONS: { id: DeviceManagerStatusFilter; label: string }[] = [
 ];
 
 function formatBitrate(kbps: number | null): string {
-  if (kbps === null || !Number.isFinite(kbps)) return '—';
+  if (kbps === null || !Number.isFinite(kbps)) return 'Unavailable';
   return kbps >= 1000 ? `${(kbps / 1000).toFixed(2)} Mbps` : `${Math.round(kbps)} kbps`;
 }
 
@@ -165,6 +167,8 @@ export function DeviceManagerPanel({
   onToggleAdaptiveLock,
   onViewStream,
   onRefresh,
+  onReconnectBackend,
+  lastSignalingActivityAt = null,
   onNavigate,
 }: DeviceManagerPanelProps) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -199,15 +203,24 @@ export function DeviceManagerPanel({
               ? 'failed'
               : 'disconnected';
       const selfQuality =
-        signalingState === 'connected'
-          ? webrtcState.isSharingLocal
-            ? { label: 'Local capture', tone: 'active' as const, detail: 'Capturing locally.' }
-            : { label: 'Ready', tone: 'standby' as const, detail: 'Signaling socket connected.' }
-          : { label: 'Unknown', tone: 'standby' as const, detail: 'Not connected to a room.' };
+        webrtcState.outboundPeers.length > 0
+          ? evaluateConnectionQuality({
+              phase: webrtcState.outboundPeers[0].phase,
+              iceConnectionState: webrtcState.outboundPeers[0].iceConnectionState,
+              telemetry: webrtcState.outboundPeers[0].telemetry,
+              recovery: webrtcState.outboundPeers[0].recovery,
+            })
+          : signalingState === 'connected' && webrtcState.isSharingLocal
+            ? { label: 'Local capture', tone: 'active' as const, detail: 'Capturing locally without remote peer.' }
+            : { label: 'Unknown', tone: 'standby' as const, detail: 'No active WebRTC peer telemetry yet.' };
 
       const capW = webrtcState.localCaptureMeta?.width;
       const capH = webrtcState.localCaptureMeta?.height;
       const capFps = webrtcState.localCaptureMeta?.fps;
+      const latestOutActivity = webrtcState.outboundPeers.reduce<number | null>(
+        (max, o) => (o.lastActivityAt && (!max || o.lastActivityAt > max) ? o.lastActivityAt : max),
+        null
+      );
 
       return [
         {
@@ -238,7 +251,7 @@ export function DeviceManagerPanel({
           hasIncomingAudioTrack: false,
           incomingMuted: true,
           adaptiveLocked: preferences.adaptiveBitrate === false,
-          lastActivityAt: new Date().toISOString(),
+          lastActivityAt: latestIso(lastSignalingActivityAt, latestOutActivity),
           canRetry: signalingState === 'disconnected' || signalingState === 'error',
           recoveryExhausted: false,
         },
@@ -273,6 +286,10 @@ export function DeviceManagerPanel({
         const capH = webrtcState.localCaptureMeta?.height;
         const capFps = webrtcState.localCaptureMeta?.fps;
         const primaryOut = webrtcState.outboundPeers[0] ?? null;
+        const latestOutActivity = webrtcState.outboundPeers.reduce<number | null>(
+          (max, o) => (o.lastActivityAt && (!max || o.lastActivityAt > max) ? o.lastActivityAt : max),
+          null
+        );
         const localPhase = primaryOut?.phase ?? (params.connected ? 'connected' : 'disconnected');
         const selfQuality = primaryOut
           ? evaluateConnectionQuality({
@@ -281,9 +298,13 @@ export function DeviceManagerPanel({
               telemetry: primaryOut.telemetry,
               recovery: primaryOut.recovery,
             })
-          : params.connected
-            ? { label: 'Ready', tone: 'active' as const, detail: 'Signaling connected.' }
-            : { label: 'Unknown', tone: 'standby' as const, detail: 'Disconnected.' };
+          : {
+              label: 'Unknown',
+              tone: 'standby' as const,
+              detail: params.connected
+                ? 'Signaling connected; no active WebRTC peer telemetry yet.'
+                : 'Signaling disconnected.',
+            };
 
         const selfHasAudio =
           webrtcState.localCaptureMeta?.hasAudio ||
@@ -327,7 +348,7 @@ export function DeviceManagerPanel({
           adaptiveLocked: preferences.adaptiveBitrate === false,
           lastActivityAt: latestIso(
             params.serverLastSeenAt,
-            primaryOut?.lastActivityAt ?? null
+            latestOutActivity
           ),
           canRetry: signalingState !== 'connected',
           recoveryExhausted: false,
@@ -385,11 +406,20 @@ export function DeviceManagerPanel({
 
       let audioStatus: ManagedDeviceRecord['audioStatus'] = 'Off';
       if (isIncomingStreaming) {
-        audioStatus = hasIncomingAudioTrack || primaryServerStream?.hasAudio
-          ? 'Sharing audio'
-          : 'Video only';
+        if (incoming?.stream) {
+          audioStatus = hasIncomingAudioTrack ? 'Sharing audio' : 'Video only';
+        } else if (typeof primaryServerStream?.hasAudio === 'boolean') {
+          audioStatus = primaryServerStream.hasAudio ? 'Sharing audio' : 'Video only';
+        } else {
+          audioStatus = 'Unavailable';
+        }
       } else if (serverPublishedStreams.length > 0) {
-        audioStatus = primaryServerStream?.hasAudio ? 'Sharing audio' : 'Video only';
+        audioStatus =
+          typeof primaryServerStream?.hasAudio === 'boolean'
+            ? primaryServerStream.hasAudio
+              ? 'Sharing audio'
+              : 'Video only'
+            : 'Unavailable';
       } else if (isOutgoingStreaming) {
         audioStatus =
           preferences.includeAudio || webrtcState.localCaptureMeta?.hasAudio
@@ -403,6 +433,7 @@ export function DeviceManagerPanel({
 
       const canRetry =
         params.role !== 'pending' &&
+        params.connected &&
         (phase === 'failed' ||
           phase === 'disconnected' ||
           Boolean(recovery?.exhausted) ||
@@ -489,6 +520,7 @@ export function DeviceManagerPanel({
     capabilities.detectedPlatform,
     deviceId,
     deviceName,
+    lastSignalingActivityAt,
     mutedByPeerId,
     pairedReceivers,
     pendingRequests,
@@ -896,24 +928,21 @@ export function DeviceManagerPanel({
               const canRename = rec.isSelf || (Boolean(activeRoom) && isHost);
               const canViewIncoming =
                 rec.isIncomingStreaming && Boolean(onViewStream) && !rec.isSelf;
-              const canStopStream =
-                !rec.isSelf &&
-                (rec.isOutgoingStreaming ||
-                  (isHost &&
-                    Boolean(
-                      activeRoom?.activeStreams?.some((s) => s.publisherDeviceId === rec.deviceId)
-                    )));
+              const isRemoteParticipantStreaming = Boolean(
+                activeRoom?.activeStreams?.some((s) => s.publisherDeviceId === rec.deviceId)
+              );
+              const canStopOutbound = !rec.isSelf && rec.isOutgoingStreaming;
+              const canStopParticipantStream =
+                (!rec.isSelf && isHost && isRemoteParticipantStreaming) ||
+                (rec.isSelf && webrtcState.isSharingLocal);
               const canReconnect =
-                !rec.isSelf &&
                 rec.role !== 'pending' &&
-                rec.canRetry;
+                ((rec.isSelf && rec.canRetry && Boolean(onReconnectBackend)) ||
+                  (!rec.isSelf && rec.canRetry));
               const canToggleMute = !rec.isSelf && rec.isIncomingStreaming && rec.hasIncomingAudioTrack;
               const canToggleAdaptiveLock =
                 (rec.isSelf && webrtcState.isSharingLocal) || rec.isOutgoingStreaming;
               const canRemove = Boolean(activeRoom) && isHost && rec.role === 'participant' && !rec.isSelf;
-              const isRemoteParticipantStreaming = Boolean(
-                activeRoom?.activeStreams?.some((s) => s.publisherDeviceId === rec.deviceId)
-              );
 
               return (
                 <article
@@ -1061,7 +1090,7 @@ export function DeviceManagerPanel({
                         </button>
                       )}
 
-                      {canStopStream && (
+                      {canStopOutbound && (
                         <button
                           type="button"
                           disabled={isBusy}
@@ -1069,26 +1098,37 @@ export function DeviceManagerPanel({
                             void runAction(
                               rec.deviceId,
                               async () => {
-                                await onStopDeviceStream(
-                                  rec.deviceId,
-                                  rec.isOutgoingStreaming
-                                    ? 'outbound-to-peer'
-                                    : 'participant-room-stream'
-                                );
+                                await onStopDeviceStream(rec.deviceId, 'outbound-to-peer');
                               },
-                              rec.isOutgoingStreaming
-                                ? `Stopped outgoing stream to ${rec.deviceName}.`
+                              `Stopped outgoing stream to ${rec.deviceName}.`
+                            )
+                          }
+                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#DC2626]/30 bg-[#FEF2F2] px-2.5 text-xs font-semibold text-[#DC2626] hover:bg-[#FEE2E2] disabled:opacity-50"
+                        >
+                          <Square className="h-3 w-3" aria-hidden="true" />
+                          <span>Stop Outgoing</span>
+                        </button>
+                      )}
+
+                      {canStopParticipantStream && (
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() =>
+                            void runAction(
+                              rec.deviceId,
+                              async () => {
+                                await onStopDeviceStream(rec.deviceId, 'participant-room-stream');
+                              },
+                              rec.isSelf
+                                ? 'Stopped your active screen share.'
                                 : `Stopped ${rec.deviceName}'s active stream.`
                             )
                           }
                           className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#DC2626]/30 bg-[#FEF2F2] px-2.5 text-xs font-semibold text-[#DC2626] hover:bg-[#FEE2E2] disabled:opacity-50"
                         >
                           <Square className="h-3 w-3" aria-hidden="true" />
-                          <span>
-                            {rec.isOutgoingStreaming && !isRemoteParticipantStreaming
-                              ? 'Stop Outgoing'
-                              : 'Stop Stream'}
-                          </span>
+                          <span>{rec.isSelf ? 'Stop Sharing' : 'Stop Stream'}</span>
                         </button>
                       )}
 
@@ -1096,15 +1136,25 @@ export function DeviceManagerPanel({
                         <button
                           type="button"
                           disabled={isBusy}
-                          onClick={() =>
+                          onClick={() => {
+                            if (rec.isSelf) {
+                              onReconnectBackend?.();
+                              setFeedback({
+                                tone: 'info',
+                                text: 'Reconnecting signaling session...',
+                              });
+                              return;
+                            }
                             void runAction(
                               rec.deviceId,
                               async () => {
                                 await onReconnectDevice(rec.deviceId);
                               },
-                              `Triggered reconnection for ${rec.deviceName}.`
-                            )
-                          }
+                              isHost
+                                ? `Sent reconnection request to ${rec.deviceName}.`
+                                : `Retried peer connection with ${rec.deviceName}.`
+                            );
+                          }}
                           className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50"
                         >
                           <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
@@ -1173,13 +1223,13 @@ export function DeviceManagerPanel({
                     <div>
                       <dt className="text-[#64748B]">Resolution</dt>
                       <dd className="mt-0.5 font-semibold text-[#172033]">
-                        {rec.resolution ?? '—'}
+                        {rec.resolution ?? 'Unavailable'}
                       </dd>
                     </div>
                     <div>
                       <dt className="text-[#64748B]">Actual FPS</dt>
                       <dd className="mt-0.5 font-semibold text-[#172033]">
-                        {rec.fps !== null ? `${rec.fps.toFixed(1)} FPS` : '—'}
+                        {rec.fps !== null ? `${rec.fps.toFixed(1)} FPS` : 'Unavailable'}
                       </dd>
                     </div>
                     <div>
@@ -1196,6 +1246,19 @@ export function DeviceManagerPanel({
                 </article>
               );
             })}
+            {activeRoom &&
+              pairedReceivers.length === 0 &&
+              pendingRequests.length === 0 &&
+              !searchQuery &&
+              statusFilter === 'all' && (
+                <div className="pt-4 text-xs text-[#64748B]">
+                  No paired participants yet. Share room code{' '}
+                  <span className="font-mono font-semibold text-[#172033]">
+                    {activeRoom.roomId}
+                  </span>{' '}
+                  in Rooms to connect up to {maxReceivers} devices.
+                </div>
+              )}
           </div>
         )}
       </div>

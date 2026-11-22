@@ -12,6 +12,7 @@ interface NavDestinationItem {
 const NAV_ITEMS: NavDestinationItem[] = [
   { id: 'control-room', label: 'Home', matches: ['control-room'] },
   { id: 'receivers', label: 'Rooms', matches: ['receivers'] },
+  { id: 'sessions', label: 'Session', matches: ['sessions'] },
   { id: 'devices', label: 'Devices', matches: ['devices'] },
   { id: 'multi-view', label: 'Screens', matches: ['multi-view', 'cast'] },
   { id: 'settings', label: 'Settings', matches: ['settings', 'activity'] },
@@ -44,7 +45,10 @@ export function TopControlBar({
           : { label: 'Offline', tone: 'standby' };
 
   return (
-    <header className="sticky top-0 z-30 border-b border-[#E2E8F0] bg-white">
+    <header
+      data-castora-chrome
+      className="sticky top-0 z-30 border-b border-[#E2E8F0] bg-white"
+    >
       <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between gap-6 px-4 sm:px-6">
         {/* Zone 1: Brand */}
         <button

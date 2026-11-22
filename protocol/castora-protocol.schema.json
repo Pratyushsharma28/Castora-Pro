@@ -595,6 +595,38 @@
           "type": "string",
           "enum": ["active", "closed", "expired"]
         },
+        "roomName": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "privacyMode": {
+          "type": "string",
+          "enum": ["private", "approval_required", "open"]
+        },
+        "passwordProtected": { "type": "boolean" },
+        "hostTransfer": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "transferId",
+                "fromHostDeviceId",
+                "targetDeviceId",
+                "targetDeviceName",
+                "initiatedAt",
+                "expiresAt"
+              ],
+              "properties": {
+                "transferId": { "type": "string", "minLength": 4, "maxLength": 64 },
+                "fromHostDeviceId": { "$ref": "#/$defs/deviceId" },
+                "targetDeviceId": { "$ref": "#/$defs/deviceId" },
+                "targetDeviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
+                "initiatedAt": { "type": "string", "format": "date-time" },
+                "expiresAt": { "type": "string", "format": "date-time" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
         "hostDeviceId": { "$ref": "#/$defs/deviceId" },
         "hostDeviceName": { "type": "string", "minLength": 1, "maxLength": 64 },
         "hostPlatform": { "$ref": "#/$defs/platform" },

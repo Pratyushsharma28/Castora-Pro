@@ -9,6 +9,7 @@ import {
   RefreshCw,
   RotateCcw,
   ShieldAlert,
+  ShieldCheck,
   Square,
   Users,
 } from 'lucide-react';
@@ -188,7 +189,12 @@ export function ControlRoomView({
       setJoinCode('');
       onNavigate('receivers');
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Unable to join room');
+      const msg = err instanceof Error ? err.message : 'Unable to join room';
+      if (msg.toLowerCase().includes('password') || msg.toLowerCase().includes('invitation')) {
+        setActionError(`${msg} Open Rooms to enter the password or invitation link.`);
+      } else {
+        setActionError(msg);
+      }
     } finally {
       setRoomBusy(false);
     }
@@ -305,14 +311,24 @@ export function ControlRoomView({
                 <span>{roomBusy ? 'Creating...' : 'Create Room'}</span>
               </button>
             ) : (
-              <button
-                type="button"
-                onClick={() => onNavigate('receivers')}
-                className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
-              >
-                <Users className="h-4 w-4" aria-hidden="true" />
-                <span>Manage Room</span>
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('receivers')}
+                  className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                >
+                  <Users className="h-4 w-4" aria-hidden="true" />
+                  <span>Manage Room</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('sessions')}
+                  className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                >
+                  <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                  <span>Session Controls</span>
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -320,7 +336,9 @@ export function ControlRoomView({
         {/* Single-row Status Strip (no nested cards) */}
         <div className="grid grid-cols-1 divide-y divide-[#E2E8F0] border-t border-[#E2E8F0] bg-[#F8FAFC] sm:grid-cols-2 sm:divide-x lg:grid-cols-4 lg:divide-y-0">
           <div className="px-5 py-3.5">
-            <div className="text-xs font-medium text-[#64748B]">Current Room</div>
+            <div className="text-xs font-medium text-[#64748B]">
+              {activeRoom?.roomName ? activeRoom.roomName : 'Current Room'}
+            </div>
             <div className="mt-1 flex items-center gap-2">
               {activeRoom ? (
                 <>

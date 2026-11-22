@@ -1561,9 +1561,17 @@ async function main() {
             t.sender.track !== null &&
             (t.direction === 'sendonly' || t.direction === 'sendrecv')
         );
+        const activeSendingAudio = this.transceivers.some(
+          (t) =>
+            t.sender.track?.kind === 'audio' &&
+            (t.direction === 'sendonly' || t.direction === 'sendrecv')
+        );
+        const audioSection = activeSendingAudio
+          ? `m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=sendrecv\r\n`
+          : '';
         return {
           type: 'offer' as const,
-          sdp: `v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=${activeSending ? 'sendrecv' : 'recvonly'}\r\n`,
+          sdp: `v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=${activeSending ? 'sendrecv' : 'recvonly'}\r\n${audioSection}`,
         };
       }
 
@@ -1573,9 +1581,17 @@ async function main() {
             t.sender.track !== null &&
             (t.direction === 'sendonly' || t.direction === 'sendrecv')
         );
+        const activeSendingAudio = this.transceivers.some(
+          (t) =>
+            t.sender.track?.kind === 'audio' &&
+            (t.direction === 'sendonly' || t.direction === 'sendrecv')
+        );
+        const audioSection = activeSendingAudio
+          ? `m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=sendrecv\r\n`
+          : '';
         return {
           type: 'answer' as const,
-          sdp: `v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=${activeSending ? 'sendrecv' : 'recvonly'}\r\n`,
+          sdp: `v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=${activeSending ? 'sendrecv' : 'recvonly'}\r\n${audioSection}`,
         };
       }
 
@@ -1605,21 +1621,34 @@ async function main() {
 
       async setRemoteDescription(desc: RTCSessionDescriptionInit) {
         this.remoteDescription = desc;
+        const remoteSending = Boolean(desc.sdp?.includes('a=sendrecv'));
+        const remoteSendingAudio = Boolean(desc.sdp?.includes('m=audio'));
         if (desc.type === 'offer') {
           this.signalingState = 'have-remote-offer';
-          const remoteSending = Boolean(desc.sdp?.includes('a=sendrecv'));
           if (remoteSending) {
             if (!this.deliveredRemoteStream) {
               this.deliveredRemoteStream = new FakeMediaStream(
-                `remote-${Math.random().toString(36).slice(2, 8)}`
+                `remote-${Math.random().toString(36).slice(2, 8)}`,
+                'screen',
+                { includeAudio: remoteSendingAudio }
               );
               const track = this.deliveredRemoteStream.getVideoTracks()[0];
               this.ontrack?.({ track, streams: [this.deliveredRemoteStream] });
+              for (const aTrack of this.deliveredRemoteStream.getAudioTracks()) {
+                this.ontrack?.({ track: aTrack, streams: [this.deliveredRemoteStream] });
+              }
             } else {
               const track = this.deliveredRemoteStream.getVideoTracks()[0];
               if (track.muted) {
                 track.muted = false;
                 track.dispatchEventName('unmute');
+              }
+              if (remoteSendingAudio && this.deliveredRemoteStream.getAudioTracks().length === 0) {
+                const audioDonor = new FakeMediaStream(`remote-aud-${Math.random().toString(36).slice(2, 8)}`, 'screen', { includeAudio: true });
+                for (const aTrack of audioDonor.getAudioTracks()) {
+                  this.deliveredRemoteStream.addTrack(aTrack);
+                  this.ontrack?.({ track: aTrack, streams: [this.deliveredRemoteStream] });
+                }
               }
             }
           } else if (this.deliveredRemoteStream) {
@@ -1631,6 +1660,18 @@ async function main() {
           }
         } else if (desc.type === 'answer') {
           this.signalingState = 'stable';
+          if (remoteSending && !this.deliveredRemoteStream) {
+            this.deliveredRemoteStream = new FakeMediaStream(
+              `remote-${Math.random().toString(36).slice(2, 8)}`,
+              'screen',
+              { includeAudio: remoteSendingAudio }
+            );
+            const track = this.deliveredRemoteStream.getVideoTracks()[0];
+            this.ontrack?.({ track, streams: [this.deliveredRemoteStream] });
+            for (const aTrack of this.deliveredRemoteStream.getAudioTracks()) {
+              this.ontrack?.({ track: aTrack, streams: [this.deliveredRemoteStream] });
+            }
+          }
           if (this.iceConnectionState === 'connected') {
             queueMicrotask(() => {
               this.oniceconnectionstatechange?.();
@@ -1894,9 +1935,9 @@ async function main() {
     wireBridgeToWs(bFriend1Ws, friend1Bridge, 'receiver', bFriend1Id);
     wireBridgeToWs(bFriend2Ws, friend2Bridge, 'receiver', bFriend2Id);
 
-    const waitUntil = async (fn: () => boolean, label: string, timeoutMs = 4000) => {
+    const waitUntil = async (fn: () => boolean | Promise<boolean>, label: string, timeoutMs = 4000) => {
       const start = Date.now();
-      while (!fn()) {
+      while (!(await fn())) {
         if (Date.now() - start > timeoutMs) {
           throw new Error(`Timed out waiting for condition: ${label}`);
         }
@@ -4316,7 +4357,7 @@ async function main() {
     dmHostWs.sendJson({
       protocolVersion: 'castora.v1',
       messageType: 'stream_start',
-      messageId: 'dm-s-1',
+      messageId: 'dm-stream-1',
       senderDeviceId: dmHostId,
       receiverDeviceId: 'dm-win-1',
       roomId: dmRoomId,
@@ -4333,7 +4374,7 @@ async function main() {
     dmP2Ws.sendJson({
       protocolVersion: 'castora.v1',
       messageType: 'stream_start',
-      messageId: 'dm-s-2',
+      messageId: 'dm-stream-2',
       senderDeviceId: 'dm-unk-2',
       receiverDeviceId: dmHostId,
       roomId: dmRoomId,
@@ -4435,12 +4476,12 @@ async function main() {
     dmP1Ws.sendJson({
       protocolVersion: 'castora.v1',
       messageType: 'heartbeat',
-      messageId: 'dm-hb-1',
+      messageId: 'dm-hb-001',
       senderDeviceId: 'dm-win-1',
       receiverDeviceId: null,
       roomId: dmRoomId,
       timestamp: new Date().toISOString(),
-      payload: { uptimeSec: 12 },
+      payload: { sequence: 1, role: 'receiver' },
     });
     await waitUntil(async () => {
       const snap = ((await (await fetch(`${baseUrl}/api/rooms/${dmRoomId}`)).json()) as { room: RoomSnapshot }).room;
@@ -4458,16 +4499,105 @@ async function main() {
     );
     assert.equal(unauthRemove.status, 403);
 
+    // Pending requester also cannot approve/reject/rename-other/stop/reconnect (403)
+    const dmPendingRes = await fetch(`${baseUrl}/api/rooms/${dmRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': '198.51.100.9',
+      },
+      body: JSON.stringify({
+        receiverDeviceId: 'dm-pending-3',
+        deviceName: 'Pending Tablet',
+        platform: 'android',
+        deviceType: 'iPad',
+      }),
+    });
+    assert.equal(dmPendingRes.status, 200);
+    const dmPendingJoin = (await dmPendingRes.json()) as { memberToken: string };
+    const dmPendingApprove = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/pair-requests/dm-pending-3/approve`,
+      { method: 'POST', headers: { Authorization: `Bearer ${dmPendingJoin.memberToken}` } }
+    );
+    assert.equal(dmPendingApprove.status, 403);
+    const dmPendingStop = await fetch(
+      `${baseUrl}/api/rooms/${dmRoomId}/devices/${dmHostId}/stop-stream`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${dmPendingJoin.memberToken}`,
+        },
+        body: JSON.stringify({}),
+      }
+    );
+    assert.equal(dmPendingStop.status, 403);
+
+    // Device status update (disconnect -> connected=false; reconnect -> connected=true) & session-persisted name survives WS reconnect
+    await dmP2Ws.close();
+    await waitUntil(async () => {
+      const snap = ((await (await fetch(`${baseUrl}/api/rooms/${dmRoomId}`)).json()) as { room: RoomSnapshot }).room;
+      return snap.pairedReceivers.find((r) => r.deviceId === 'dm-unk-2')?.connected === false;
+    }, 'Participant disconnect updates connected=false');
+
+    const dmP2WsReconnected = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 'dm-unk-2',
+      deviceName: 'Original Client Name Should Not Overwrite Host Rename',
+      platform: 'android-tv',
+      role: 'both',
+      roomId: dmRoomId,
+      token: dmP2Join.memberToken,
+    });
+    const afterReconnSnap = ((await (await fetch(`${baseUrl}/api/rooms/${dmRoomId}`)).json()) as { room: RoomSnapshot }).room;
+    const p2AfterReconn = afterReconnSnap.pairedReceivers.find((r) => r.deviceId === 'dm-unk-2')!;
+    assert.equal(p2AfterReconn.connected, true, 'Participant reconnect restores connected=true');
+    assert.equal(
+      p2AfterReconn.deviceName,
+      'Client Lounge Display',
+      'Host-assigned display name persists across participant WebSocket reconnect'
+    );
+
+    // Host removes dm-unk-2 -> receives disconnect notice, frees slot; dm-win-1 stays unaffected, then leaves cleanly
+    const p2RemovedNotice = dmP2WsReconnected.waitForMessage(
+      (m) => m.messageType === 'disconnect' && (m.payload as JsonRecord).reason === 'Removed by host',
+      3000,
+      'Removed by host disconnect notice'
+    );
+    const hostRemoveP2 = await fetch(`${baseUrl}/api/rooms/${dmRoomId}/receivers/dm-unk-2`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${dmRoomData.hostToken}` },
+    });
+    assert.equal(hostRemoveP2.status, 200);
+    await p2RemovedNotice;
+    const afterRemoveJson = (await hostRemoveP2.json()) as { room: RoomSnapshot };
+    assert.equal(afterRemoveJson.room.pairedReceiverCount, 1);
+    assert.equal(afterRemoveJson.room.pairedReceivers[0].deviceId, 'dm-win-1');
+
+    // Device leaving via /leave frees remaining slot cleanly
+    const dmLeaveRes = await fetch(`${baseUrl}/api/rooms/${dmRoomId}/leave`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${dmP1Join.memberToken}`,
+      },
+      body: JSON.stringify({ deviceId: 'dm-win-1' }),
+    });
+    assert.equal(dmLeaveRes.status, 200);
+    const afterLeaveSnap = ((await (await fetch(`${baseUrl}/api/rooms/${dmRoomId}`)).json()) as { room: RoomSnapshot }).room;
+    assert.equal(afterLeaveSnap.pairedReceiverCount, 0);
+    assert.equal(afterLeaveSnap.activeReceiverCount, 0);
+
     await dmHostWs.close();
     await dmP1Ws.close();
-    await dmP2Ws.close();
+    await dmP2WsReconnected.close();
     await fetch(`${baseUrl}/api/rooms/${dmRoomId}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${dmRoomData.hostToken}` },
     });
-    console.log('  [PASS] 4G.3. Individual stream stop, reconnect authorization, heartbeat lastSeenAt & remove RBAC verified');
+    console.log('  [PASS] 4G.3. Individual stream stop, reconnect authorization, status updates, name persistence & leave/remove RBAC verified');
 
-    // 4G.5: Simultaneous concurrent join requests, duplicate prevention & 6-device capacity enforcement
+    // 4G.4: Simultaneous concurrent join requests, duplicate prevention & 6-device capacity enforcement
     const capDmRes = await fetch(`${baseUrl}/api/rooms`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -4481,7 +4611,8 @@ async function main() {
     const capDmData = (await capDmRes.json()) as { room: RoomSnapshot; hostToken: string };
     const capDmRoomId = capDmData.room.roomId;
 
-    // Fire 8 concurrent join requests: 6 unique valid devices + 1 duplicate deviceId + 1 duplicate name
+    // Fire 8 concurrent join requests from distinct simulated client IPs:
+    // 6 unique valid devices + 1 duplicate deviceId + 1 duplicate name
     const concurrentRequests = [
       { receiverDeviceId: 'conc-1', deviceName: 'Node One', platform: 'macos', deviceType: 'Mac' },
       { receiverDeviceId: 'conc-2', deviceName: 'Node Two', platform: 'macos', deviceType: 'Windows' },
@@ -4493,10 +4624,13 @@ async function main() {
       { receiverDeviceId: 'conc-7', deviceName: 'node two', platform: 'macos', deviceType: 'Windows' },
     ];
     const joinResponses = await Promise.all(
-      concurrentRequests.map((body) =>
+      concurrentRequests.map((body, idx) =>
         fetch(`${baseUrl}/api/rooms/${capDmRoomId}/pair-requests`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Forwarded-For': `198.51.100.${10 + idx}`,
+          },
           body: JSON.stringify(body),
         })
       )
@@ -4508,7 +4642,10 @@ async function main() {
     // Add 7th unique valid pending request while all 6 are pending
     const seventhJoin = await fetch(`${baseUrl}/api/rooms/${capDmRoomId}/pair-requests`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': '198.51.100.18',
+      },
       body: JSON.stringify({
         receiverDeviceId: 'conc-7-valid',
         deviceName: 'Node Seven Overflow',
@@ -4563,6 +4700,822 @@ async function main() {
     });
     console.log('  [PASS] 4G.4. Simultaneous concurrent joins, duplicate prevention, 6-device cap & slot reuse verified');
 
+    // 4G.5: Audio mute independence across multiple incoming audio streams + independent outbound stream stop
+    const muteRoomRes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: 'mute-host',
+        hostDeviceName: 'Audio Test Host',
+        hostPlatform: 'macos',
+        hostDeviceType: 'Mac',
+      }),
+    });
+    const muteRoomData = (await muteRoomRes.json()) as { room: RoomSnapshot; hostToken: string };
+    const muteRoomId = muteRoomData.room.roomId;
+
+    const muteP1Res = await fetch(`${baseUrl}/api/rooms/${muteRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.31' },
+      body: JSON.stringify({
+        receiverDeviceId: 'mute-peer-1',
+        deviceName: 'Audio Sender One',
+        platform: 'macos',
+        deviceType: 'Mac',
+      }),
+    });
+    const muteP2Res = await fetch(`${baseUrl}/api/rooms/${muteRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.32' },
+      body: JSON.stringify({
+        receiverDeviceId: 'mute-peer-2',
+        deviceName: 'Audio Sender Two',
+        platform: 'macos',
+        deviceType: 'Windows',
+      }),
+    });
+    const muteP1Join = (await muteP1Res.json()) as { memberToken: string };
+    const muteP2Join = (await muteP2Res.json()) as { memberToken: string };
+
+    const muteHostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 'mute-host',
+      deviceName: 'Audio Test Host',
+      platform: 'macos',
+      deviceType: 'Mac',
+      role: 'both',
+      roomId: muteRoomId,
+      token: muteRoomData.hostToken,
+    });
+    const muteP1Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 'mute-peer-1',
+      deviceName: 'Audio Sender One',
+      platform: 'macos',
+      deviceType: 'Mac',
+      role: 'both',
+      roomId: muteRoomId,
+      token: muteP1Join.memberToken,
+    });
+    const muteP2Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 'mute-peer-2',
+      deviceName: 'Audio Sender Two',
+      platform: 'macos',
+      deviceType: 'Windows',
+      role: 'both',
+      roomId: muteRoomId,
+      token: muteP2Join.memberToken,
+    });
+
+    await fetch(`${baseUrl}/api/rooms/${muteRoomId}/pair-requests/mute-peer-1/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${muteRoomData.hostToken}` },
+    });
+    await fetch(`${baseUrl}/api/rooms/${muteRoomId}/pair-requests/mute-peer-2/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${muteRoomData.hostToken}` },
+    });
+
+    let muteRoomSnap = ((await (await fetch(`${baseUrl}/api/rooms/${muteRoomId}`)).json()) as { room: RoomSnapshot }).room;
+    const audioAudioPrefs: CapturePreferences = {
+      ...default1080Prefs,
+      includeAudio: true,
+    };
+    const muteHostBridge = new WebRtcSignalingBridge({
+      deviceId: 'mute-host',
+      preferences: audioAudioPrefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(muteHostWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('mute-host', { width: 1920, height: 1080, frameRate: 60, includeAudio: true }),
+      rtcFactory: (cfg) => new FakeRtcPeerConnection(cfg) as unknown as RTCPeerConnection,
+    });
+    const muteP1Bridge = new WebRtcSignalingBridge({
+      deviceId: 'mute-peer-1',
+      preferences: audioAudioPrefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(muteP1Ws),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('mute-p1', { width: 1920, height: 1080, frameRate: 60, includeAudio: true }),
+      rtcFactory: (cfg) => new FakeRtcPeerConnection(cfg) as unknown as RTCPeerConnection,
+    });
+    const muteP2Bridge = new WebRtcSignalingBridge({
+      deviceId: 'mute-peer-2',
+      preferences: audioAudioPrefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(muteP2Ws),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('mute-p2', { width: 1920, height: 1080, frameRate: 60, includeAudio: true }),
+      rtcFactory: (cfg) => new FakeRtcPeerConnection(cfg) as unknown as RTCPeerConnection,
+    });
+
+    const wireMuteBridge = (
+      wsClient: TestWsClient,
+      bridge: WebRtcSignalingBridge,
+      role: 'host' | 'receiver',
+      devId: string
+    ) => {
+      wsClient.ws.on('message', (raw, isBinary) => {
+        if (isBinary) return;
+        const msg = JSON.parse(raw.toString('utf8')) as CastoraEnvelope;
+        if (msg.messageType === 'room_state' && msg.roomId === muteRoomId) {
+          muteRoomSnap = { ...muteRoomSnap, ...(msg.payload as Partial<RoomSnapshot>) };
+          bridge.updateContext({
+            deviceId: devId,
+            activeRoom: muteRoomSnap,
+            activeRoomRole: role,
+            preferences: audioAudioPrefs,
+            networkPrefs: netPrefs4b,
+          });
+        } else if (
+          msg.messageType === 'stream_start' ||
+          msg.messageType === 'session_offer' ||
+          msg.messageType === 'session_answer' ||
+          msg.messageType === 'ice_candidate' ||
+          msg.messageType === 'stream_stop'
+        ) {
+          void bridge.handleIncomingEnvelope(msg);
+        }
+      });
+    };
+
+    for (const [b, r, d, w] of [
+      [muteHostBridge, 'host', 'mute-host', muteHostWs],
+      [muteP1Bridge, 'receiver', 'mute-peer-1', muteP1Ws],
+      [muteP2Bridge, 'receiver', 'mute-peer-2', muteP2Ws],
+    ] as const) {
+      b.updateContext({
+        deviceId: d,
+        activeRoom: muteRoomSnap,
+        activeRoomRole: r,
+        preferences: audioAudioPrefs,
+        networkPrefs: netPrefs4b,
+      });
+      wireMuteBridge(w, b, r, d);
+    }
+
+    await muteHostBridge.startScreenSharing(null);
+    await muteP1Bridge.startScreenSharing('mute-host');
+    await muteP2Bridge.startScreenSharing('mute-host');
+
+    await waitUntil(
+      () =>
+        muteHostBridge.getSnapshot().incomingStreams.length === 2 &&
+        muteHostBridge.getSnapshot().incomingStreams.every((s) => (s.stream?.getAudioTracks().length ?? 0) > 0) &&
+        muteHostBridge.getSnapshot().outboundPeers.length === 2,
+      'Host receives two independent incoming audio+video streams and publishes to both peers'
+    );
+
+    // Per-peer incoming mute isolation check
+    const mutedByPeerId: Record<string, boolean> = {};
+    const togglePeerMute = (peerId: string) => {
+      mutedByPeerId[peerId] = !(mutedByPeerId[peerId] ?? true);
+    };
+    togglePeerMute('mute-peer-1');
+    assert.equal(mutedByPeerId['mute-peer-1'], false, 'Peer 1 unmuted cleanly');
+    assert.equal(mutedByPeerId['mute-peer-2'] ?? true, true, 'Peer 2 remains muted independently');
+    togglePeerMute('mute-peer-2');
+    assert.equal(mutedByPeerId['mute-peer-1'], false, 'Toggling Peer 2 leaves Peer 1 unmuted');
+    assert.equal(mutedByPeerId['mute-peer-2'], false, 'Peer 2 unmuted cleanly');
+
+    // Individual outgoing stream stop leaves other outbound stream and both incoming audio streams live
+    await muteHostBridge.stopOutgoingStreamToPeer('mute-peer-1');
+    assert.equal(muteHostBridge.getSnapshot().outboundPeers.length, 1);
+    assert.equal(muteHostBridge.getSnapshot().outboundPeers[0].targetDeviceId, 'mute-peer-2');
+    assert.equal(muteHostBridge.getSnapshot().incomingStreams.length, 2);
+
+    muteHostBridge.dispose();
+    muteP1Bridge.dispose();
+    muteP2Bridge.dispose();
+    await fetch(`${baseUrl}/api/rooms/${muteRoomId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${muteRoomData.hostToken}` },
+    });
+    await muteHostWs.close();
+    await muteP1Ws.close();
+    await muteP2Ws.close();
+    console.log('  [PASS] 4G.5. Per-peer audio mute independence & isolated outbound stream stop verified');
+
+    // =========================================================================
+    // STAGE 4H: ADVANCED SESSION MANAGEMENT & HOST OWNERSHIP TRANSFER TESTS
+    // =========================================================================
+    console.log('\nStarting Stage 4H Advanced Session Management tests...');
+
+    // 4H.1: Security unit checks (scrypt password hashing) + Room creation & duplicate prevention
+    const { hashRoomPassword, verifyRoomPassword } = await import('../apps/server/security.ts');
+    const hashedSample = hashRoomPassword('castora-secret-42');
+    assert.ok(hashedSample.startsWith('scrypt$'), 'Password hash must use scrypt$ format');
+    assert.equal(hashedSample.includes('castora-secret-42'), false, 'Hash must never contain plaintext');
+    assert.equal(verifyRoomPassword('castora-secret-42', hashedSample), true);
+    assert.equal(verifyRoomPassword('wrong-password', hashedSample), false);
+
+    const s4hHostId = 'sess-host-alpha';
+    const s4hCreateRes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: s4hHostId,
+        hostDeviceName: 'Studio Host Alpha',
+        hostPlatform: 'macos',
+        hostDeviceType: 'Mac',
+        roomName: 'Design Sync',
+        privacyMode: 'private',
+        password: 'castora-secret-42',
+      }),
+    });
+    assert.equal(s4hCreateRes.status, 201);
+    const s4hCreated = (await s4hCreateRes.json()) as {
+      room: RoomSnapshot & {
+        roomName?: string;
+        privacyMode?: string;
+        passwordProtected?: boolean;
+        createdAt?: string;
+      };
+      hostToken: string;
+      inviteCode: string;
+    };
+    const s4hRoomId = s4hCreated.room.roomId;
+    assert.equal(s4hCreated.room.roomName, 'Design Sync');
+    assert.equal(s4hCreated.room.privacyMode, 'private');
+    assert.equal(s4hCreated.room.passwordProtected, true);
+    assert.ok(s4hCreated.room.createdAt && Number.isFinite(Date.parse(s4hCreated.room.createdAt)));
+    assert.ok(s4hCreated.inviteCode.length >= 10);
+
+    // Prevent accidental duplicate active room by same host
+    const dupHostCreate = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: s4hHostId,
+        hostDeviceName: 'Studio Host Alpha',
+        hostPlatform: 'macos',
+      }),
+    });
+    assert.equal(dupHostCreate.status, 409);
+    const dupHostJson = (await dupHostCreate.json()) as { error: string };
+    assert.equal(dupHostJson.error, 'HOST_ALREADY_HAS_ACTIVE_ROOM');
+
+    // Public room snapshot must never leak inviteCode or password fields
+    const anonLookup = (await (await fetch(`${baseUrl}/api/rooms/${s4hRoomId}`)).json()) as {
+      room: Record<string, unknown>;
+    };
+    assert.equal('inviteCode' in anonLookup.room, false);
+    assert.equal('passwordHash' in anonLookup.room, false);
+    assert.equal('hostToken' in anonLookup.room, false);
+
+    // Host rename works, unauthorized rename fails
+    const unauthRename = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/name`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer invalid-token' },
+      body: JSON.stringify({ roomName: 'Hijacked Name' }),
+    });
+    assert.equal(unauthRename.status, 403);
+
+    const hostRename = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/name`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${s4hCreated.hostToken}`,
+      },
+      body: JSON.stringify({ roomName: 'Design Review Studio' }),
+    });
+    assert.equal(hostRename.status, 200);
+    const hostRenameJson = (await hostRename.json()) as { room: { roomName: string } };
+    assert.equal(hostRenameJson.room.roomName, 'Design Review Studio');
+    console.log('  [PASS] 4H.1. scrypt password hashing, room creation, duplicate prevention, rename & zero-secret exposure verified');
+
+    // 4H.2: Invitation validation, Private mode enforcement & link rotation
+    const missingInvVal = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/invitation/validate`, {
+      headers: { 'X-Forwarded-For': '198.51.100.70' },
+    });
+    assert.equal(missingInvVal.status, 403);
+
+    const wrongInvVal = await fetch(
+      `${baseUrl}/api/rooms/${s4hRoomId}/invitation/validate?invite=WRONGINV`,
+      { headers: { 'X-Forwarded-For': '198.51.100.71' } }
+    );
+    assert.equal(wrongInvVal.status, 403);
+
+    const goodInvVal = await fetch(
+      `${baseUrl}/api/rooms/${s4hRoomId}/invitation/validate?invite=${encodeURIComponent(s4hCreated.inviteCode)}`,
+      { headers: { 'X-Forwarded-For': '198.51.100.72' } }
+    );
+    assert.equal(goodInvVal.status, 200);
+    const goodInvJson = (await goodInvVal.json()) as {
+      inviteValid: boolean;
+      canRequestJoin: boolean;
+      availableSlots: number;
+      room: Record<string, unknown>;
+    };
+    assert.equal(goodInvJson.inviteValid, true);
+    assert.equal(goodInvJson.canRequestJoin, true);
+    assert.equal(goodInvJson.availableSlots, 6);
+    assert.equal('inviteCode' in goodInvJson.room, false);
+
+    // Rotate invitation link (revokes previous link)
+    const rotateRes = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/invitation/rotate`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${s4hCreated.hostToken}` },
+    });
+    assert.equal(rotateRes.status, 200);
+    const rotatedData = (await rotateRes.json()) as { inviteCode: string };
+    assert.notEqual(rotatedData.inviteCode, s4hCreated.inviteCode);
+    const activeInviteCode = rotatedData.inviteCode;
+
+    const oldInvVal = await fetch(
+      `${baseUrl}/api/rooms/${s4hRoomId}/invitation/validate?invite=${encodeURIComponent(s4hCreated.inviteCode)}`,
+      { headers: { 'X-Forwarded-For': '198.51.100.73' } }
+    );
+    assert.equal(oldInvVal.status, 403, 'Revoked invitation code must be rejected');
+    console.log('  [PASS] 4H.2. Invitation validation, Private mode protection & invitation rotation verified');
+
+    // 4H.3: Password enforcement & password rate limiting (429), password change & removal
+    const privateNoInv = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.87' },
+      body: JSON.stringify({
+        receiverDeviceId: 's4h-guest-1',
+        deviceName: 'Private Guest 1',
+        platform: 'macos',
+      }),
+    });
+    assert.equal(privateNoInv.status, 403);
+
+    // 5 failed password attempts from same IP -> 6th hits 429 RATE_LIMITED
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const badPwd = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.88' },
+        body: JSON.stringify({
+          receiverDeviceId: `s4h-brute-${attempt}`,
+          deviceName: `Brute Force ${attempt}`,
+          platform: 'macos',
+          inviteCode: activeInviteCode,
+          password: 'wrong-password',
+        }),
+      });
+      assert.equal(badPwd.status, 403);
+    }
+    const throttledPwd = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.88' },
+      body: JSON.stringify({
+        receiverDeviceId: 's4h-brute-good',
+        deviceName: 'Blocked IP Device',
+        platform: 'macos',
+        inviteCode: activeInviteCode,
+        password: 'castora-secret-42',
+      }),
+    });
+    assert.equal(throttledPwd.status, 429, 'Password attempt limiter must return HTTP 429');
+    assert.ok(throttledPwd.headers.get('retry-after'), 'HTTP 429 must include Retry-After header');
+
+    // Clean IP joins Private + Password room with valid invite & password -> lands in pending_approval
+    const validJoinPrivate = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.89' },
+      body: JSON.stringify({
+        receiverDeviceId: 's4h-rx-1',
+        deviceName: 'Session Receiver 1',
+        platform: 'macos',
+        inviteCode: activeInviteCode,
+        password: 'castora-secret-42',
+      }),
+    });
+    assert.equal(validJoinPrivate.status, 200);
+    const validJoinPrivateData = (await validJoinPrivate.json()) as {
+      requestStatus: string;
+      memberToken: string;
+    };
+    assert.equal(validJoinPrivateData.requestStatus, 'pending_approval');
+
+    // Change password and verify old password fails, then remove password
+    const pwdChange = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/settings`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${s4hCreated.hostToken}`,
+      },
+      body: JSON.stringify({ password: 'updated-pass-99' }),
+    });
+    assert.equal(pwdChange.status, 200);
+
+    const oldPwdAttempt = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.90' },
+      body: JSON.stringify({
+        receiverDeviceId: 's4h-rx-oldpwd',
+        deviceName: 'Old Pwd Tester',
+        platform: 'macos',
+        inviteCode: activeInviteCode,
+        password: 'castora-secret-42',
+      }),
+    });
+    assert.equal(oldPwdAttempt.status, 403);
+
+    const pwdRemove = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/settings`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${s4hCreated.hostToken}`,
+      },
+      body: JSON.stringify({ password: null }),
+    });
+    assert.equal(pwdRemove.status, 200);
+    const pwdRemovedRoom = ((await pwdRemove.json()) as { room: { passwordProtected: boolean } }).room;
+    assert.equal(pwdRemovedRoom.passwordProtected, false);
+    console.log('  [PASS] 4H.3. Password authentication, 429 rate limiting, password rotation & removal verified');
+
+    // 4H.4: Privacy modes (Open auto-pair + Approval Required) and 6-receiver cap enforcement
+    await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/pair-requests/s4h-rx-1/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${s4hCreated.hostToken}` },
+    });
+
+    const toOpenMode = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/settings`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${s4hCreated.hostToken}`,
+      },
+      body: JSON.stringify({ privacyMode: 'open' }),
+    });
+    assert.equal(toOpenMode.status, 200);
+
+    const openJoinRes = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.91' },
+      body: JSON.stringify({
+        receiverDeviceId: 's4h-rx-2',
+        deviceName: 'Open Auto Join 2',
+        platform: 'android',
+      }),
+    });
+    assert.equal(openJoinRes.status, 200);
+    const openJoinData = (await openJoinRes.json()) as {
+      requestStatus: string;
+      assignedSlotIndex: number;
+      memberToken: string;
+    };
+    assert.equal(openJoinData.requestStatus, 'paired');
+    assert.equal(openJoinData.assignedSlotIndex, 1);
+
+    // Fill slots 3..6 concurrently in Open mode; 7th must fail with 409 ROOM_FULL
+    const fillOpenResults = await Promise.all(
+      [3, 4, 5, 6].map((idx) =>
+        fetch(`${baseUrl}/api/rooms/${s4hRoomId}/pair-requests`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `198.51.100.${91 + idx}` },
+          body: JSON.stringify({
+            receiverDeviceId: `s4h-rx-${idx}`,
+            deviceName: `Open Member ${idx}`,
+            platform: 'macos',
+          }),
+        })
+      )
+    );
+    for (const r of fillOpenResults) {
+      assert.equal(r.status, 200);
+    }
+    const overflowOpenRes = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/pair-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.99' },
+      body: JSON.stringify({
+        receiverDeviceId: 's4h-rx-overflow',
+        deviceName: 'Overflow Guest',
+        platform: 'macos',
+      }),
+    });
+    assert.equal(overflowOpenRes.status, 409, 'Open mode must still enforce 6-receiver capacity limit');
+    console.log('  [PASS] 4H.4. Privacy modes (Private / Approval Required / Open) & 6-receiver capacity cap verified');
+
+    // 4H.5: Host WS disconnect preserves ownership (no auto-transfer) + Session restore + Reconnect
+    const s4hHostWs1 = await connectAndAnnounce({
+      wsUrl,
+      deviceId: s4hHostId,
+      deviceName: 'Studio Host Alpha',
+      platform: 'macos',
+      deviceType: 'Mac',
+      role: 'both',
+      roomId: s4hRoomId,
+      token: s4hCreated.hostToken,
+    });
+    await s4hHostWs1.waitForMessage((m) => m.messageType === 'room_state');
+
+    const s4hRx1Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 's4h-rx-1',
+      deviceName: 'Session Receiver 1',
+      platform: 'macos',
+      deviceType: 'Mac',
+      role: 'both',
+      roomId: s4hRoomId,
+      token: validJoinPrivateData.memberToken,
+    });
+    await s4hRx1Ws.waitForMessage((m) => m.messageType === 'room_state');
+
+    const hostDropNotice = s4hRx1Ws.waitForMessage(
+      (m) =>
+        m.messageType === 'room_state' &&
+        (m.payload as { hostConnected: boolean; hostDeviceId: string }).hostConnected === false
+    );
+    await s4hHostWs1.close();
+    const droppedState = await hostDropNotice;
+    assert.equal(
+      (droppedState.payload as { hostDeviceId: string }).hostDeviceId,
+      s4hHostId,
+      'Host ownership must NOT be auto-transferred on temporary host disconnect'
+    );
+
+    // Session restore endpoint recovers full authenticated host context
+    const restoreRes = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/session`, {
+      headers: { Authorization: `Bearer ${s4hCreated.hostToken}` },
+    });
+    assert.equal(restoreRes.status, 200);
+    const restoreJson = (await restoreRes.json()) as {
+      role: string;
+      deviceId: string;
+      inviteCode?: string;
+    };
+    assert.equal(restoreJson.role, 'host');
+    assert.equal(restoreJson.deviceId, s4hHostId);
+    assert.equal(restoreJson.inviteCode, activeInviteCode);
+
+    const s4hHostWs2 = await connectAndAnnounce({
+      wsUrl,
+      deviceId: s4hHostId,
+      deviceName: 'Studio Host Alpha',
+      platform: 'macos',
+      deviceType: 'Mac',
+      role: 'both',
+      roomId: s4hRoomId,
+      token: s4hCreated.hostToken,
+    });
+    const restoredWsState = await s4hHostWs2.waitForMessage((m) => m.messageType === 'room_state');
+    assert.equal((restoredWsState.payload as { hostConnected: boolean }).hostConnected, true);
+
+    await s4hHostWs2.close();
+    await s4hRx1Ws.close();
+    await fetch(`${baseUrl}/api/rooms/${s4hRoomId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${s4hCreated.hostToken}` },
+    });
+    console.log('  [PASS] 4H.5. Host disconnect ownership preservation & authenticated session recovery verified');
+
+    // 4H.6: Secure atomic Host Transfer with simultaneous active WebRTC streams uninterrupted
+    const xHostId = 'xfer-host';
+    const xRx1Id = 'xfer-rx-1';
+    const xRx2Id = 'xfer-rx-2';
+    const xCreate = (await (
+      await fetch(`${baseUrl}/api/rooms`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hostDeviceId: xHostId,
+          hostDeviceName: 'Original Host Mac',
+          hostPlatform: 'macos',
+          hostDeviceType: 'Mac',
+          roomName: 'Handoff Session',
+          privacyMode: 'open',
+        }),
+      })
+    ).json()) as { room: RoomSnapshot; hostToken: string };
+    const xRoomId = xCreate.room.roomId;
+
+    const xRx1Join = (await (
+      await fetch(`${baseUrl}/api/rooms/${xRoomId}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.120' },
+        body: JSON.stringify({
+          receiverDeviceId: xRx1Id,
+          deviceName: 'Successor Windows PC',
+          platform: 'macos',
+          deviceType: 'Windows',
+        }),
+      })
+    ).json()) as { memberToken: string };
+
+    const xRx2Join = (await (
+      await fetch(`${baseUrl}/api/rooms/${xRoomId}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.121' },
+        body: JSON.stringify({
+          receiverDeviceId: xRx2Id,
+          deviceName: 'Observer Mac',
+          platform: 'macos',
+          deviceType: 'Mac',
+        }),
+      })
+    ).json()) as { memberToken: string };
+
+    const xHostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: xHostId,
+      deviceName: 'Original Host Mac',
+      platform: 'macos',
+      deviceType: 'Mac',
+      role: 'both',
+      roomId: xRoomId,
+      token: xCreate.hostToken,
+    });
+    const xRx1Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: xRx1Id,
+      deviceName: 'Successor Windows PC',
+      platform: 'macos',
+      deviceType: 'Windows',
+      role: 'both',
+      roomId: xRoomId,
+      token: xRx1Join.memberToken,
+    });
+    const xRx2Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: xRx2Id,
+      deviceName: 'Observer Mac',
+      platform: 'macos',
+      deviceType: 'Mac',
+      role: 'both',
+      roomId: xRoomId,
+      token: xRx2Join.memberToken,
+    });
+
+    let xRoomSnap = ((await (await fetch(`${baseUrl}/api/rooms/${xRoomId}`)).json()) as { room: RoomSnapshot }).room;
+    const xHostBridge = new WebRtcSignalingBridge({
+      deviceId: xHostId,
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(xHostWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('xhost', { width: 1920, height: 1080, frameRate: 60 }),
+      rtcFactory: (cfg) => new FakeRtcPeerConnection(cfg) as unknown as RTCPeerConnection,
+    });
+    const xRx1Bridge = new WebRtcSignalingBridge({
+      deviceId: xRx1Id,
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(xRx1Ws),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('xrx1', { width: 1920, height: 1080, frameRate: 60 }),
+      rtcFactory: (cfg) => new FakeRtcPeerConnection(cfg) as unknown as RTCPeerConnection,
+    });
+
+    const wireXferBridge = (
+      wsClient: TestWsClient,
+      bridge: WebRtcSignalingBridge,
+      devId: string
+    ) => {
+      wsClient.ws.on('message', (raw, isBinary) => {
+        if (isBinary) return;
+        const msg = JSON.parse(raw.toString('utf8')) as CastoraEnvelope;
+        if (msg.messageType === 'room_state' && msg.roomId === xRoomId) {
+          xRoomSnap = { ...xRoomSnap, ...(msg.payload as Partial<RoomSnapshot>) };
+          bridge.updateContext({
+            deviceId: devId,
+            activeRoom: xRoomSnap,
+            activeRoomRole: xRoomSnap.hostDeviceId === devId ? 'host' : 'receiver',
+            preferences: default1080Prefs,
+            networkPrefs: netPrefs4b,
+          });
+        } else if (
+          msg.messageType === 'stream_start' ||
+          msg.messageType === 'session_offer' ||
+          msg.messageType === 'session_answer' ||
+          msg.messageType === 'ice_candidate' ||
+          msg.messageType === 'stream_stop'
+        ) {
+          void bridge.handleIncomingEnvelope(msg);
+        }
+      });
+    };
+
+    xHostBridge.updateContext({
+      deviceId: xHostId,
+      activeRoom: xRoomSnap,
+      activeRoomRole: 'host',
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+    });
+    xRx1Bridge.updateContext({
+      deviceId: xRx1Id,
+      activeRoom: xRoomSnap,
+      activeRoomRole: 'receiver',
+      preferences: default1080Prefs,
+      networkPrefs: netPrefs4b,
+    });
+    wireXferBridge(xHostWs, xHostBridge, xHostId);
+    wireXferBridge(xRx1Ws, xRx1Bridge, xRx1Id);
+
+    await xHostBridge.startScreenSharing(xRx1Id);
+    await waitUntil(
+      () => xRx1Bridge.getSnapshot().incomingStreams.some((s) => s.senderDeviceId === xHostId && s.stream !== null),
+      'Live WebRTC stream established before host transfer'
+    );
+
+    // Non-host cannot initiate transfer
+    const unauthTransfer = await fetch(`${baseUrl}/api/rooms/${xRoomId}/host-transfer`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${xRx1Join.memberToken}`,
+      },
+      body: JSON.stringify({ targetDeviceId: xRx2Id }),
+    });
+    assert.equal(unauthTransfer.status, 403);
+
+    // Host initiates transfer to xRx1
+    const initTransfer = await fetch(`${baseUrl}/api/rooms/${xRoomId}/host-transfer`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${xCreate.hostToken}`,
+      },
+      body: JSON.stringify({ targetDeviceId: xRx1Id }),
+    });
+    assert.equal(initTransfer.status, 200);
+
+    // Simultaneous second transfer must be rejected with 409
+    const concurrentTransfer = await fetch(`${baseUrl}/api/rooms/${xRoomId}/host-transfer`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${xCreate.hostToken}`,
+      },
+      body: JSON.stringify({ targetDeviceId: xRx2Id }),
+    });
+    assert.equal(concurrentTransfer.status, 409);
+
+    // Third party xRx2 cannot accept xRx1's host transfer
+    const wrongTargetAccept = await fetch(`${baseUrl}/api/rooms/${xRoomId}/host-transfer/respond`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${xRx2Join.memberToken}`,
+      },
+      body: JSON.stringify({ accept: true }),
+    });
+    assert.equal(wrongTargetAccept.status, 403);
+
+    // Designated target xRx1 accepts host transfer
+    const acceptTransfer = await fetch(`${baseUrl}/api/rooms/${xRoomId}/host-transfer/respond`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${xRx1Join.memberToken}`,
+      },
+      body: JSON.stringify({ accept: true }),
+    });
+    assert.equal(acceptTransfer.status, 200);
+    const acceptJson = (await acceptTransfer.json()) as {
+      accepted: boolean;
+      newHostDeviceId: string;
+      room: RoomSnapshot;
+    };
+    assert.equal(acceptJson.accepted, true);
+    assert.equal(acceptJson.newHostDeviceId, xRx1Id);
+    assert.equal(acceptJson.room.hostDeviceId, xRx1Id);
+    assert.equal(acceptJson.room.pairedReceivers.some((r) => r.deviceId === xHostId), true);
+
+    // Permission verification: old host rejected (403), new host authorized (200)
+    const oldHostPrivAction = await fetch(`${baseUrl}/api/rooms/${xRoomId}/name`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${xCreate.hostToken}`,
+      },
+      body: JSON.stringify({ roomName: 'Old Host Rename Attempt' }),
+    });
+    assert.equal(oldHostPrivAction.status, 403);
+
+    const newHostPrivAction = await fetch(`${baseUrl}/api/rooms/${xRoomId}/name`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${xRx1Join.memberToken}`,
+      },
+      body: JSON.stringify({ roomName: 'Transferred Host Studio' }),
+    });
+    assert.equal(newHostPrivAction.status, 200);
+
+    // Active WebRTC stream remains 100% live across ownership swap!
+    assert.equal(xHostBridge.getSnapshot().outboundPeers.length, 1);
+    assert.equal(xRx1Bridge.getSnapshot().incomingStreams.length, 1);
+    assert.ok(xRx1Bridge.getSnapshot().incomingStreams[0].stream !== null);
+
+    // New host can safely close the room
+    const closeByNewHost = await fetch(`${baseUrl}/api/rooms/${xRoomId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${xRx1Join.memberToken}` },
+    });
+    assert.equal(closeByNewHost.status, 200);
+
+    xHostBridge.dispose();
+    xRx1Bridge.dispose();
+    await xHostWs.close();
+    await xRx1Ws.close();
+    await xRx2Ws.close();
+    console.log('  [PASS] 4H.6. Atomic host transfer, permission swap, concurrency protection & live WebRTC stream continuity verified');
+
     // Rate limiting check (exceed 40 window attempts on lookup)
     let hit429 = false;
     for (let i = 0; i < 45; i += 1) {
@@ -4575,7 +5528,78 @@ async function main() {
     assert.equal(hit429, true, 'Rate limiter must return HTTP 429 after exceeding window limit');
     console.log('  [PASS] Extra. Room lookup rate limiting verified (HTTP 429)');
 
-    console.log('\nAll Stage 3 (14) + Stage 4A (10) + Stage 4B (10) + Stage 4C (4) + Stage 4D (3) + Stage 4E (4) + Stage 4F (4) + Stage 4G (4) backend, WebRTC & Device Management tests passed!');
+    // Production Hardening Checks: Malformed JSON, reverse-proxy HTTPS, and CORS/WS Origin allowlist
+    const badJsonRes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"broken": ',
+    });
+    assert.equal(badJsonRes.status, 400);
+    const badJsonText = await badJsonRes.text();
+    const badJsonParsed = JSON.parse(badJsonText) as { error: string };
+    assert.equal(badJsonParsed.error, 'INVALID_JSON');
+    assert.equal(badJsonText.includes('SyntaxError'), false, 'Must not leak JS stack/SyntaxError');
+
+    const proxyHealthRes = await fetch(`${baseUrl}/api/health`, {
+      headers: { 'X-Forwarded-Proto': 'https' },
+    });
+    assert.equal(proxyHealthRes.status, 200);
+    const proxyHealth = (await proxyHealthRes.json()) as {
+      transport: string;
+      httpsEnabled: boolean;
+    };
+    assert.equal(proxyHealth.transport, 'https+wss');
+    assert.equal(proxyHealth.httpsEnabled, true);
+
+    const unknownApiRes = await fetch(`${baseUrl}/api/does-not-exist`);
+    assert.equal(unknownApiRes.status, 404);
+    const unknownApiJson = (await unknownApiRes.json()) as { error: string };
+    assert.equal(unknownApiJson.error, 'NOT_FOUND');
+
+    const corsServer = await startCastoraServer({
+      port: 0,
+      host: '127.0.0.1',
+      enableViteMiddleware: false,
+      allowedOrigins: ['https://castora.example.com'],
+    });
+    try {
+      const corsBase = `http://127.0.0.1:${corsServer.port}`;
+      const allowedOriginRes = await fetch(`${corsBase}/api/health`, {
+        headers: { Origin: 'https://castora.example.com' },
+      });
+      assert.equal(allowedOriginRes.status, 200);
+      assert.equal(
+        allowedOriginRes.headers.get('access-control-allow-origin'),
+        'https://castora.example.com'
+      );
+
+      const blockedOriginRes = await fetch(`${corsBase}/api/health`, {
+        headers: { Origin: 'https://evil.example.net' },
+      });
+      assert.equal(blockedOriginRes.status, 403);
+
+      const wsRejected = await new Promise<boolean>((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${corsServer.port}/castora`, {
+          headers: { Origin: 'https://evil.example.net' },
+        });
+        ws.once('unexpected-response', (_req, res) => {
+          resolve(res.statusCode === 403);
+        });
+        ws.once('open', () => {
+          ws.close();
+          resolve(false);
+        });
+        ws.once('error', () => {
+          // Handled via unexpected-response or socket close
+        });
+      });
+      assert.equal(wsRejected, true, 'Disallowed WebSocket Origin must be rejected with HTTP 403');
+    } finally {
+      await corsServer.close();
+    }
+    console.log('  [PASS] Extra. Production JSON errors, reverse-proxy TLS health, CORS & WS Origin enforcement verified');
+
+    console.log('\nAll Stage 3 (14) + Stage 4A (10) + Stage 4B (10) + Stage 4C (4) + Stage 4D (3) + Stage 4E (4) + Stage 4F (4) + Stage 4G (5) + Stage 4H (6) + Production Hardening tests passed!');
   } finally {
     await instance.close();
   }

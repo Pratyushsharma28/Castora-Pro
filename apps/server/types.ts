@@ -14,6 +14,25 @@ export type DetectedDeviceType =
 export type CastoraDeviceRole = 'sender' | 'receiver' | 'both';
 export type CastoraVideoCodec = 'H264' | 'HEVC' | 'VP8' | 'VP9' | 'AV1';
 export type PairingMethod = 'qr' | 'room_code' | 'manual_ip';
+export type RoomPrivacyMode = 'private' | 'approval_required' | 'open';
+
+export interface PendingHostTransfer {
+  transferId: string;
+  fromHostDeviceId: string;
+  targetDeviceId: string;
+  targetDeviceName: string;
+  initiatedAt: number;
+  expiresAt: number;
+}
+
+export interface PublicHostTransfer {
+  transferId: string;
+  fromHostDeviceId: string;
+  targetDeviceId: string;
+  targetDeviceName: string;
+  initiatedAt: string;
+  expiresAt: string;
+}
 
 export interface DeviceCapabilities {
   maxWidth: number;
@@ -96,6 +115,11 @@ export interface PublicActiveStream {
 
 export interface CastoraRoom {
   roomId: string;
+  roomName: string;
+  privacyMode: RoomPrivacyMode;
+  passwordHash: string | null;
+  inviteCode: string;
+  pendingHostTransfer: PendingHostTransfer | null;
   hostDeviceId: string;
   hostDeviceName: string;
   hostPlatform: CastoraPlatform;
@@ -138,6 +162,10 @@ export interface PublicPairedReceiver {
 
 export interface PublicRoomSnapshot {
   roomId: string;
+  roomName: string;
+  privacyMode: RoomPrivacyMode;
+  passwordProtected: boolean;
+  hostTransfer: PublicHostTransfer | null;
   status: 'active' | 'closed' | 'expired';
   hostDeviceId: string;
   hostDeviceName: string;

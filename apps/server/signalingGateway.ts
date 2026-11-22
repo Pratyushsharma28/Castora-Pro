@@ -34,6 +34,7 @@ interface SignalingGatewayOptions {
   roomManager: RoomManager;
   roomRateLimiter: SlidingWindowRateLimiter;
   wsPort: number;
+  allowedOrigins?: Set<string>;
 }
 
 function extractClientAddress(req: IncomingMessage): string {
@@ -130,7 +131,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
   wss: WebSocketServer;
   shutdown: () => void;
 } {
-  const { server, roomManager, roomRateLimiter, wsPort } = options;
+  const { server, roomManager, roomRateLimiter, wsPort, allowedOrigins } = options;
   const wss = new WebSocketServer({
     noServer: true,
     maxPayload: MAX_CONTROL_PAYLOAD_BYTES,
@@ -158,6 +159,15 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
 
     if (pathname !== WS_PATH) {
       return;
+    }
+
+    if (allowedOrigins && allowedOrigins.size > 0) {
+      const origin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+      if (!origin || !allowedOrigins.has(origin)) {
+        socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
@@ -394,6 +404,21 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
 
         if (result.authenticatedRoom) {
           broadcastRoomState(roomManager, result.authenticatedRoom, [ws]);
+        } else if (envelope.roomId && meta.token) {
+          const roomCheck = roomManager.getRoom(envelope.roomId);
+          sendJson(
+            ws,
+            createErrorEnvelope({
+              receiverDeviceId: result.device.deviceId,
+              roomId: envelope.roomId,
+              code: roomCheck.ok ? 'APPROVAL_DECLINED' : 'INVALID_ROOM_ID',
+              message: roomCheck.ok
+                ? 'Room authentication token is invalid or no longer active'
+                : roomCheck.message,
+              recoverable: false,
+              relatedMessageId: envelope.messageId,
+            })
+          );
         }
         return;
       }
@@ -499,12 +524,19 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
               code:
                 submitResult.code === 'ROOM_FULL'
                   ? 'SESSION_FULL'
-                  : submitResult.code === 'DUPLICATE_PAIR_REQUEST' ||
-                      submitResult.code === 'ALREADY_PAIRED' ||
-                      submitResult.code === 'INVALID_DEVICE_NAME' ||
-                      submitResult.code === 'DUPLICATE_DEVICE_NAME'
-                    ? 'INVALID_MESSAGE'
-                    : 'INVALID_ROOM_ID',
+                  : submitResult.code === 'RATE_LIMITED'
+                    ? 'INTERNAL_ERROR'
+                    : submitResult.code === 'INVITATION_REQUIRED' ||
+                        submitResult.code === 'INVALID_INVITATION' ||
+                        submitResult.code === 'INVALID_ROOM_PASSWORD' ||
+                        submitResult.code === 'UNAUTHORIZED'
+                      ? 'APPROVAL_DECLINED'
+                      : submitResult.code === 'DUPLICATE_PAIR_REQUEST' ||
+                          submitResult.code === 'ALREADY_PAIRED' ||
+                          submitResult.code === 'INVALID_DEVICE_NAME' ||
+                          submitResult.code === 'DUPLICATE_DEVICE_NAME'
+                        ? 'INVALID_MESSAGE'
+                        : 'INVALID_ROOM_ID',
               message: submitResult.message,
               recoverable: true,
               relatedMessageId: envelope.messageId,
@@ -516,9 +548,11 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
         meta.boundDeviceId = envelope.senderDeviceId;
         meta.token = submitResult.memberToken;
 
-        const hostDev = roomManager.getDeviceById(submitResult.room.hostDeviceId);
-        if (hostDev && hostDev.socket.readyState === WebSocket.OPEN) {
-          sendJson(hostDev.socket, envelope);
+        if (submitResult.requestStatus === 'pending_approval') {
+          const hostDev = roomManager.getDeviceById(submitResult.room.hostDeviceId);
+          if (hostDev && hostDev.socket.readyState === WebSocket.OPEN) {
+            sendJson(hostDev.socket, envelope);
+          }
         }
 
         broadcastRoomState(roomManager, submitResult.room, [ws]);

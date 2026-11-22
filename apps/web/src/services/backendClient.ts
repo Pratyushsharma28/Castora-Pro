@@ -6,7 +6,7 @@ import {
   type CastoraPlatform,
   type DeviceCapabilities,
 } from '../types/protocol';
-import type { DetectedDeviceType } from '../types/studio';
+import type { DetectedDeviceType, RoomPrivacyMode } from '../types/studio';
 
 export type SignalingSocketState = 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -83,8 +83,21 @@ export interface ActiveRoomStreamInfo {
   startedAt: string;
 }
 
+export interface PublicHostTransfer {
+  transferId: string;
+  fromHostDeviceId: string;
+  targetDeviceId: string;
+  targetDeviceName: string;
+  initiatedAt: string;
+  expiresAt: string;
+}
+
 export interface RoomSnapshot {
   roomId: string;
+  roomName?: string;
+  privacyMode?: RoomPrivacyMode;
+  passwordProtected?: boolean;
+  hostTransfer?: PublicHostTransfer | null;
   status: 'active' | 'closed' | 'expired';
   hostDeviceId: string;
   hostDeviceName: string;
@@ -106,13 +119,36 @@ export interface RoomSnapshot {
 export interface CreateRoomResponse {
   room: RoomSnapshot;
   hostToken: string;
+  inviteCode: string;
 }
 
 export interface SubmitPairRequestResponse {
   room: RoomSnapshot;
   memberToken: string;
   sessionId: string;
-  requestStatus: 'pending_approval';
+  requestStatus: 'pending_approval' | 'paired';
+  assignedSlotIndex?: number;
+}
+
+export interface RoomInvitationResponse {
+  room: RoomSnapshot;
+  inviteCode: string;
+  privacyMode: RoomPrivacyMode;
+  passwordProtected: boolean;
+}
+
+export interface ValidateInvitationResponse {
+  room: RoomSnapshot;
+  inviteValid: boolean;
+  canRequestJoin: boolean;
+  availableSlots: number;
+}
+
+export interface RestoreSessionResponse {
+  room: RoomSnapshot;
+  deviceId: string;
+  role: 'host' | 'paired' | 'pending';
+  inviteCode?: string;
 }
 
 function createMessageId(): string {
@@ -164,11 +200,15 @@ export async function createBackendRoom(params: {
   hostDeviceName: string;
   hostPlatform: CastoraPlatform;
   hostDeviceType?: DetectedDeviceType;
+  roomName?: string;
+  privacyMode?: RoomPrivacyMode;
+  password?: string;
 }): Promise<CreateRoomResponse> {
   const response = await fetch('/api/rooms', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
+    cache: 'no-store',
   });
   const data = (await response.json()) as CreateRoomResponse & { message?: string };
   if (!response.ok) {
@@ -184,18 +224,25 @@ export async function submitBackendPairRequest(params: {
   platform: CastoraPlatform;
   deviceType?: DetectedDeviceType;
   pairingMethod?: CastoraPairingMethod;
+  inviteCode?: string;
+  password?: string;
 }): Promise<SubmitPairRequestResponse> {
   const response = await fetch(
     `/api/rooms/${encodeURIComponent(params.roomId)}/pair-requests`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
       body: JSON.stringify({
         receiverDeviceId: params.receiverDeviceId,
         deviceName: params.deviceName,
         platform: params.platform,
         deviceType: params.deviceType,
         pairingMethod: params.pairingMethod ?? 'room_code',
+        ...(params.inviteCode ? { inviteCode: params.inviteCode } : {}),
+        ...(params.password !== undefined && params.password !== ''
+          ? { password: params.password }
+          : {}),
       }),
     }
   );
@@ -317,6 +364,211 @@ export async function closeBackendRoom(roomId: string, hostToken: string): Promi
     const data = (await response.json().catch(() => ({}))) as { message?: string };
     throw new Error(data.message ?? `Failed to close room (HTTP ${response.status})`);
   }
+}
+
+export async function renameBackendRoom(params: {
+  roomId: string;
+  roomName: string;
+  hostToken: string;
+}): Promise<RoomSnapshot> {
+  const response = await fetch(`/api/rooms/${encodeURIComponent(params.roomId)}/name`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${params.hostToken}`,
+    },
+    body: JSON.stringify({ roomName: params.roomName }),
+  });
+  const data = (await response.json()) as { room?: RoomSnapshot; message?: string };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Room rename failed (HTTP ${response.status})`);
+  }
+  return data.room;
+}
+
+export async function updateBackendRoomSettings(params: {
+  roomId: string;
+  hostToken: string;
+  roomName?: string;
+  privacyMode?: RoomPrivacyMode;
+  password?: string | null;
+}): Promise<RoomSnapshot> {
+  const response = await fetch(`/api/rooms/${encodeURIComponent(params.roomId)}/settings`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${params.hostToken}`,
+    },
+    cache: 'no-store',
+    body: JSON.stringify({
+      ...(params.roomName !== undefined ? { roomName: params.roomName } : {}),
+      ...(params.privacyMode !== undefined ? { privacyMode: params.privacyMode } : {}),
+      ...(params.password !== undefined ? { password: params.password } : {}),
+    }),
+  });
+  const data = (await response.json()) as { room?: RoomSnapshot; message?: string };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Room settings update failed (HTTP ${response.status})`);
+  }
+  return data.room;
+}
+
+export async function fetchBackendRoomInvitation(params: {
+  roomId: string;
+  hostToken: string;
+}): Promise<RoomInvitationResponse> {
+  const response = await fetch(`/api/rooms/${encodeURIComponent(params.roomId)}/invitation`, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${params.hostToken}`,
+    },
+    cache: 'no-store',
+  });
+  const data = (await response.json()) as RoomInvitationResponse & { message?: string };
+  if (!response.ok || !data.inviteCode) {
+    throw new Error(data.message ?? `Failed to load room invitation (HTTP ${response.status})`);
+  }
+  return data;
+}
+
+export async function rotateBackendRoomInvitation(params: {
+  roomId: string;
+  hostToken: string;
+}): Promise<RoomInvitationResponse> {
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/invitation/rotate`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${params.hostToken}`,
+      },
+      cache: 'no-store',
+    }
+  );
+  const data = (await response.json()) as RoomInvitationResponse & { message?: string };
+  if (!response.ok || !data.inviteCode) {
+    throw new Error(data.message ?? `Failed to regenerate invitation link (HTTP ${response.status})`);
+  }
+  return data;
+}
+
+export async function validateBackendInvitation(params: {
+  roomId: string;
+  inviteCode?: string;
+}): Promise<ValidateInvitationResponse> {
+  const query = new URLSearchParams();
+  if (params.inviteCode) {
+    query.set('invite', params.inviteCode);
+  }
+  const qs = query.toString();
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/invitation/validate${qs ? `?${qs}` : ''}`,
+    {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+    }
+  );
+  const data = (await response.json()) as ValidateInvitationResponse & { message?: string };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Invitation validation failed (HTTP ${response.status})`);
+  }
+  return data;
+}
+
+export async function restoreBackendSession(params: {
+  roomId: string;
+  token: string;
+}): Promise<RestoreSessionResponse> {
+  const response = await fetch(`/api/rooms/${encodeURIComponent(params.roomId)}/session`, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${params.token}`,
+    },
+    cache: 'no-store',
+  });
+  const data = (await response.json()) as RestoreSessionResponse & { message?: string };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Session restore failed (HTTP ${response.status})`);
+  }
+  return data;
+}
+
+export async function initiateBackendHostTransfer(params: {
+  roomId: string;
+  targetDeviceId: string;
+  hostToken: string;
+}): Promise<RoomSnapshot> {
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/host-transfer`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.hostToken}`,
+      },
+      body: JSON.stringify({ targetDeviceId: params.targetDeviceId }),
+    }
+  );
+  const data = (await response.json()) as { room?: RoomSnapshot; message?: string };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Host transfer request failed (HTTP ${response.status})`);
+  }
+  return data.room;
+}
+
+export async function cancelBackendHostTransfer(params: {
+  roomId: string;
+  hostToken: string;
+}): Promise<RoomSnapshot> {
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/host-transfer`,
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${params.hostToken}`,
+      },
+    }
+  );
+  const data = (await response.json()) as { room?: RoomSnapshot; message?: string };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Cancel host transfer failed (HTTP ${response.status})`);
+  }
+  return data.room;
+}
+
+export async function respondBackendHostTransfer(params: {
+  roomId: string;
+  accept: boolean;
+  token: string;
+}): Promise<{ room: RoomSnapshot; accepted: boolean; newHostDeviceId: string }> {
+  const response = await fetch(
+    `/api/rooms/${encodeURIComponent(params.roomId)}/host-transfer/respond`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.token}`,
+      },
+      body: JSON.stringify({ accept: params.accept }),
+    }
+  );
+  const data = (await response.json()) as {
+    room?: RoomSnapshot;
+    accepted?: boolean;
+    newHostDeviceId?: string;
+    message?: string;
+  };
+  if (!response.ok || !data.room) {
+    throw new Error(data.message ?? `Host transfer response failed (HTTP ${response.status})`);
+  }
+  return {
+    room: data.room,
+    accepted: Boolean(data.accepted),
+    newHostDeviceId: data.newHostDeviceId ?? data.room.hostDeviceId,
+  };
 }
 
 export async function renameBackendRoomDevice(params: {

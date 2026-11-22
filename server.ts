@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import express, { type Request, type Response } from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
@@ -29,6 +29,24 @@ const DEVICE_ID_REGEX = /^[A-Za-z0-9._-]{3,64}$/;
 const ALLOWED_PLATFORMS = new Set<CastoraPlatform>(['macos', 'android', 'android-tv']);
 const ALLOWED_PAIRING_METHODS = new Set<PairingMethod>(['qr', 'room_code', 'manual_ip']);
 
+function parseAllowedOrigins(raw?: string | string[]): Set<string> {
+  const entries = Array.isArray(raw) ? raw : (raw ?? '').split(',');
+  const set = new Set<string>();
+  for (const item of entries) {
+    const trimmed = item.trim();
+    if (!trimmed || trimmed === '*') continue;
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        set.add(parsed.origin);
+      }
+    } catch {
+      // Ignore invalid origin entries
+    }
+  }
+  return set;
+}
+
 export interface CastoraServerOptions {
   port?: number;
   host?: string;
@@ -36,6 +54,9 @@ export interface CastoraServerOptions {
   roomTtlMs?: number;
   rateLimitMaxAttempts?: number;
   rateLimitWindowMs?: number;
+  passwordRateLimitMaxAttempts?: number;
+  passwordRateLimitWindowMs?: number;
+  allowedOrigins?: string[];
 }
 
 function resolveTlsCredentials(): { cert: Buffer; key: Buffer } | null {
@@ -75,22 +96,34 @@ function extractBearerToken(req: Request): string {
 function mapRoomErrorStatus(code?: string): number {
   switch (code) {
     case 'INVALID_ROOM_ID':
+    case 'INVALID_ROOM_NAME':
+    case 'INVALID_PRIVACY_MODE':
     case 'INVALID_DEVICE_NAME':
       return 400;
     case 'UNAUTHORIZED':
+    case 'INVITATION_REQUIRED':
+    case 'INVALID_INVITATION':
+    case 'INVALID_ROOM_PASSWORD':
       return 403;
     case 'ROOM_NOT_FOUND':
     case 'REQUEST_NOT_FOUND':
     case 'RECEIVER_NOT_FOUND':
     case 'STREAM_NOT_FOUND':
+    case 'TRANSFER_NOT_FOUND':
       return 404;
     case 'ROOM_FULL':
     case 'ALREADY_PAIRED':
     case 'DUPLICATE_PAIR_REQUEST':
     case 'DUPLICATE_DEVICE_NAME':
+    case 'HOST_ALREADY_HAS_ACTIVE_ROOM':
+    case 'HOST_TRANSFER_IN_PROGRESS':
+    case 'RECEIVER_DISCONNECTED':
       return 409;
     case 'ROOM_EXPIRED':
+    case 'TRANSFER_EXPIRED':
       return 410;
+    case 'RATE_LIMITED':
+      return 429;
     default:
       return 400;
   }
@@ -102,19 +135,51 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
   const isProd = process.env.NODE_ENV === 'production';
   const useVite = options.enableViteMiddleware ?? !isProd;
 
+  const allowedOrigins = parseAllowedOrigins(
+    options.allowedOrigins ?? process.env.CASTORA_ALLOWED_ORIGINS
+  );
+
   const app = express();
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
   app.use(express.json({ limit: '32kb' }));
 
-  app.use((_req, res, next) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    next();
-  });
-
   const tlsCredentials = resolveTlsCredentials();
   const httpsEnabled = Boolean(tlsCredentials);
+
+  app.use((req, res, next) => {
+    const requestHttps =
+      httpsEnabled || req.secure || req.headers['x-forwarded-proto'] === 'https';
+
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    if (isProd && requestHttps) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+
+    if (allowedOrigins.size > 0 && req.path.startsWith('/api/')) {
+      const origin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+      if (origin) {
+        if (!allowedOrigins.has(origin)) {
+          res.status(403).json({
+            error: 'FORBIDDEN_ORIGIN',
+            message: 'Origin not allowed by CASTORA_ALLOWED_ORIGINS policy',
+          });
+          return;
+        }
+        res.setHeader('Vary', 'Origin');
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      }
+      if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+      }
+    }
+
+    next();
+  });
 
   const server = tlsCredentials
     ? https.createServer(tlsCredentials, app)
@@ -125,6 +190,10 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
     options.rateLimitMaxAttempts ?? 10,
     options.rateLimitWindowMs ?? 60_000
   );
+  const passwordRateLimiter = new SlidingWindowRateLimiter(
+    options.passwordRateLimitMaxAttempts ?? 5,
+    options.passwordRateLimitWindowMs ?? 60_000
+  );
 
   const iceRateLimiter = new SlidingWindowRateLimiter(30, 60_000);
 
@@ -133,18 +202,21 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
     roomManager,
     roomRateLimiter,
     wsPort: port,
+    allowedOrigins,
   });
 
   // --- REST API Routes ---
-  app.get('/api/health', (_req: Request, res: Response) => {
+  app.get('/api/health', (req: Request, res: Response) => {
     const stats = roomManager.getStats();
     const iceStatus = getIceConfigStatus();
+    const requestHttps =
+      httpsEnabled || req.secure || req.headers['x-forwarded-proto'] === 'https';
     const body: BackendHealthStatus = {
       status: 'ok',
       service: 'castora-pro-signaling',
       protocolVersion: 'castora.v1',
-      transport: httpsEnabled ? 'https+wss' : 'http+ws',
-      httpsEnabled,
+      transport: requestHttps ? 'https+wss' : 'http+ws',
+      httpsEnabled: requestHttps,
       wsPath: '/castora',
       uptimeSec: Math.round(process.uptime()),
       activeDevices: stats.activeDevices,
@@ -219,11 +291,25 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
   });
 
   app.post('/api/rooms', (req: Request, res: Response) => {
+    const clientIp = getClientIp(req);
+    const createRate = roomRateLimiter.consume(`http-create:${clientIp}`);
+    if (!createRate.allowed) {
+      res.setHeader('Retry-After', Math.ceil(createRate.retryAfterMs / 1000).toString());
+      res.status(429).json({
+        error: 'RATE_LIMITED',
+        message: 'Too many room creation attempts. Try again shortly.',
+      });
+      return;
+    }
+
     const body = req.body as {
       hostDeviceId?: unknown;
       hostDeviceName?: unknown;
       hostPlatform?: unknown;
       hostDeviceType?: unknown;
+      roomName?: unknown;
+      privacyMode?: unknown;
+      password?: unknown;
       ttlMs?: unknown;
     };
 
@@ -254,6 +340,9 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       hostDeviceName,
       hostPlatform,
       hostDeviceType: body?.hostDeviceType,
+      roomName: body?.roomName,
+      privacyMode: body?.privacyMode,
+      password: body?.password,
       ttlMs: requestedTtl,
     });
 
@@ -265,10 +354,12 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       return;
     }
 
-    // Security: never log hostToken
+    // Security: never log hostToken, inviteCode, or passwords
+    res.setHeader('Cache-Control', 'no-store');
     res.status(201).json({
       room: created.room,
       hostToken: created.hostToken,
+      inviteCode: created.inviteCode,
     });
   });
 
@@ -324,6 +415,8 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       platform?: unknown;
       deviceType?: unknown;
       pairingMethod?: unknown;
+      inviteCode?: unknown;
+      password?: unknown;
     };
 
     const receiverDeviceId =
@@ -339,6 +432,9 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       ALLOWED_PAIRING_METHODS.has(body.pairingMethod as PairingMethod)
         ? (body.pairingMethod as PairingMethod)
         : 'room_code';
+    const inviteCode =
+      typeof body?.inviteCode === 'string' ? body.inviteCode.trim().slice(0, 128) : undefined;
+    const password = typeof body?.password === 'string' ? body.password : undefined;
 
     if (!ROOM_CODE_REGEX.test(roomId)) {
       res.status(400).json({
@@ -356,6 +452,9 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       return;
     }
 
+    const pwdBucketKey = `pwd:${clientIp}:${roomId}`;
+    let passwordRateRetryMs = 0;
+
     const submitted = roomManager.submitPairRequest({
       roomId,
       receiverDeviceId,
@@ -363,9 +462,31 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       platform,
       deviceType: body?.deviceType,
       pairingMethod,
+      inviteCode,
+      password,
+      beforePasswordVerify: () => {
+        const pwdCheck = passwordRateLimiter.check(pwdBucketKey);
+        if (!pwdCheck.allowed) {
+          passwordRateRetryMs = pwdCheck.retryAfterMs;
+          return false;
+        }
+        return true;
+      },
+      onPasswordFailure: () => {
+        const consumed = passwordRateLimiter.consume(pwdBucketKey);
+        if (!consumed.allowed) {
+          passwordRateRetryMs = consumed.retryAfterMs;
+        }
+      },
     });
 
     if (!submitted.ok) {
+      if (submitted.code === 'RATE_LIMITED') {
+        res.setHeader(
+          'Retry-After',
+          Math.max(1, Math.ceil(passwordRateRetryMs / 1000)).toString()
+        );
+      }
       res.status(mapRoomErrorStatus(submitted.code)).json({
         error: submitted.code,
         message: submitted.message,
@@ -375,17 +496,332 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
 
     broadcastRoomState(roomManager, submitted.room);
 
-    // Security: never log memberToken
+    // Security: never log memberToken or password
+    res.setHeader('Cache-Control', 'no-store');
     res.status(200).json({
       room: submitted.room,
       memberToken: submitted.memberToken,
       sessionId: submitted.sessionId,
       requestStatus: submitted.requestStatus,
+      ...(typeof submitted.assignedSlotIndex === 'number'
+        ? { assignedSlotIndex: submitted.assignedSlotIndex }
+        : {}),
     });
   };
 
   app.post('/api/rooms/:roomId/pair-requests', handleSubmitPairRequest);
   app.post('/api/rooms/:roomId/join', handleSubmitPairRequest);
+
+  app.patch('/api/rooms/:roomId/name', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const hostToken = extractBearerToken(req);
+    const body = req.body as { roomName?: unknown } | undefined;
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !hostToken) {
+      res.status(hostToken ? 400 : 403).json({
+        error: hostToken ? 'INVALID_ROOM_ID' : 'UNAUTHORIZED',
+        message: hostToken
+          ? 'Room code must be 6 uppercase alphanumeric characters'
+          : 'Authorization Bearer host token required',
+      });
+      return;
+    }
+
+    const updated = roomManager.renameRoom({
+      roomId,
+      roomName: body?.roomName,
+      hostToken,
+    });
+    if (!updated.ok) {
+      res.status(mapRoomErrorStatus(updated.code)).json({
+        error: updated.code,
+        message: updated.message,
+      });
+      return;
+    }
+
+    broadcastRoomState(roomManager, updated.room);
+    res.status(200).json({ room: updated.room });
+  });
+
+  app.patch('/api/rooms/:roomId/settings', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const hostToken = extractBearerToken(req);
+    const body = req.body as
+      | {
+          roomName?: unknown;
+          privacyMode?: unknown;
+          password?: unknown;
+        }
+      | undefined;
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !hostToken) {
+      res.status(hostToken ? 400 : 403).json({
+        error: hostToken ? 'INVALID_ROOM_ID' : 'UNAUTHORIZED',
+        message: hostToken
+          ? 'Room code must be 6 uppercase alphanumeric characters'
+          : 'Authorization Bearer host token required',
+      });
+      return;
+    }
+
+    const updated = roomManager.updateRoomSettings({
+      roomId,
+      hostToken,
+      roomName: body?.roomName,
+      privacyMode: body?.privacyMode,
+      password: body?.password,
+    });
+    if (!updated.ok) {
+      res.status(mapRoomErrorStatus(updated.code)).json({
+        error: updated.code,
+        message: updated.message,
+      });
+      return;
+    }
+
+    broadcastRoomState(roomManager, updated.room);
+    res.status(200).json({ room: updated.room });
+  });
+
+  app.get('/api/rooms/:roomId/invitation', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const hostToken = extractBearerToken(req);
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !hostToken) {
+      res.status(hostToken ? 400 : 403).json({
+        error: hostToken ? 'INVALID_ROOM_ID' : 'UNAUTHORIZED',
+        message: hostToken
+          ? 'Room code must be 6 uppercase alphanumeric characters'
+          : 'Authorization Bearer host token required',
+      });
+      return;
+    }
+
+    const inv = roomManager.getRoomInvitation({ roomId, hostToken });
+    if (!inv.ok) {
+      res.status(mapRoomErrorStatus(inv.code)).json({
+        error: inv.code,
+        message: inv.message,
+      });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(200).json({
+      room: inv.room,
+      inviteCode: inv.inviteCode,
+      privacyMode: inv.privacyMode,
+      passwordProtected: inv.passwordProtected,
+    });
+  });
+
+  app.post('/api/rooms/:roomId/invitation/rotate', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const hostToken = extractBearerToken(req);
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !hostToken) {
+      res.status(hostToken ? 400 : 403).json({
+        error: hostToken ? 'INVALID_ROOM_ID' : 'UNAUTHORIZED',
+        message: hostToken
+          ? 'Room code must be 6 uppercase alphanumeric characters'
+          : 'Authorization Bearer host token required',
+      });
+      return;
+    }
+
+    const rotated = roomManager.rotateRoomInvitation({ roomId, hostToken });
+    if (!rotated.ok) {
+      res.status(mapRoomErrorStatus(rotated.code)).json({
+        error: rotated.code,
+        message: rotated.message,
+      });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(200).json({
+      room: rotated.room,
+      inviteCode: rotated.inviteCode,
+      privacyMode: rotated.privacyMode,
+      passwordProtected: rotated.passwordProtected,
+    });
+  });
+
+  app.get('/api/rooms/:roomId/invitation/validate', (req: Request, res: Response) => {
+    const clientIp = getClientIp(req);
+    const rate = roomRateLimiter.consume(`http-lookup:${clientIp}`);
+    if (!rate.allowed) {
+      res.setHeader('Retry-After', Math.ceil(rate.retryAfterMs / 1000).toString());
+      res.status(429).json({
+        error: 'RATE_LIMITED',
+        message: 'Too many invitation verification attempts. Try again later.',
+      });
+      return;
+    }
+
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    if (!ROOM_CODE_REGEX.test(roomId)) {
+      res.status(400).json({
+        error: 'INVALID_ROOM_ID',
+        message: 'Room code must be 6 uppercase alphanumeric characters',
+      });
+      return;
+    }
+
+    const invite = typeof req.query.invite === 'string' ? req.query.invite.trim() : undefined;
+    const validated = roomManager.validateInvitation({
+      roomId,
+      inviteCode: invite,
+    });
+    if (!validated.ok) {
+      res.status(mapRoomErrorStatus(validated.code)).json({
+        error: validated.code,
+        message: validated.message,
+      });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(200).json({
+      room: validated.room,
+      inviteValid: validated.inviteValid,
+      canRequestJoin: validated.canRequestJoin,
+      availableSlots: validated.availableSlots,
+    });
+  });
+
+  app.get('/api/rooms/:roomId/session', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const token = extractBearerToken(req);
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !token) {
+      res.status(token ? 400 : 403).json({
+        error: token ? 'INVALID_ROOM_ID' : 'UNAUTHORIZED',
+        message: token
+          ? 'Room code must be 6 uppercase alphanumeric characters'
+          : 'Authorization Bearer session token required',
+      });
+      return;
+    }
+
+    const restored = roomManager.restoreAuthenticatedSession({ roomId, token });
+    if (!restored.ok) {
+      res.status(mapRoomErrorStatus(restored.code)).json({
+        error: restored.code,
+        message: restored.message,
+      });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(200).json({
+      room: restored.room,
+      deviceId: restored.deviceId,
+      role: restored.role,
+      ...(restored.inviteCode ? { inviteCode: restored.inviteCode } : {}),
+    });
+  });
+
+  app.post('/api/rooms/:roomId/host-transfer', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const hostToken = extractBearerToken(req);
+    const body = req.body as { targetDeviceId?: unknown } | undefined;
+    const targetDeviceId =
+      typeof body?.targetDeviceId === 'string' ? body.targetDeviceId.trim() : '';
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !DEVICE_ID_REGEX.test(targetDeviceId) || !hostToken) {
+      res.status(hostToken ? 400 : 403).json({
+        error: hostToken ? 'INVALID_REQUEST' : 'UNAUTHORIZED',
+        message: hostToken
+          ? 'Valid roomId and targetDeviceId required'
+          : 'Authorization Bearer host token required',
+      });
+      return;
+    }
+
+    const initiated = roomManager.initiateHostTransfer({
+      roomId,
+      hostToken,
+      targetDeviceId,
+    });
+    if (!initiated.ok) {
+      res.status(mapRoomErrorStatus(initiated.code)).json({
+        error: initiated.code,
+        message: initiated.message,
+      });
+      return;
+    }
+
+    broadcastRoomState(roomManager, initiated.room);
+    res.status(200).json({
+      room: initiated.room,
+      transfer: initiated.transfer,
+    });
+  });
+
+  app.delete('/api/rooms/:roomId/host-transfer', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const hostToken = extractBearerToken(req);
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !hostToken) {
+      res.status(hostToken ? 400 : 403).json({
+        error: hostToken ? 'INVALID_ROOM_ID' : 'UNAUTHORIZED',
+        message: hostToken
+          ? 'Room code must be 6 uppercase alphanumeric characters'
+          : 'Authorization Bearer host token required',
+      });
+      return;
+    }
+
+    const cancelled = roomManager.cancelHostTransfer({ roomId, hostToken });
+    if (!cancelled.ok) {
+      res.status(mapRoomErrorStatus(cancelled.code)).json({
+        error: cancelled.code,
+        message: cancelled.message,
+      });
+      return;
+    }
+
+    broadcastRoomState(roomManager, cancelled.room);
+    res.status(200).json({ room: cancelled.room });
+  });
+
+  app.post('/api/rooms/:roomId/host-transfer/respond', (req: Request, res: Response) => {
+    const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
+    const token = extractBearerToken(req);
+    const body = req.body as { accept?: unknown } | undefined;
+
+    if (!ROOM_CODE_REGEX.test(roomId) || !token || typeof body?.accept !== 'boolean') {
+      res.status(token ? 400 : 403).json({
+        error: token ? 'INVALID_REQUEST' : 'UNAUTHORIZED',
+        message: token
+          ? 'Valid roomId and boolean accept field required'
+          : 'Authorization Bearer participant token required',
+      });
+      return;
+    }
+
+    const responded = roomManager.respondHostTransfer({
+      roomId,
+      token,
+      accept: body.accept,
+    });
+    if (!responded.ok) {
+      res.status(mapRoomErrorStatus(responded.code)).json({
+        error: responded.code,
+        message: responded.message,
+      });
+      return;
+    }
+
+    broadcastRoomState(roomManager, responded.room);
+    res.status(200).json({
+      room: responded.room,
+      accepted: responded.accepted,
+      newHostDeviceId: responded.newHostDeviceId,
+    });
+  });
 
   app.post('/api/rooms/:roomId/pair-requests/:receiverDeviceId/approve', (req: Request, res: Response) => {
     const roomId = String(req.params.roomId ?? '').trim().toUpperCase();
@@ -840,6 +1276,44 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
     });
   }
 
+  // Unknown API route JSON 404 + Sanitized error middleware (no stack traces or secrets leaked)
+  app.use('/api', (_req: Request, res: Response) => {
+    res.status(404).json({
+      error: 'NOT_FOUND',
+      message: 'API endpoint not found',
+    });
+  });
+
+  app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+    if (res.headersSent) {
+      next(err);
+      return;
+    }
+    const errObj = err as { type?: string; status?: number; message?: string } | null;
+    if (errObj?.type === 'entity.parse.failed') {
+      res.status(400).json({
+        error: 'INVALID_JSON',
+        message: 'Malformed JSON request body',
+      });
+      return;
+    }
+    if (errObj?.type === 'entity.too.large') {
+      res.status(413).json({
+        error: 'PAYLOAD_TOO_LARGE',
+        message: 'Request body exceeds 32kb limit',
+      });
+      return;
+    }
+    console.error(
+      `[castora-server] Unhandled error on ${req.method} ${req.path}:`,
+      err instanceof Error ? err.message : 'Unexpected server error'
+    );
+    res.status(500).json({
+      error: 'INTERNAL_ERROR',
+      message: 'Internal server error',
+    });
+  });
+
   // Periodic room expiry & rate-limit bucket cleanup
   const sweepInterval = setInterval(() => {
     const now = Date.now();
@@ -873,6 +1347,7 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
       }
     }
     roomRateLimiter.prune(now);
+    passwordRateLimiter.prune(now);
     iceRateLimiter.prune(now);
   }, EXPIRY_SWEEP_INTERVAL_MS);
   sweepInterval.unref();
@@ -909,9 +1384,9 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
   };
 }
 
-const isEntrypoint =
-  typeof process.argv[1] === 'string' &&
-  (process.argv[1].endsWith('server.ts') || process.argv[1].endsWith('server.js'));
+const entrypointName =
+  typeof process.argv[1] === 'string' ? path.basename(process.argv[1]) : '';
+const isEntrypoint = entrypointName === 'server.ts' || entrypointName === 'server.js';
 
 if (isEntrypoint) {
   startCastoraServer().catch((err) => {

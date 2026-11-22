@@ -67,6 +67,8 @@ interface MultiViewViewProps {
   onRetryAllFailed?: () => void;
   onNavigate?: (destination: StudioDestination) => void;
   defaultShowSharePanel?: boolean;
+  focusedDeviceId?: string | null;
+  onClearFocusedDevice?: () => void;
   onToggleMute?: (slotIndex: number) => void;
   onDisconnectSlot?: (peerDeviceId: string) => void;
   onIncomingVideoDimensions?: (
@@ -158,6 +160,8 @@ export function MultiViewView({
   onRetryAllFailed,
   onNavigate,
   defaultShowSharePanel = false,
+  focusedDeviceId = null,
+  onClearFocusedDevice,
   onToggleMute,
   onDisconnectSlot,
   onIncomingVideoDimensions,
@@ -178,6 +182,19 @@ export function MultiViewView({
       setShowSharePanel(true);
     }
   }, [defaultShowSharePanel]);
+
+  useEffect(() => {
+    if (!focusedDeviceId) return;
+    const matchIndex = slots.findIndex((slot) => slot.receiverDeviceId === focusedDeviceId);
+    if (matchIndex >= 0) {
+      setSpotlightIndex(matchIndex);
+      if (slots.length > 1 && layout !== 'spotlight') {
+        onChangeLayout('spotlight');
+      }
+      wallRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    onClearFocusedDevice?.();
+  }, [focusedDeviceId, layout, onChangeLayout, onClearFocusedDevice, slots]);
 
   useEffect(() => {
     if (typeof document === 'undefined') return;

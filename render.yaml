@@ -1,0 +1,30 @@
+# Render Blueprint for Castora Pro Web + Signaling Service
+# Notes:
+# - Uses single-instance stateful in-memory room management over HTTPS/WSS (/castora).
+# - WebRTC TURN relay requires an external Coturn or managed TURN provider configured via env vars.
+services:
+  - type: web
+    name: castora-pro
+    runtime: node
+    plan: starter
+    autoDeploy: true
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: CASTORA_ROOM_TTL_MS
+        value: "1800000"
+      - key: CASTORA_STUN_URLS
+        value: "stun:stun.l.google.com:19302"
+      - key: CASTORA_ALLOWED_ORIGINS
+        sync: false
+      - key: CASTORA_TURN_URLS
+        sync: false
+      - key: CASTORA_TURN_AUTH_SECRET
+        sync: false
+      - key: CASTORA_TURN_TTL_SECONDS
+        value: "3600"

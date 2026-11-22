@@ -9,6 +9,7 @@ import {
   Plus,
   QrCode,
   RefreshCw,
+  ShieldCheck,
   Square,
 } from 'lucide-react';
 import type {
@@ -20,6 +21,7 @@ import type { WebRtcSessionSnapshot } from '../services/webrtcSignalingBridge';
 import type {
   BrowserCapabilityReport,
   CapturePreferences,
+  RoomPrivacyMode,
   StudioDestination,
   WebRtcConnectionPhase,
 } from '../types/studio';
@@ -33,6 +35,9 @@ interface ReceiversViewProps {
   capabilities: BrowserCapabilityReport;
   preferences: CapturePreferences;
   initialRoomCode: string;
+  initialInviteCode?: string;
+  hostInviteCode?: string | null;
+  inviteValidationMessage?: string | null;
   activePhase: WebRtcConnectionPhase;
   signalingState: SignalingSocketState;
   activeRoom: RoomSnapshot | null;
@@ -41,8 +46,15 @@ interface ReceiversViewProps {
   pairingDetail: string | null;
   webrtcState: WebRtcSessionSnapshot;
   mutedByPeerId: Record<string, boolean>;
-  onCreateRoom: () => Promise<RoomSnapshot>;
-  onSubmitPairRequest: (roomId: string) => Promise<RoomSnapshot>;
+  onCreateRoom: (options?: {
+    roomName?: string;
+    privacyMode?: RoomPrivacyMode;
+    password?: string;
+  }) => Promise<RoomSnapshot>;
+  onSubmitPairRequest: (
+    roomId: string,
+    options?: { inviteCode?: string; password?: string }
+  ) => Promise<RoomSnapshot>;
   onApproveReceiver: (receiverDeviceId: string) => Promise<RoomSnapshot>;
   onRejectReceiver: (receiverDeviceId: string) => Promise<RoomSnapshot>;
   onRemoveReceiver: (receiverDeviceId: string) => Promise<RoomSnapshot>;
@@ -65,6 +77,8 @@ interface ReceiversViewProps {
   onStopSharing: () => void;
   onReconnectBackend?: () => void;
   onRetryPeer?: (peerDeviceId: string) => void;
+  onViewStream?: (senderDeviceId: string) => void;
+  lastSignalingActivityAt?: string | null;
   onNavigate: (destination: StudioDestination) => void;
   onLogEvent: (
     category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error',
@@ -98,6 +112,9 @@ export function ReceiversView({
   capabilities,
   preferences,
   initialRoomCode,
+  initialInviteCode = '',
+  hostInviteCode = null,
+  inviteValidationMessage = null,
   signalingState,
   activeRoom,
   activeRoomRole,
@@ -122,6 +139,8 @@ export function ReceiversView({
   onStopSharing,
   onReconnectBackend,
   onRetryPeer,
+  onViewStream,
+  lastSignalingActivityAt = null,
   onNavigate,
   onLogEvent,
 }: ReceiversViewProps) {
@@ -129,6 +148,11 @@ export function ReceiversView({
     activeRoomRole === 'host' ? 'host' : 'join'
   );
   const [roomCode, setRoomCode] = useState<string>(initialRoomCode);
+  const [joinInviteCode, setJoinInviteCode] = useState<string>(initialInviteCode);
+  const [joinPassword, setJoinPassword] = useState<string>('');
+  const [createRoomName, setCreateRoomName] = useState<string>('');
+  const [createPrivacy, setCreatePrivacy] = useState<RoomPrivacyMode>('approval_required');
+  const [createPassword, setCreatePassword] = useState<string>('');
   const [qrInput, setQrInput] = useState<string>('');
   const [busy, setBusy] = useState<boolean>(false);
   const [shareBusy, setShareBusy] = useState<boolean>(false);
@@ -156,7 +180,9 @@ export function ReceiversView({
     const text =
       kind === 'code'
         ? activeRoom.roomId
-        : `${window.location.origin}/?room=${activeRoom.roomId}`;
+        : hostInviteCode
+          ? `${window.location.origin}/?room=${encodeURIComponent(activeRoom.roomId)}&invite=${encodeURIComponent(hostInviteCode)}`
+          : `${window.location.origin}/?room=${encodeURIComponent(activeRoom.roomId)}`;
     try {
       await navigator.clipboard.writeText(text);
       setCopiedType(kind);
@@ -176,11 +202,19 @@ export function ReceiversView({
     }
 
     setBusy(true);
+    const pwdToSubmit = joinPassword;
+    setJoinPassword('');
     try {
-      const submitted = await onSubmitPairRequest(roomCode);
+      const submitted = await onSubmitPairRequest(roomCode, {
+        inviteCode: joinInviteCode.trim() || undefined,
+        password: pwdToSubmit.length > 0 ? pwdToSubmit : undefined,
+      });
+      const isAlreadyPaired = submitted.pairedReceivers.some((r) => r.deviceId === deviceId);
       setFeedback({
         tone: 'info',
-        text: `Request sent to room ${submitted.roomId} (${submitted.hostDeviceName}). Waiting for host approval.`,
+        text: isAlreadyPaired
+          ? `Joined room ${submitted.roomId} (${submitted.roomName ?? submitted.hostDeviceName}) immediately via Open access.`
+          : `Request sent to room ${submitted.roomId} (${submitted.hostDeviceName}). Waiting for host approval.`,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to submit pairing request';
@@ -202,10 +236,19 @@ export function ReceiversView({
         .toUpperCase()
         .replace(/[^A-Z0-9]/g, '')
         .slice(0, 6);
+      const paramInvite = (url.searchParams.get('invite') ?? '').trim().slice(0, 128);
       if (ROOM_CODE_PATTERN.test(paramRoom)) {
         setRoomCode(paramRoom);
-        setFeedback({ tone: 'info', text: `Loaded room code ${paramRoom} from join link.` });
-        onLogEvent('ui', 'Parsed QR join URL', `Extracted room code ${paramRoom}.`);
+        if (paramInvite) {
+          setJoinInviteCode(paramInvite);
+        }
+        setFeedback({
+          tone: 'info',
+          text: paramInvite
+            ? `Loaded room ${paramRoom} and invitation token from link.`
+            : `Loaded room code ${paramRoom} from join link.`,
+        });
+        onLogEvent('ui', 'Parsed invitation link', `Extracted room code ${paramRoom}.`);
         return;
       }
     } catch {
@@ -225,11 +268,18 @@ export function ReceiversView({
 
   const handleCreateRoom = async () => {
     setBusy(true);
+    const pwdToSubmit = createPassword;
+    setCreatePassword('');
     try {
-      const created = await onCreateRoom();
+      const created = await onCreateRoom({
+        roomName: createRoomName.trim() || undefined,
+        privacyMode: createPrivacy,
+        password: pwdToSubmit.length > 0 ? pwdToSubmit : undefined,
+      });
+      setCreateRoomName('');
       setFeedback({
         tone: 'info',
-        text: `Room ${created.roomId} created. Expires at ${new Date(created.expiresAt).toLocaleTimeString()}.`,
+        text: `Room "${created.roomName ?? created.roomId}" (${created.roomId}) created. Expires at ${new Date(created.expiresAt).toLocaleTimeString()}.`,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to create room';
@@ -388,6 +438,12 @@ export function ReceiversView({
                 </button>
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs text-[#64748B] tabular-metrics">
+                {activeRoom.roomName && (
+                  <>
+                    <strong className="font-semibold text-[#172033]">{activeRoom.roomName}</strong>
+                    <span aria-hidden="true">·</span>
+                  </>
+                )}
                 <span>
                   Role:{' '}
                   <strong className="font-semibold text-[#172033]">
@@ -396,6 +452,15 @@ export function ReceiversView({
                 </span>
                 <span aria-hidden="true">·</span>
                 <span>Host: {activeRoom.hostDeviceName}</span>
+                <span aria-hidden="true">·</span>
+                <span>
+                  {activeRoom.privacyMode === 'private'
+                    ? 'Private'
+                    : activeRoom.privacyMode === 'open'
+                      ? 'Open'
+                      : 'Approval Required'}
+                  {activeRoom.passwordProtected ? ' (Password)' : ''}
+                </span>
                 <span aria-hidden="true">·</span>
                 <span>
                   {activeRoom.activeReceiverCount} connected / {activeRoom.pairedReceiverCount} paired (max{' '}
@@ -407,6 +472,14 @@ export function ReceiversView({
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => onNavigate('sessions')}
+                className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+              >
+                <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                <span>Session Controls</span>
+              </button>
               {isApprovedMember && (
                 <>
                   <button
@@ -512,6 +585,12 @@ export function ReceiversView({
 
             {mode === 'join' ? (
               <form onSubmit={handleSubmitJoin} className="space-y-4">
+                {inviteValidationMessage && !activeRoom && (
+                  <div className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs text-[#172033]">
+                    {inviteValidationMessage}
+                  </div>
+                )}
+
                 <div>
                   <label
                     htmlFor="castora-room-code"
@@ -534,6 +613,32 @@ export function ReceiversView({
                     className="mt-1.5 h-12 w-full rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 font-mono text-lg font-semibold tracking-[0.25em] text-[#172033] placeholder:text-[#94A3B8] focus:border-[#2563EB] focus:bg-white focus:outline-none tabular-metrics disabled:opacity-60"
                   />
                 </div>
+
+                <div>
+                  <label
+                    htmlFor="castora-room-password"
+                    className="block text-xs font-medium text-[#172033]"
+                  >
+                    Room Password (if required)
+                  </label>
+                  <input
+                    id="castora-room-password"
+                    type="password"
+                    maxLength={64}
+                    autoComplete="off"
+                    value={joinPassword}
+                    onChange={(e) => setJoinPassword(e.target.value)}
+                    placeholder="Enter password if room is protected"
+                    disabled={Boolean(activeRoom)}
+                    className="mt-1.5 h-10 w-full rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-sm text-[#172033] placeholder:text-[#94A3B8] focus:border-[#2563EB] focus:bg-white focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+
+                {joinInviteCode && (
+                  <p className="text-[11px] font-medium text-[#2563EB]">
+                    Invitation token attached for verification.
+                  </p>
+                )}
 
                 {activeRoom && activeRoomRole === 'receiver' ? (
                   <button
@@ -569,7 +674,7 @@ export function ReceiversView({
                       type="text"
                       value={qrInput}
                       onChange={(e) => setQrInput(e.target.value)}
-                      placeholder="https://.../join?room=K7M4P9"
+                      placeholder="https://.../?room=K7M4P9&invite=..."
                       className="h-11 flex-1 rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-xs text-[#172033] placeholder:text-[#94A3B8] focus:border-[#2563EB] focus:bg-white focus:outline-none"
                     />
                     <button
@@ -584,30 +689,75 @@ export function ReceiversView({
               </form>
             ) : (
               <div className="space-y-4">
-                <div className="flex flex-col items-center justify-center rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-4 py-6 text-center">
-                  <QrCode className="h-8 w-8 text-[#2563EB]" aria-hidden="true" />
-                  {activeRoom && activeRoomRole === 'host' ? (
-                    <>
-                      <p className="mt-3 font-mono text-2xl font-bold tracking-[0.22em] text-[#172033] tabular-metrics">
-                        {activeRoom.roomId}
-                      </p>
-                      <p className="mt-1 text-xs text-[#64748B] tabular-metrics">
-                        Expires {new Date(activeRoom.expiresAt).toLocaleTimeString()} ·{' '}
-                        {activeRoom.activeReceiverCount} connected / {activeRoom.pairedReceiverCount} paired (max{' '}
-                        {activeRoom.maxReceivers})
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <p className="mt-3 text-sm font-semibold text-[#172033]">
-                        Host a New Room
-                      </p>
-                      <p className="mt-1 max-w-xs text-xs leading-relaxed text-[#64748B]">
-                        Generates a 6-character code with explicit host approval for up to 6 participants.
-                      </p>
-                    </>
-                  )}
-                </div>
+                {activeRoom && activeRoomRole === 'host' ? (
+                  <div className="flex flex-col items-center justify-center rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-4 py-6 text-center">
+                    <QrCode className="h-8 w-8 text-[#2563EB]" aria-hidden="true" />
+                    <p className="mt-3 font-mono text-2xl font-bold tracking-[0.22em] text-[#172033] tabular-metrics">
+                      {activeRoom.roomId}
+                    </p>
+                    <p className="mt-1 text-xs text-[#64748B] tabular-metrics">
+                      Expires {new Date(activeRoom.expiresAt).toLocaleTimeString()} ·{' '}
+                      {activeRoom.activeReceiverCount} connected / {activeRoom.pairedReceiverCount} paired (max{' '}
+                      {activeRoom.maxReceivers})
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div>
+                      <label
+                        htmlFor="castora-create-room-name"
+                        className="block text-xs font-medium text-[#172033]"
+                      >
+                        Room Name (optional)
+                      </label>
+                      <input
+                        id="castora-create-room-name"
+                        type="text"
+                        maxLength={64}
+                        value={createRoomName}
+                        onChange={(e) => setCreateRoomName(e.target.value)}
+                        placeholder="Studio Review Room"
+                        className="mt-1 h-10 w-full rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-sm text-[#172033] placeholder:text-[#94A3B8] focus:border-[#2563EB] focus:bg-white focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="castora-create-privacy"
+                        className="block text-xs font-medium text-[#172033]"
+                      >
+                        Privacy Mode
+                      </label>
+                      <select
+                        id="castora-create-privacy"
+                        value={createPrivacy}
+                        onChange={(e) => setCreatePrivacy(e.target.value as RoomPrivacyMode)}
+                        className="mt-1 h-10 w-full rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-sm text-[#172033] focus:border-[#2563EB] focus:bg-white focus:outline-none"
+                      >
+                        <option value="approval_required">Approval Required</option>
+                        <option value="private">Private (Invitation Required)</option>
+                        <option value="open">Open (Auto-join available slots)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="castora-create-password"
+                        className="block text-xs font-medium text-[#172033]"
+                      >
+                        Optional Room Password (4–64 chars)
+                      </label>
+                      <input
+                        id="castora-create-password"
+                        type="password"
+                        maxLength={64}
+                        autoComplete="new-password"
+                        value={createPassword}
+                        onChange={(e) => setCreatePassword(e.target.value)}
+                        placeholder="Leave blank for open code access"
+                        className="mt-1 h-10 w-full rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-sm text-[#172033] placeholder:text-[#94A3B8] focus:border-[#2563EB] focus:bg-white focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                )}
 
                 {activeRoom && activeRoomRole === 'host' ? (
                   <button
@@ -680,8 +830,16 @@ export function ReceiversView({
             onReconnectDevice={onReconnectDevice}
             onToggleMutePeer={onToggleMutePeer}
             onToggleAdaptiveLock={onToggleAdaptiveLock}
-            onViewStream={() => onNavigate('multi-view')}
+            onViewStream={(senderDeviceId) => {
+              if (onViewStream) {
+                onViewStream(senderDeviceId);
+              } else {
+                onNavigate('multi-view');
+              }
+            }}
             onRefresh={onRefreshDevices}
+            onReconnectBackend={onReconnectBackend}
+            lastSignalingActivityAt={lastSignalingActivityAt}
           />
 
           {(isApprovedMember || webrtcState.incomingStreams.length > 0) && (
