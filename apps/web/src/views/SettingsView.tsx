@@ -228,7 +228,7 @@ export function SettingsView({
                   resolution: '1080p',
                   targetFps: 60,
                   codecPreference: 'H264',
-                  includeAudio: false,
+                  includeAudio: true,
                   maxBitrateKbps: 10_000,
                   adaptiveBitrate: true,
                 });

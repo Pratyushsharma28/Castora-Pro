@@ -19,6 +19,7 @@ import type {
 } from '../services/backendClient';
 import type { WebRtcSessionSnapshot } from '../services/webrtcSignalingBridge';
 import type {
+  AudioPlaybackStatus,
   BrowserCapabilityReport,
   CapturePreferences,
   RoomPrivacyMode,
@@ -78,6 +79,10 @@ interface ReceiversViewProps {
   onReconnectBackend?: () => void;
   onRetryPeer?: (peerDeviceId: string) => void;
   onViewStream?: (senderDeviceId: string) => void;
+  onIncomingAudioPlayback?: (
+    senderDeviceId: string,
+    state: { playbackStatus: AudioPlaybackStatus; autoplayBlocked: boolean }
+  ) => void;
   lastSignalingActivityAt?: string | null;
   onNavigate: (destination: StudioDestination) => void;
   onLogEvent: (
@@ -140,6 +145,7 @@ export function ReceiversView({
   onReconnectBackend,
   onRetryPeer,
   onViewStream,
+  onIncomingAudioPlayback,
   lastSignalingActivityAt = null,
   onNavigate,
   onLogEvent,
@@ -849,6 +855,7 @@ export function ReceiversView({
               mutedByPeerId={mutedByPeerId}
               onToggleMutePeer={onToggleMutePeer}
               onRetryPeer={onRetryPeer}
+              onIncomingAudioPlayback={onIncomingAudioPlayback}
               emptyMessage={
                 activeRoomRole === 'receiver'
                   ? `Connected to room ${activeRoom?.roomId ?? ''}. Incoming screens appear here whenever a participant shares.`

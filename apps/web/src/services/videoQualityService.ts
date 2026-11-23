@@ -272,21 +272,103 @@ export function computeConcurrencyScaledBitrateKbps(
 export interface CodecPreferenceResult {
   orderedCodecs: RTCRtpCodec[];
   codecHint: CastoraVideoCodec;
+  availableVideoCodecs: CastoraVideoCodec[];
 }
 
-function getH264ProfilePriority(sdpFmtpLine: string | undefined): number {
+export function extractH264FmtpInfo(sdpFmtpLine: string | undefined): {
+  profileLevelId: string | null;
+  profilePrefix: string | null;
+  packetizationMode: string | null;
+  levelAsymmetryAllowed: boolean;
+} {
   const fmtp = (sdpFmtpLine ?? '').toLowerCase();
-  const packetizationBonus = fmtp.includes('packetization-mode=1') ? 10 : 0;
-  if (fmtp.includes('profile-level-id=6400')) return 40 + packetizationBonus;
-  if (fmtp.includes('profile-level-id=4d00')) return 35 + packetizationBonus;
-  if (fmtp.includes('profile-level-id=42e0')) return 30 + packetizationBonus;
-  if (fmtp.includes('profile-level-id=4200')) return 25 + packetizationBonus;
-  return 10 + packetizationBonus;
+  const profileMatch = fmtp.match(/profile-level-id=([0-9a-f]{4,6})/i);
+  const packetMatch = fmtp.match(/packetization-mode=(\d+)/i);
+  const profileLevelId = profileMatch ? profileMatch[1].toLowerCase() : null;
+  return {
+    profileLevelId,
+    profilePrefix: profileLevelId ? profileLevelId.slice(0, 4) : null,
+    packetizationMode: packetMatch ? packetMatch[1] : null,
+    levelAsymmetryAllowed: fmtp.includes('level-asymmetry-allowed=1'),
+  };
+}
+
+export function getH264ProfilePriority(sdpFmtpLine: string | undefined): number {
+  const { profilePrefix, packetizationMode, levelAsymmetryAllowed } =
+    extractH264FmtpInfo(sdpFmtpLine);
+
+  // TV, Android Chrome, and WebRTC mandatory-to-implement H.264 requires packetization-mode=1.
+  const packetizationBonus =
+    packetizationMode === '1' ? 200 : packetizationMode === '0' ? 0 : 100;
+  const asymmetryBonus = levelAsymmetryAllowed ? 20 : 0;
+
+  // Prioritize universally compatible H.264 profiles (Constrained Baseline 42e0 / Baseline 4200)
+  // ahead of Main (4d00) and High (6400), which many TV/mobile hardware decoders reject.
+  let profileScore = 10;
+  if (profilePrefix === '42e0') profileScore = 50;
+  else if (profilePrefix === '4200') profileScore = 40;
+  else if (profilePrefix === '4d00') profileScore = 30;
+  else if (profilePrefix === '6400') profileScore = 20;
+
+  return packetizationBonus + asymmetryBonus + profileScore;
+}
+
+export function normalizeVideoCodecName(mimeType: string | undefined): CastoraVideoCodec | null {
+  if (!mimeType) return null;
+  const lower = mimeType.toLowerCase();
+  if (lower === 'video/h264' || lower === 'h264') return 'H264';
+  if (lower === 'video/vp9' || lower === 'vp9') return 'VP9';
+  if (lower === 'video/av1' || lower === 'av1' || lower === 'av1x') return 'AV1';
+  if (lower === 'video/vp8' || lower === 'vp8') return 'VP8';
+  return null;
+}
+
+export function getCodecFallbackChain(
+  preferred: CodecPreference | CastoraVideoCodec,
+  availableVideoCodecs?: CastoraVideoCodec[]
+): CastoraVideoCodec[] {
+  const baseChain: CastoraVideoCodec[] =
+    preferred === 'H264'
+      ? ['H264', 'VP9', 'VP8']
+      : preferred === 'AV1'
+        ? ['AV1', 'VP9', 'H264', 'VP8']
+        : preferred === 'VP9'
+          ? ['VP9', 'H264', 'VP8']
+          : preferred === 'VP8'
+            ? ['VP8', 'VP9', 'H264']
+            : ['H264', 'VP9', 'VP8', 'AV1'];
+
+  if (!availableVideoCodecs || availableVideoCodecs.length === 0) {
+    return baseChain;
+  }
+  const availableSet = new Set(availableVideoCodecs);
+  const filtered = baseChain.filter((c) => availableSet.has(c));
+  for (const codec of availableVideoCodecs) {
+    if (!filtered.includes(codec)) {
+      filtered.push(codec);
+    }
+  }
+  return filtered.length > 0 ? filtered : baseChain;
+}
+
+export function getNextFallbackCodec(
+  currentCodec: CodecPreference | CastoraVideoCodec,
+  triedCodecs: ReadonlySet<CastoraVideoCodec>,
+  availableVideoCodecs?: CastoraVideoCodec[]
+): CastoraVideoCodec | null {
+  const chain = getCodecFallbackChain(currentCodec, availableVideoCodecs);
+  for (const candidate of chain) {
+    if (!triedCodecs.has(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 export function orderVideoCodecsForPreference(
   capabilitiesCodecs: RTCRtpCodec[],
-  preference: CodecPreference
+  preference: CodecPreference | CastoraVideoCodec,
+  receiverCapabilitiesCodecs?: RTCRtpCodec[] | null
 ): CodecPreferenceResult {
   if (!capabilitiesCodecs || capabilitiesCodecs.length === 0) {
     return {
@@ -299,6 +381,7 @@ export function orderVideoCodecsForPreference(
             : preference === 'AV1'
               ? 'AV1'
               : 'VP8',
+      availableVideoCodecs: [],
     };
   }
 
@@ -308,9 +391,38 @@ export function orderVideoCodecsForPreference(
     return m === 'video/rtx' || m === 'video/red' || m === 'video/ulpfec' || m === 'video/flexfec-03';
   });
 
+  // If receiver capabilities are provided, slightly boost mutually matching codecs/profiles
+  // without removing fallback sender codecs needed for heterogeneous remote peers (e.g. TVs).
+  const receiverH264Keys = new Set(
+    (receiverCapabilitiesCodecs ?? [])
+      .filter((c) => normalizedMime(c) === 'video/h264')
+      .map((c) => {
+        const info = extractH264FmtpInfo(c.sdpFmtpLine);
+        return `${info.profilePrefix ?? ''}:${info.packetizationMode ?? ''}`;
+      })
+  );
+
   const h264 = capabilitiesCodecs
     .filter((c) => normalizedMime(c) === 'video/h264')
-    .sort((a, b) => getH264ProfilePriority(b.sdpFmtpLine) - getH264ProfilePriority(a.sdpFmtpLine));
+    .sort((a, b) => {
+      const aInfo = extractH264FmtpInfo(a.sdpFmtpLine);
+      const bInfo = extractH264FmtpInfo(b.sdpFmtpLine);
+      const aMatchBonus =
+        receiverH264Keys.size > 0 &&
+        receiverH264Keys.has(`${aInfo.profilePrefix ?? ''}:${aInfo.packetizationMode ?? ''}`)
+          ? 5
+          : 0;
+      const bMatchBonus =
+        receiverH264Keys.size > 0 &&
+        receiverH264Keys.has(`${bInfo.profilePrefix ?? ''}:${bInfo.packetizationMode ?? ''}`)
+          ? 5
+          : 0;
+      return (
+        getH264ProfilePriority(b.sdpFmtpLine) +
+        bMatchBonus -
+        (getH264ProfilePriority(a.sdpFmtpLine) + aMatchBonus)
+      );
+    });
   const av1 = capabilitiesCodecs.filter((c) => normalizedMime(c) === 'video/av1');
   const vp9 = capabilitiesCodecs.filter((c) => normalizedMime(c) === 'video/vp9');
   const vp8 = capabilitiesCodecs.filter((c) => normalizedMime(c) === 'video/vp8');
@@ -325,19 +437,27 @@ export function orderVideoCodecsForPreference(
     );
   });
 
+  const availableVideoCodecs: CastoraVideoCodec[] = [];
+  if (h264.length > 0) availableVideoCodecs.push('H264');
+  if (vp9.length > 0) availableVideoCodecs.push('VP9');
+  if (av1.length > 0) availableVideoCodecs.push('AV1');
+  if (vp8.length > 0) availableVideoCodecs.push('VP8');
+
   if (preference === 'H264') {
-    const ordered = [...h264, ...vp9, ...av1, ...vp8, ...rest, ...auxiliary];
+    const ordered = [...h264, ...vp9, ...vp8, ...av1, ...rest, ...auxiliary];
     return {
       orderedCodecs: ordered,
-      codecHint: h264.length > 0 ? 'H264' : vp9.length > 0 ? 'VP9' : av1.length > 0 ? 'AV1' : 'VP8',
+      codecHint: h264.length > 0 ? 'H264' : vp9.length > 0 ? 'VP9' : vp8.length > 0 ? 'VP8' : 'AV1',
+      availableVideoCodecs,
     };
   }
 
   if (preference === 'VP9') {
-    const ordered = [...vp9, ...h264, ...av1, ...vp8, ...rest, ...auxiliary];
+    const ordered = [...vp9, ...h264, ...vp8, ...av1, ...rest, ...auxiliary];
     return {
       orderedCodecs: ordered,
-      codecHint: vp9.length > 0 ? 'VP9' : h264.length > 0 ? 'H264' : 'VP8',
+      codecHint: vp9.length > 0 ? 'VP9' : h264.length > 0 ? 'H264' : vp8.length > 0 ? 'VP8' : 'AV1',
+      availableVideoCodecs,
     };
   }
 
@@ -346,13 +466,160 @@ export function orderVideoCodecsForPreference(
     return {
       orderedCodecs: ordered,
       codecHint: av1.length > 0 ? 'AV1' : vp9.length > 0 ? 'VP9' : h264.length > 0 ? 'H264' : 'VP8',
+      availableVideoCodecs,
     };
   }
 
-  const ordered = [...h264, ...vp9, ...av1, ...vp8, ...rest, ...auxiliary];
+  if (preference === 'VP8') {
+    const ordered = [...vp8, ...vp9, ...h264, ...av1, ...rest, ...auxiliary];
+    return {
+      orderedCodecs: ordered,
+      codecHint: vp8.length > 0 ? 'VP8' : vp9.length > 0 ? 'VP9' : h264.length > 0 ? 'H264' : 'AV1',
+      availableVideoCodecs,
+    };
+  }
+
+  const ordered = [...h264, ...vp9, ...vp8, ...av1, ...rest, ...auxiliary];
   return {
     orderedCodecs: ordered,
-    codecHint: h264.length > 0 ? 'H264' : vp9.length > 0 ? 'VP9' : av1.length > 0 ? 'AV1' : 'VP8',
+    codecHint: h264.length > 0 ? 'H264' : vp9.length > 0 ? 'VP9' : vp8.length > 0 ? 'VP8' : 'AV1',
+    availableVideoCodecs,
+  };
+}
+
+export interface SdpNegotiatedMediaInfo {
+  hasVideo: boolean;
+  videoRejected: boolean;
+  primaryVideoCodec: CastoraVideoCodec | null;
+  videoCodecOrder: CastoraVideoCodec[];
+  videoFmtp: string | null;
+  h264ProfileLevelId: string | null;
+  hasAudio: boolean;
+  audioRejected: boolean;
+  audioActive: boolean;
+  primaryAudioCodec: string | null;
+}
+
+export function inspectSdpNegotiatedMedia(sdp: string | undefined | null): SdpNegotiatedMediaInfo {
+  const empty: SdpNegotiatedMediaInfo = {
+    hasVideo: false,
+    videoRejected: false,
+    primaryVideoCodec: null,
+    videoCodecOrder: [],
+    videoFmtp: null,
+    h264ProfileLevelId: null,
+    hasAudio: false,
+    audioRejected: false,
+    audioActive: false,
+    primaryAudioCodec: null,
+  };
+  if (!sdp || typeof sdp !== 'string') return empty;
+
+  const lines = sdp.split(/\r?\n/);
+  let currentMedia: 'video' | 'audio' | 'other' | null = null;
+  let videoPortZero = false;
+  let audioPortZero = false;
+  let videoDirection = 'sendrecv';
+  let audioDirection = 'sendrecv';
+  const videoPayloadOrder: string[] = [];
+  const audioPayloadOrder: string[] = [];
+  const videoRtpmap = new Map<string, string>();
+  const videoFmtp = new Map<string, string>();
+  const audioRtpmap = new Map<string, string>();
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    if (line.startsWith('m=')) {
+      const parts = line.slice(2).split(/\s+/);
+      const kind = parts[0]?.toLowerCase();
+      const port = Number(parts[1] ?? '0');
+      const payloads = parts.slice(3);
+      if (kind === 'video') {
+        currentMedia = 'video';
+        empty.hasVideo = true;
+        if (port === 0) videoPortZero = true;
+        videoPayloadOrder.push(...payloads);
+      } else if (kind === 'audio') {
+        currentMedia = 'audio';
+        empty.hasAudio = true;
+        if (port === 0) audioPortZero = true;
+        audioPayloadOrder.push(...payloads);
+      } else {
+        currentMedia = 'other';
+      }
+      continue;
+    }
+
+    if (line === 'a=inactive' || line === 'a=recvonly' || line === 'a=sendonly' || line === 'a=sendrecv') {
+      const dir = line.slice(2);
+      if (currentMedia === 'video') videoDirection = dir;
+      if (currentMedia === 'audio') audioDirection = dir;
+      continue;
+    }
+
+    if (line.startsWith('a=rtpmap:')) {
+      const match = line.match(/^a=rtpmap:(\S+)\s+([^/\s]+)/i);
+      if (match) {
+        const [, pt, codec] = match;
+        if (currentMedia === 'video') videoRtpmap.set(pt, codec.toUpperCase());
+        if (currentMedia === 'audio') audioRtpmap.set(pt, codec.toUpperCase());
+      }
+      continue;
+    }
+
+    if (line.startsWith('a=fmtp:')) {
+      const match = line.match(/^a=fmtp:(\S+)\s+(.+)$/i);
+      if (match && currentMedia === 'video') {
+        videoFmtp.set(match[1], match[2]);
+      }
+    }
+  }
+
+  const videoCodecOrder: CastoraVideoCodec[] = [];
+  let primaryFmtp: string | null = null;
+  let primaryProfileLevelId: string | null = null;
+
+  for (const pt of videoPayloadOrder) {
+    const codecName = videoRtpmap.get(pt);
+    if (!codecName) continue;
+    if (codecName === 'RTX' || codecName === 'RED' || codecName === 'ULPFEC' || codecName === 'FLEXFEC-03') {
+      continue;
+    }
+    const normalized = normalizeVideoCodecName(codecName);
+    if (normalized) {
+      if (videoCodecOrder.length === 0) {
+        primaryFmtp = videoFmtp.get(pt) ?? null;
+        if (normalized === 'H264' && primaryFmtp) {
+          primaryProfileLevelId = extractH264FmtpInfo(primaryFmtp).profileLevelId;
+        }
+      }
+      if (!videoCodecOrder.includes(normalized)) {
+        videoCodecOrder.push(normalized);
+      }
+    }
+  }
+
+  let primaryAudioCodec: string | null = null;
+  for (const pt of audioPayloadOrder) {
+    const codecName = audioRtpmap.get(pt);
+    if (!codecName || codecName === 'TELEPHONE-EVENT' || codecName === 'CN') continue;
+    primaryAudioCodec = codecName;
+    break;
+  }
+
+  return {
+    hasVideo: empty.hasVideo,
+    videoRejected: empty.hasVideo && (videoPortZero || videoDirection === 'inactive'),
+    primaryVideoCodec: videoCodecOrder[0] ?? null,
+    videoCodecOrder,
+    videoFmtp: primaryFmtp,
+    h264ProfileLevelId: primaryProfileLevelId,
+    hasAudio: empty.hasAudio,
+    audioRejected: empty.hasAudio && (audioPortZero || audioDirection === 'inactive'),
+    audioActive: empty.hasAudio && !audioPortZero && audioDirection !== 'inactive',
+    primaryAudioCodec,
   };
 }
 

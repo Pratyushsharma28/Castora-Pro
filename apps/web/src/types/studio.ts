@@ -117,6 +117,30 @@ export interface NetworkPreferences {
   turnExpiresAt?: string | null;
 }
 
+export type AudioCaptureStatus =
+  | 'captured'
+  | 'not-requested'
+  | 'not-captured-no-source'
+  | 'ended'
+  | 'unknown';
+
+export type AudioTrackStatus = 'live' | 'muted' | 'ended' | 'none';
+
+export type AudioPlaybackStatus =
+  | 'playing'
+  | 'muted-by-user'
+  | 'autoplay-blocked'
+  | 'no-audio-track'
+  | 'paused'
+  | 'waiting';
+
+export type AudioDiagnosticState =
+  | 'Audio not captured'
+  | 'Audio not transmitted'
+  | 'Audio not received'
+  | 'Audio received but playback blocked'
+  | 'Audio successfully playing';
+
 export interface BrowserCapabilityReport {
   isSecureContext: boolean;
   origin: string;
@@ -125,6 +149,11 @@ export interface BrowserCapabilityReport {
   supportsRtcPeerConnection: boolean;
   supportsVideoH264Encode: boolean;
   supportsVideoH264Decode: boolean;
+  supportsVideoVp9Encode?: boolean;
+  supportsVideoVp9Decode?: boolean;
+  supportsVideoAv1Encode?: boolean;
+  supportsVideoAv1Decode?: boolean;
+  h264Profiles?: string[];
   detectedVideoCodecs: string[];
   supportsBarcodeDetector: boolean;
   supportsFullscreen: boolean;
@@ -173,6 +202,23 @@ export interface StreamTelemetrySnapshot {
   lastAdjustmentAt?: number | null;
   lastAdjustmentAction?: AdaptiveAdjustmentAction | null;
   supportedAdaptiveControls?: AdaptiveControlCapabilities | null;
+  /** Video & audio codec negotiation + audio pipeline diagnostics */
+  selectedVideoCodec?: CodecPreference | null;
+  negotiatedVideoCodec?: string | null;
+  negotiatedVideoProfile?: string | null;
+  codecFallbackReason?: string | null;
+  negotiatedAudioCodec?: string | null;
+  audioCaptureStatus?: AudioCaptureStatus | null;
+  audioSenderTrackStatus?: AudioTrackStatus | null;
+  audioReceiverTrackStatus?: AudioTrackStatus | null;
+  audioPacketsSent?: number | null;
+  audioBytesSent?: number | null;
+  audioPacketsReceived?: number | null;
+  audioBytesReceived?: number | null;
+  audioBitrateKbps?: number | null;
+  audioPlaybackStatus?: AudioPlaybackStatus | null;
+  autoplayBlocked?: boolean | null;
+  audioDiagnosticStatus?: AudioDiagnosticState | null;
 }
 
 export interface ConnectedReceiverSlot {
@@ -187,6 +233,8 @@ export interface ConnectedReceiverSlot {
   stream: MediaStream | null;
   hasAudioTrack: boolean;
   muted: boolean;
+  autoplayBlocked?: boolean;
+  audioPlaybackStatus?: AudioPlaybackStatus | null;
   telemetry: StreamTelemetrySnapshot;
 }
 

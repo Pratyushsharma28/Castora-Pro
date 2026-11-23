@@ -26,6 +26,7 @@ import {
 import type { WebRtcSessionSnapshot } from '../services/webrtcSignalingBridge';
 import type { CastoraPlatform } from '../types/protocol';
 import type {
+  AudioPlaybackStatus,
   BrowserCapabilityReport,
   CapturePreferences,
   CodecPreference,
@@ -75,6 +76,10 @@ interface MultiViewViewProps {
     senderDeviceId: string,
     width: number | null,
     height: number | null
+  ) => void;
+  onIncomingAudioPlayback?: (
+    senderDeviceId: string,
+    state: { playbackStatus: AudioPlaybackStatus; autoplayBlocked: boolean }
   ) => void;
   onLogEvent: (
     category: 'ui' | 'capability' | 'signaling' | 'webrtc' | 'error',
@@ -165,6 +170,7 @@ export function MultiViewView({
   onToggleMute,
   onDisconnectSlot,
   onIncomingVideoDimensions,
+  onIncomingAudioPlayback,
   onLogEvent,
 }: MultiViewViewProps) {
   const [spotlightIndex, setSpotlightIndex] = useState<number>(0);
@@ -426,11 +432,22 @@ export function MultiViewView({
         }
         stream={slot.stream}
         muted={slot.muted}
+        autoplayBlocked={Boolean(slot.autoplayBlocked || slot.telemetry.autoplayBlocked)}
         large={isPrimarySpotlight || isSingleLarge}
         highlight={isPrimarySpotlight || isSpotlightTarget || isActive}
         onVideoDimensionsChange={
           hasRealPeer && onIncomingVideoDimensions
             ? (width, height) => onIncomingVideoDimensions(slot.receiverDeviceId, width, height)
+            : undefined
+        }
+        onAudioPlaybackChange={
+          hasRealPeer && onIncomingAudioPlayback
+            ? (state) => onIncomingAudioPlayback(slot.receiverDeviceId, state)
+            : undefined
+        }
+        onActivateAudio={
+          slot.muted && onToggleMute
+            ? () => onToggleMute(slot.slotIndex)
             : undefined
         }
         standbyReason={
@@ -549,21 +566,43 @@ export function MultiViewView({
               <button
                 type="button"
                 disabled={!isActive || !slot.hasAudioTrack || !onToggleMute}
-                onClick={() => onToggleMute?.(slot.slotIndex)}
+                onClick={() => {
+                  if (slot.autoplayBlocked && hasRealPeer) {
+                    onIncomingAudioPlayback?.(slot.receiverDeviceId, {
+                      playbackStatus: 'playing',
+                      autoplayBlocked: false,
+                    });
+                    if (!slot.muted) return;
+                  }
+                  onToggleMute?.(slot.slotIndex);
+                }}
                 title={
                   isActive && slot.hasAudioTrack
-                    ? slot.muted
-                      ? 'Unmute audio'
-                      : 'Mute audio'
+                    ? slot.autoplayBlocked
+                      ? 'Activate Audio'
+                      : slot.muted
+                        ? 'Unmute audio'
+                        : 'Mute audio'
                     : 'No audio track'
                 }
-                className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[#E2E8F0] bg-white text-[#64748B] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-40"
-                aria-label={`Toggle mute for ${slot.deviceName}`}
+                className={`inline-flex h-7 items-center justify-center gap-1 rounded-lg border px-2 text-xs font-medium disabled:opacity-40 ${
+                  slot.autoplayBlocked && isActive && slot.hasAudioTrack
+                    ? 'border-[#D97706] bg-[#FFFBEB] text-[#B45309] hover:bg-[#FEF3C7]'
+                    : 'border-[#E2E8F0] bg-white text-[#64748B] hover:border-[#2563EB] hover:text-[#2563EB]'
+                }`}
+                aria-label={
+                  slot.autoplayBlocked
+                    ? `Activate audio for ${slot.deviceName}`
+                    : `Toggle mute for ${slot.deviceName}`
+                }
               >
-                {slot.muted ? (
+                {slot.muted || slot.autoplayBlocked ? (
                   <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
                 ) : (
                   <Volume2 className="h-3.5 w-3.5 text-[#2563EB]" aria-hidden="true" />
+                )}
+                {slot.autoplayBlocked && isActive && slot.hasAudioTrack && (
+                  <span>Activate Audio</span>
                 )}
               </button>
               {onDisconnectSlot && (

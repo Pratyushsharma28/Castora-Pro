@@ -1,7 +1,9 @@
 import type { CastoraVideoCodec } from '../types/protocol';
 import type {
   AdaptiveControlCapabilities,
+  AudioTrackStatus,
   CapturePreferences,
+  CodecPreference,
   NetworkPreferences,
   StreamTelemetrySnapshot,
   WebRtcConnectionPhase,
@@ -13,6 +15,9 @@ import {
 } from './streamStatsService';
 import {
   AdaptiveBitrateController,
+  getNextFallbackCodec,
+  inspectSdpNegotiatedMedia,
+  normalizeVideoCodecName,
   orderVideoCodecsForPreference,
   resolveQualityTarget,
   type AdaptiveBitrateDecision,
@@ -87,6 +92,7 @@ export interface PeerServiceCallbacks {
   onPhaseChange: (phase: WebRtcConnectionPhase, detail: string) => void;
   onIceConnectionChange: (iceState: RTCIceConnectionState) => void;
   onConnectionFailure?: (reason: string) => void;
+  onCodecFallback?: (nextCodec: CastoraVideoCodec, reason: string) => void;
   onStats: (stats: BidirectionalTelemetrySample) => void;
   onError: (message: string) => void;
 }
@@ -106,10 +112,21 @@ export class CastoraWebRtcPeer {
   private outboundStream: MediaStream | null = null;
   private outboundStreamId: string | null = null;
   private outboundCodecHint: CastoraVideoCodec = 'VP8';
+  private selectedVideoCodec: CodecPreference = 'H264';
+  private negotiatedVideoCodec: string | null = null;
+  private negotiatedVideoProfile: string | null = null;
+  private negotiatedAudioCodec: string | null = null;
+  private codecFallbackReason: string | null = null;
+  private triedVideoCodecs = new Set<CastoraVideoCodec>();
+  private outboundZeroFrameSamples = 0;
+  private codecStallSampleThreshold = 3;
+  private fallbackInFlight = false;
+
   private outboundPreferences: CapturePreferences | null = null;
   private activeOutboundPeersCount = 1;
   private abrController: AdaptiveBitrateController | null = null;
   private localVideoTrack: MediaStreamTrack | null = null;
+  private localAudioTrack: MediaStreamTrack | null = null;
   private videoSender: RTCRtpSender | null = null;
   private audioSender: RTCRtpSender | null = null;
   private supportedControls: AdaptiveControlCapabilities = {
@@ -123,6 +140,8 @@ export class CastoraWebRtcPeer {
 
   private inboundStream: MediaStream | null = null;
   private lastInboundStream: MediaStream | null = null;
+  private inboundTracks = new Map<string, { track: MediaStreamTrack; cleanup: () => void }>();
+  private sawInboundAudioEnded = false;
   private inboundStreamId: string | null = null;
   private inboundTargetFps = 60;
   private outboundTargetFps = 60;
@@ -148,6 +167,7 @@ export class CastoraWebRtcPeer {
     callbacks: PeerServiceCallbacks;
     rtcFactory?: (config: RTCConfiguration) => RTCPeerConnection;
     iceDisconnectGraceMs?: number;
+    codecStallSampleThreshold?: number;
   }) {
     if (!params.rtcFactory && typeof RTCPeerConnection === 'undefined') {
       throw new Error('RTCPeerConnection is not supported in this browser.');
@@ -164,6 +184,9 @@ export class CastoraWebRtcPeer {
     this.callbacks = params.callbacks;
     if (typeof params.iceDisconnectGraceMs === 'number' && params.iceDisconnectGraceMs >= 0) {
       this.iceDisconnectGraceMs = params.iceDisconnectGraceMs;
+    }
+    if (typeof params.codecStallSampleThreshold === 'number' && params.codecStallSampleThreshold >= 1) {
+      this.codecStallSampleThreshold = Math.floor(params.codecStallSampleThreshold);
     }
     this.statsCollector = new WebRtcStatsCollector('bidirectional');
 
@@ -239,8 +262,118 @@ export class CastoraWebRtcPeer {
     this.inboundTargetFps = fps;
   }
 
+  getCodecDiagnostics(): {
+    selectedVideoCodec: CodecPreference;
+    outboundCodecHint: CastoraVideoCodec;
+    negotiatedVideoCodec: string | null;
+    negotiatedVideoProfile: string | null;
+    negotiatedAudioCodec: string | null;
+    codecFallbackReason: string | null;
+  } {
+    return {
+      selectedVideoCodec: this.selectedVideoCodec,
+      outboundCodecHint: this.outboundCodecHint,
+      negotiatedVideoCodec: this.negotiatedVideoCodec,
+      negotiatedVideoProfile: this.negotiatedVideoProfile,
+      negotiatedAudioCodec: this.negotiatedAudioCodec,
+      codecFallbackReason: this.codecFallbackReason,
+    };
+  }
+
+  getAudioSenderTrackStatus(): AudioTrackStatus {
+    if (!this.audioSender || !this.localAudioTrack) {
+      return 'none';
+    }
+    if (this.localAudioTrack.readyState === 'ended') {
+      return 'ended';
+    }
+    if (this.localAudioTrack.muted) {
+      return 'muted';
+    }
+    return 'live';
+  }
+
+  getAudioReceiverTrackStatus(): AudioTrackStatus {
+    const streamAudio = this.inboundStream?.getAudioTracks?.() ?? [];
+    const trackedAudio = Array.from(this.inboundTracks.values())
+      .map((entry) => entry.track)
+      .filter((t) => t.kind === 'audio');
+    const audioTracks = streamAudio.length > 0 ? streamAudio : trackedAudio;
+    const liveAudio = audioTracks.find((t) => t.readyState !== 'ended');
+    if (liveAudio) {
+      return liveAudio.muted ? 'muted' : 'live';
+    }
+    if (this.sawInboundAudioEnded || audioTracks.some((t) => t.readyState === 'ended')) {
+      return 'ended';
+    }
+    return 'none';
+  }
+
+  private clearInboundTrackListeners(): void {
+    for (const entry of this.inboundTracks.values()) {
+      entry.cleanup();
+    }
+    this.inboundTracks.clear();
+  }
+
+  private rebuildInboundStream(sourceStream: MediaStream | null): MediaStream | null {
+    for (const [id, entry] of Array.from(this.inboundTracks.entries())) {
+      if (entry.track.readyState === 'ended') {
+        if (entry.track.kind === 'audio') {
+          this.sawInboundAudioEnded = true;
+        }
+        entry.cleanup();
+        this.inboundTracks.delete(id);
+      }
+    }
+
+    const liveTracked = Array.from(this.inboundTracks.values())
+      .map((e) => e.track)
+      .filter((t) => t.readyState !== 'ended');
+
+    const sourceLiveTracks = sourceStream
+      ? sourceStream.getTracks().filter((t) => t.readyState !== 'ended')
+      : [];
+
+    const mergedById = new Map<string, MediaStreamTrack>();
+    for (const t of sourceLiveTracks) {
+      mergedById.set(t.id, t);
+    }
+    for (const t of liveTracked) {
+      mergedById.set(t.id, t);
+    }
+
+    const liveTracks = Array.from(mergedById.values());
+    if (liveTracks.length === 0) {
+      this.inboundStream = null;
+      return null;
+    }
+
+    if (typeof MediaStream !== 'undefined') {
+      const combined = new MediaStream(liveTracks);
+      this.inboundStream = combined;
+      this.lastInboundStream = combined;
+      return combined;
+    }
+
+    const base = sourceStream ?? this.inboundStream ?? this.lastInboundStream;
+    if (base && typeof base.addTrack === 'function') {
+      const existingIds = new Set(base.getTracks().map((t) => t.id));
+      for (const t of liveTracks) {
+        if (!existingIds.has(t.id)) {
+          base.addTrack(t);
+        }
+      }
+    }
+    this.inboundStream = base ?? null;
+    this.lastInboundStream = this.inboundStream;
+    return this.inboundStream;
+  }
+
   clearInboundStream(reason?: string): void {
     this.inboundStreamId = null;
+    this.sawInboundAudioEnded = false;
+    this.clearInboundTrackListeners();
     this.statsCollector.resetInbound();
     if (this.inboundStream) {
       this.inboundStream = null;
@@ -283,53 +416,56 @@ export class CastoraWebRtcPeer {
       const sourceStream =
         event.streams && event.streams.length > 0 ? event.streams[0] : null;
 
-      if (sourceStream) {
-        this.inboundStream = sourceStream;
-        this.lastInboundStream = sourceStream;
-      } else {
-        if (!this.inboundStream) {
-          this.inboundStream = this.lastInboundStream ?? new MediaStream();
-        }
-        if (!this.inboundStream.getTracks().some((t) => t.id === track.id)) {
-          this.inboundStream.addTrack(track);
-        }
-        this.lastInboundStream = this.inboundStream;
-      }
-
-      const handleTrackRemoved = () => {
-        if (this.disposed || !this.inboundStream) return;
-        const stillLiveVideo = this.inboundStream
-          .getVideoTracks()
-          .some((t) => t.readyState === 'live' && !t.muted);
-        if (!stillLiveVideo) {
-          this.callbacks.onInboundStream(null);
-        }
-      };
-
-      const handleTrackUnmuted = () => {
-        if (this.disposed) return;
-        if (this.inboundStreamId && track.readyState === 'live') {
-          const base = this.inboundStream ?? this.lastInboundStream;
-          if (typeof MediaStream !== 'undefined') {
-            const liveTracks = base
-              ? base.getTracks().filter((t) => t.readyState === 'live')
-              : [];
-            this.inboundStream = new MediaStream(liveTracks.length > 0 ? liveTracks : [track]);
-          } else {
-            this.inboundStream = base ?? null;
+      if (!this.inboundTracks.has(track.id)) {
+        const handleTrackEnded = () => {
+          if (this.disposed) return;
+          if (track.kind === 'audio') {
+            this.sawInboundAudioEnded = true;
           }
-          this.lastInboundStream = this.inboundStream;
-          this.callbacks.onInboundStream(this.inboundStream);
-          this.setPhase('connected', 'Receiving live remote screen stream.');
-        }
-      };
+          const updated = this.rebuildInboundStream(null);
+          this.callbacks.onInboundStream(updated);
+        };
 
-      if (typeof track.addEventListener === 'function') {
-        track.addEventListener('ended', handleTrackRemoved);
-        track.addEventListener('unmute', handleTrackUnmuted);
+        const handleTrackMuted = () => {
+          if (this.disposed) return;
+          // Preserve stream + peer connection when a single track mutes transiently;
+          // re-emit stats/state if needed without dropping video or audio.
+          if (track.kind === 'audio' && this.inboundStream) {
+            this.callbacks.onInboundStream(this.inboundStream);
+          }
+        };
+
+        const handleTrackUnmuted = () => {
+          if (this.disposed) return;
+          if (track.readyState !== 'ended') {
+            const updated = this.rebuildInboundStream(sourceStream);
+            this.callbacks.onInboundStream(updated);
+            if (updated) {
+              this.setPhase('connected', 'Receiving live remote screen and audio stream.');
+            }
+          }
+        };
+
+        if (typeof track.addEventListener === 'function') {
+          track.addEventListener('ended', handleTrackEnded);
+          track.addEventListener('mute', handleTrackMuted);
+          track.addEventListener('unmute', handleTrackUnmuted);
+        }
+
+        this.inboundTracks.set(track.id, {
+          track,
+          cleanup: () => {
+            if (typeof track.removeEventListener === 'function') {
+              track.removeEventListener('ended', handleTrackEnded);
+              track.removeEventListener('mute', handleTrackMuted);
+              track.removeEventListener('unmute', handleTrackUnmuted);
+            }
+          },
+        });
       }
 
-      this.callbacks.onInboundStream(this.inboundStream);
+      const combined = this.rebuildInboundStream(sourceStream);
+      this.callbacks.onInboundStream(combined);
       this.setPhase('connected', 'Receiving live WebRTC media track.');
     };
 
@@ -490,38 +626,96 @@ export class CastoraWebRtcPeer {
     };
     if (this.disposed || !this.pc) return empty;
 
+    const hasInboundVideo = Boolean(this.inboundStreamId || this.hasInboundStream());
+    const hasInboundAudio = Boolean(
+      this.inboundStream?.getAudioTracks?.().length ||
+        Array.from(this.inboundTracks.values()).some((e) => e.track.kind === 'audio')
+    );
+
     const snapshot = await this.statsCollector.sampleBidirectional({
       pc: this.pc,
       outboundTargetFps: this.outboundTargetFps,
       inboundTargetFps: this.inboundTargetFps,
       connectionState: this.currentPhase,
       localVideoTrack: this.localVideoTrack,
-      hasInboundVideo: Boolean(this.inboundStreamId || this.hasInboundStream()),
+      localAudioTrack: this.localAudioTrack,
+      hasInboundVideo,
+      hasInboundAudio: hasInboundAudio || hasInboundVideo,
     });
 
-    if (this.hasOutboundStream() && this.abrController) {
-      const decision = this.abrController.evaluate(snapshot.outbound, {
-        activeOutboundPeers: this.activeOutboundPeersCount,
-        nowMs,
-      });
-      if (decision.changed) {
-        await this.applySenderEncodingDecision(decision);
+    if (this.hasOutboundStream()) {
+      if (this.abrController) {
+        const decision = this.abrController.evaluate(snapshot.outbound, {
+          activeOutboundPeers: this.activeOutboundPeersCount,
+          nowMs,
+        });
+        if (decision.changed) {
+          await this.applySenderEncodingDecision(decision);
+        }
+
+        const abrState = this.abrController.getCurrentState();
+        snapshot.outbound.configuredMaxBitrateKbps = abrState.configuredMaxBitrateKbps;
+        snapshot.outbound.targetBitrateKbps = abrState.targetBitrateKbps;
+        snapshot.outbound.targetFramerate = abrState.targetFramerate;
+        snapshot.outbound.scaleResolutionDownBy = abrState.scaleResolutionDownBy;
+        snapshot.outbound.adaptationStatus = abrState.adaptationStatus;
+        snapshot.outbound.adaptiveMode = abrState.adaptiveMode;
+        snapshot.outbound.networkCondition = abrState.networkCondition;
+        snapshot.outbound.lastAdjustmentReason = abrState.lastAdjustmentReason;
+        snapshot.outbound.lastAdjustmentAt = abrState.lastAdjustmentAt;
+        snapshot.outbound.lastAdjustmentAction = abrState.lastAdjustmentAction;
       }
 
-      const abrState = this.abrController.getCurrentState();
-      snapshot.outbound.configuredMaxBitrateKbps = abrState.configuredMaxBitrateKbps;
-      snapshot.outbound.targetBitrateKbps = abrState.targetBitrateKbps;
-      snapshot.outbound.targetFramerate = abrState.targetFramerate;
-      snapshot.outbound.scaleResolutionDownBy = abrState.scaleResolutionDownBy;
-      snapshot.outbound.adaptationStatus = abrState.adaptationStatus;
-      snapshot.outbound.adaptiveMode = abrState.adaptiveMode;
-      snapshot.outbound.networkCondition = abrState.networkCondition;
-      snapshot.outbound.lastAdjustmentReason = abrState.lastAdjustmentReason;
-      snapshot.outbound.lastAdjustmentAt = abrState.lastAdjustmentAt;
-      snapshot.outbound.lastAdjustmentAction = abrState.lastAdjustmentAction;
       snapshot.outbound.supportedAdaptiveControls = { ...this.supportedControls };
+      snapshot.outbound.selectedVideoCodec = this.selectedVideoCodec;
+      snapshot.outbound.negotiatedVideoCodec =
+        snapshot.outbound.negotiatedVideoCodec ??
+        snapshot.outbound.codecMimeType ??
+        this.negotiatedVideoCodec;
+      snapshot.outbound.negotiatedVideoProfile = this.negotiatedVideoProfile;
+      snapshot.outbound.codecFallbackReason = this.codecFallbackReason;
+      snapshot.outbound.negotiatedAudioCodec =
+        snapshot.outbound.negotiatedAudioCodec ?? this.negotiatedAudioCodec;
+      snapshot.outbound.audioSenderTrackStatus = this.getAudioSenderTrackStatus();
+
       if (!snapshot.outbound.codecMimeType) {
-        snapshot.outbound.codecMimeType = this.outboundCodecHint;
+        snapshot.outbound.codecMimeType =
+          snapshot.outbound.negotiatedVideoCodec ?? this.outboundCodecHint;
+      }
+
+      // Detect zero-frame encoder stall on H.264 / AV1 and step down cleanly without dropping audio
+      if (
+        this.currentPhase === 'connected' &&
+        snapshot.outbound.framesEncoded === 0 &&
+        (snapshot.outbound.framesSent === null || snapshot.outbound.framesSent === 0) &&
+        (this.outboundCodecHint === 'H264' || this.outboundCodecHint === 'AV1')
+      ) {
+        this.outboundZeroFrameSamples += 1;
+        if (this.outboundZeroFrameSamples >= this.codecStallSampleThreshold) {
+          void this.tryFallbackCodec(
+            `${this.outboundCodecHint} produced 0 encoded frames on connected peer; switching to fallback codec.`
+          );
+        }
+      } else if (
+        (snapshot.outbound.framesEncoded ?? 0) > 0 ||
+        (snapshot.outbound.framesSent ?? 0) > 0
+      ) {
+        this.outboundZeroFrameSamples = 0;
+      }
+    }
+
+    if (hasInboundVideo || hasInboundAudio) {
+      snapshot.inbound.negotiatedVideoCodec =
+        snapshot.inbound.negotiatedVideoCodec ??
+        snapshot.inbound.codecMimeType ??
+        this.negotiatedVideoCodec;
+      snapshot.inbound.negotiatedVideoProfile = this.negotiatedVideoProfile;
+      snapshot.inbound.codecFallbackReason = this.codecFallbackReason;
+      snapshot.inbound.negotiatedAudioCodec =
+        snapshot.inbound.negotiatedAudioCodec ?? this.negotiatedAudioCodec;
+      snapshot.inbound.audioReceiverTrackStatus = this.getAudioReceiverTrackStatus();
+      if (!snapshot.inbound.codecMimeType && snapshot.inbound.negotiatedVideoCodec) {
+        snapshot.inbound.codecMimeType = snapshot.inbound.negotiatedVideoCodec;
       }
     }
 
@@ -660,39 +854,59 @@ export class CastoraWebRtcPeer {
     }
   }
 
-  private applyCodecAndEncodingHints(
-    preferences: CapturePreferences,
-    activeOutboundPeers = 1
+  private applyVideoCodecPreferenceToTransceiver(
+    preference: CodecPreference | CastoraVideoCodec
   ): CastoraVideoCodec {
     let codecHint: CastoraVideoCodec =
-      preferences.codecPreference === 'H264'
+      preference === 'H264'
         ? 'H264'
-        : preferences.codecPreference === 'VP9'
+        : preference === 'VP9'
           ? 'VP9'
-          : preferences.codecPreference === 'AV1'
+          : preference === 'AV1'
             ? 'AV1'
             : 'VP8';
     const videoTransceiver = this.findTransceiverForSender(this.videoSender);
     if (!videoTransceiver) return codecHint;
 
+    const senderCaps =
+      typeof RTCRtpSender !== 'undefined' && typeof RTCRtpSender.getCapabilities === 'function'
+        ? RTCRtpSender.getCapabilities('video')
+        : null;
+    const receiverCaps =
+      typeof RTCRtpReceiver !== 'undefined' && typeof RTCRtpReceiver.getCapabilities === 'function'
+        ? RTCRtpReceiver.getCapabilities('video')
+        : null;
+
     if (
-      typeof RTCRtpSender !== 'undefined' &&
-      typeof RTCRtpSender.getCapabilities === 'function' &&
+      senderCaps?.codecs?.length &&
       typeof videoTransceiver.setCodecPreferences === 'function'
     ) {
-      const caps = RTCRtpSender.getCapabilities('video');
-      if (caps?.codecs?.length) {
-        const ranked = orderVideoCodecsForPreference(caps.codecs, preferences.codecPreference);
-        if (ranked.orderedCodecs.length > 0) {
-          try {
-            videoTransceiver.setCodecPreferences(ranked.orderedCodecs);
-            codecHint = ranked.codecHint;
-          } catch {
-            // Browser codec policy restriction
+      const ranked = orderVideoCodecsForPreference(
+        senderCaps.codecs,
+        preference,
+        receiverCaps?.codecs
+      );
+      if (ranked.orderedCodecs.length > 0) {
+        try {
+          videoTransceiver.setCodecPreferences(ranked.orderedCodecs);
+          codecHint = ranked.codecHint;
+          if (preference !== 'AUTO' && ranked.codecHint !== preference && !this.codecFallbackReason) {
+            this.codecFallbackReason = `${preference} encoder unavailable in this browser; using ${ranked.codecHint}.`;
           }
+        } catch {
+          // Browser codec policy restriction
         }
       }
     }
+
+    return codecHint;
+  }
+
+  private applyCodecAndEncodingHints(
+    preferences: CapturePreferences,
+    activeOutboundPeers = 1
+  ): CastoraVideoCodec {
+    const codecHint = this.applyVideoCodecPreferenceToTransceiver(preferences.codecPreference);
 
     const actualDims = this.getLocalVideoActualDims();
     this.outboundPreferences = preferences;
@@ -708,13 +922,61 @@ export class CastoraWebRtcPeer {
     return codecHint;
   }
 
+  private async tryFallbackCodec(reason: string): Promise<boolean> {
+    if (
+      this.disposed ||
+      !this.pc ||
+      this.pc.signalingState === 'closed' ||
+      !this.hasOutboundStream() ||
+      !this.outboundPreferences ||
+      this.fallbackInFlight
+    ) {
+      return false;
+    }
+
+    const senderCaps =
+      typeof RTCRtpSender !== 'undefined' && typeof RTCRtpSender.getCapabilities === 'function'
+        ? RTCRtpSender.getCapabilities('video')?.codecs
+        : undefined;
+    const availableCodecs = senderCaps
+      ? orderVideoCodecsForPreference(senderCaps, this.outboundCodecHint).availableVideoCodecs
+      : undefined;
+
+    const nextCodec = getNextFallbackCodec(
+      this.outboundPreferences.codecPreference,
+      this.triedVideoCodecs,
+      availableCodecs && availableCodecs.length > 0 ? availableCodecs : undefined
+    );
+    if (!nextCodec) {
+      return false;
+    }
+
+    this.fallbackInFlight = true;
+    try {
+      this.outboundZeroFrameSamples = 0;
+      this.outboundCodecHint = nextCodec;
+      this.triedVideoCodecs.add(nextCodec);
+      this.codecFallbackReason = reason;
+      this.applyVideoCodecPreferenceToTransceiver(nextCodec);
+      this.callbacks.onCodecFallback?.(nextCodec, reason);
+      await this.enqueueNegotiation(false);
+      return true;
+    } finally {
+      this.fallbackInFlight = false;
+    }
+  }
+
   async updateEncodingPreferences(
     preferences: CapturePreferences,
     activeOutboundPeers = 1
   ): Promise<void> {
     if (this.disposed || !this.pc) return;
+    const prevCodecPreference = this.outboundPreferences?.codecPreference ?? this.selectedVideoCodec;
+    const prevCodecHint = this.outboundCodecHint;
+
     this.outboundPreferences = preferences;
     this.outboundTargetFps = preferences.targetFps;
+    this.selectedVideoCodec = preferences.codecPreference;
     this.activeOutboundPeersCount = Math.max(1, activeOutboundPeers);
 
     if (!this.hasOutboundStream()) return;
@@ -729,28 +991,22 @@ export class CastoraWebRtcPeer {
       actualDims
     );
 
-    const videoTransceiver = this.findTransceiverForSender(this.videoSender);
-    if (
-      videoTransceiver &&
-      typeof RTCRtpSender !== 'undefined' &&
-      typeof RTCRtpSender.getCapabilities === 'function' &&
-      typeof videoTransceiver.setCodecPreferences === 'function'
-    ) {
-      const caps = RTCRtpSender.getCapabilities('video');
-      if (caps?.codecs?.length) {
-        const ranked = orderVideoCodecsForPreference(caps.codecs, preferences.codecPreference);
-        if (ranked.orderedCodecs.length > 0) {
-          try {
-            videoTransceiver.setCodecPreferences(ranked.orderedCodecs);
-            this.outboundCodecHint = ranked.codecHint;
-          } catch {
-            // Ignore codec change rejection on live transceiver
-          }
-        }
-      }
+    const nextHint = this.applyVideoCodecPreferenceToTransceiver(preferences.codecPreference);
+    const codecChanged =
+      prevCodecPreference !== preferences.codecPreference || prevCodecHint !== nextHint;
+    if (codecChanged) {
+      this.outboundCodecHint = nextHint;
+      this.triedVideoCodecs.clear();
+      this.triedVideoCodecs.add(nextHint);
+      this.codecFallbackReason = null;
+      this.outboundZeroFrameSamples = 0;
     }
 
     await this.applySenderEncodingDecision(decision);
+
+    if (codecChanged && this.pc.signalingState !== 'closed') {
+      await this.enqueueNegotiation(false);
+    }
   }
 
   getResolvedQualityTarget(): ReturnType<typeof resolveQualityTarget> | null {
@@ -774,14 +1030,22 @@ export class CastoraWebRtcPeer {
       }
 
       const videoTrack = params.localStream.getVideoTracks()[0] ?? null;
-      const audioTrack = params.localStream.getAudioTracks()[0] ?? null;
+      const audioTrack =
+        params.localStream.getAudioTracks().find((t) => t.readyState !== 'ended') ??
+        params.localStream.getAudioTracks()[0] ??
+        null;
       hasVideo = Boolean(videoTrack);
-      hasAudio = Boolean(audioTrack);
+      hasAudio = Boolean(audioTrack && audioTrack.readyState !== 'ended');
 
       this.outboundStream = params.localStream;
       this.outboundStreamId = params.streamId;
       this.outboundTargetFps = params.preferences.targetFps;
       this.localVideoTrack = videoTrack;
+      this.localAudioTrack = audioTrack;
+      this.selectedVideoCodec = params.preferences.codecPreference;
+      this.triedVideoCodecs.clear();
+      this.codecFallbackReason = null;
+      this.outboundZeroFrameSamples = 0;
       this.statsCollector.resetOutbound();
 
       if (videoTrack) {
@@ -828,6 +1092,7 @@ export class CastoraWebRtcPeer {
         params.activeOutboundPeers ?? 1
       );
       this.outboundCodecHint = resultCodec;
+      this.triedVideoCodecs.add(resultCodec);
 
       if (this.currentPhase === 'idle' || this.currentPhase === 'disconnected') {
         this.setPhase('connecting', 'Negotiating outbound WebRTC offer...');
@@ -850,7 +1115,10 @@ export class CastoraWebRtcPeer {
       this.outboundStream = null;
       this.outboundStreamId = null;
       this.localVideoTrack = null;
+      this.localAudioTrack = null;
       this.abrController = null;
+      this.outboundZeroFrameSamples = 0;
+      this.codecFallbackReason = null;
       this.statsCollector.resetOutbound();
 
       let modifiedTransceiver = false;
@@ -1019,6 +1287,15 @@ export class CastoraWebRtcPeer {
         throw new Error('Browser produced an empty SDP answer');
       }
 
+      const negotiated = inspectSdpNegotiatedMedia(answerSdp);
+      if (negotiated.primaryVideoCodec) {
+        this.negotiatedVideoCodec = negotiated.primaryVideoCodec;
+        this.negotiatedVideoProfile = negotiated.h264ProfileLevelId;
+      }
+      if (negotiated.primaryAudioCodec) {
+        this.negotiatedAudioCodec = negotiated.primaryAudioCodec;
+      }
+
       if (this.pendingIceRestart || (this.pendingRenegotiation && this.outboundStream)) {
         const doIceRestart = this.pendingIceRestart;
         this.pendingIceRestart = false;
@@ -1036,6 +1313,7 @@ export class CastoraWebRtcPeer {
   }
 
   async acceptAnswer(sdp: string): Promise<void> {
+    let fallbackNeededReason: string | null = null;
     await this.enqueueOperation(async () => {
       if (this.disposed || !this.pc) {
         throw new Error('Peer connection is closed');
@@ -1046,14 +1324,48 @@ export class CastoraWebRtcPeer {
 
       this.ignoreOffer = false;
       const answerInit: RTCSessionDescriptionInit = { type: 'answer', sdp };
-      await this.pc.setRemoteDescription(
-        typeof RTCSessionDescription !== 'undefined'
-          ? new RTCSessionDescription(answerInit)
-          : answerInit
-      );
+      try {
+        await this.pc.setRemoteDescription(
+          typeof RTCSessionDescription !== 'undefined'
+            ? new RTCSessionDescription(answerInit)
+            : answerInit
+        );
+      } catch (err) {
+        fallbackNeededReason =
+          err instanceof Error
+            ? `SDP answer failed (${err.message}); trying fallback codec.`
+            : 'SDP answer failed; trying fallback codec.';
+        return;
+      }
       await this.flushPendingIceCandidates();
 
+      const answerMedia = inspectSdpNegotiatedMedia(sdp);
+      if (answerMedia.primaryAudioCodec) {
+        this.negotiatedAudioCodec = answerMedia.primaryAudioCodec;
+      }
+      if (answerMedia.primaryVideoCodec) {
+        this.negotiatedVideoCodec = answerMedia.primaryVideoCodec;
+        this.negotiatedVideoProfile = answerMedia.h264ProfileLevelId;
+      }
+
+      if (answerMedia.videoRejected && this.hasOutboundStream()) {
+        fallbackNeededReason = `Remote peer rejected ${this.outboundCodecHint} video track (port 0); falling back to compatible codec.`;
+      } else if (
+        answerMedia.primaryVideoCodec !== null &&
+        answerMedia.primaryVideoCodec !== this.outboundCodecHint &&
+        this.hasOutboundStream()
+      ) {
+        const normalized = normalizeVideoCodecName(answerMedia.primaryVideoCodec);
+        if (normalized) {
+          const prevCodec = this.outboundCodecHint;
+          this.outboundCodecHint = normalized;
+          this.triedVideoCodecs.add(normalized);
+          this.codecFallbackReason = `Receiver negotiated ${normalized} instead of ${prevCodec}.`;
+        }
+      }
+
       if (
+        !fallbackNeededReason &&
         (this.pendingIceRestart || this.pendingRenegotiation) &&
         (this.pc.signalingState as RTCSignalingState) === 'stable'
       ) {
@@ -1067,6 +1379,13 @@ export class CastoraWebRtcPeer {
         });
       }
     });
+
+    if (fallbackNeededReason) {
+      const triggered = await this.tryFallbackCodec(fallbackNeededReason);
+      if (!triggered) {
+        throw new Error(fallbackNeededReason);
+      }
+    }
   }
 
   async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
@@ -1108,6 +1427,7 @@ export class CastoraWebRtcPeer {
     this.disposed = true;
     this.clearIceRestartTimer();
     this.stopStatsPolling();
+    this.clearInboundTrackListeners();
     this.pendingCandidates = [];
 
     if (this.pc) {
@@ -1135,6 +1455,7 @@ export class CastoraWebRtcPeer {
     this.inboundStream = null;
     this.inboundStreamId = null;
     this.localVideoTrack = null;
+    this.localAudioTrack = null;
     this.videoSender = null;
     this.audioSender = null;
     this.statsCollector.reset();

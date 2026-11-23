@@ -10,6 +10,7 @@ import {
 } from '../../services/streamingDiagnosticsService';
 import type { WebRtcSessionSnapshot } from '../../services/webrtcSignalingBridge';
 import type {
+  AudioDiagnosticState,
   CapturePreferences,
   QualityVerificationStatus,
   WebRtcConnectionPhase,
@@ -41,6 +42,37 @@ function formatCount(value: number | null | undefined): string {
     return 'Unavailable';
   }
   return Math.round(value).toLocaleString();
+}
+
+function formatAudioTraffic(
+  packets: number | null | undefined,
+  bytes: number | null | undefined
+): string {
+  if (packets === null || packets === undefined) {
+    return 'Unavailable';
+  }
+  if (bytes !== null && bytes !== undefined) {
+    const kb = (bytes / 1024).toFixed(1);
+    return `${Math.round(packets).toLocaleString()} pkts (${kb} KB)`;
+  }
+  return `${Math.round(packets).toLocaleString()} pkts`;
+}
+
+function audioDiagnosticBadgeClass(status: AudioDiagnosticState): {
+  dot: string;
+  text: string;
+} {
+  switch (status) {
+    case 'Audio successfully playing':
+      return { dot: 'bg-[#16A34A]', text: 'text-[#15803D]' };
+    case 'Audio received but playback blocked':
+      return { dot: 'bg-[#D97706]', text: 'text-[#B45309]' };
+    case 'Audio not transmitted':
+    case 'Audio not received':
+      return { dot: 'bg-[#DC2626]', text: 'text-[#B91C1C]' };
+    default:
+      return { dot: 'bg-[#94A3B8]', text: 'text-[#64748B]' };
+  }
 }
 
 function formatConnectionLabel(phase: WebRtcConnectionPhase): string {
@@ -217,16 +249,32 @@ export function StreamingQualityDiagnosticsPanel({
                   <dd className="font-medium text-[#172033]">{formatFps(summary.capture.fps)}</dd>
                 </div>
                 <div className="flex items-center justify-between gap-2">
-                  <dt className="text-[#64748B]">Audio Track</dt>
+                  <dt className="text-[#64748B]">Selected Codec</dt>
+                  <dd className="font-mono font-medium text-[#172033]">{summary.selectedCodec}</dd>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-[#64748B]">Audio Capture</dt>
                   <dd className="font-medium text-[#172033]">
                     {webrtcState.isSharingLocal
                       ? summary.capture.hasAudio
-                        ? 'Included'
-                        : 'Video only'
-                      : 'Unavailable'}
+                        ? 'Captured (audio + video)'
+                        : summary.capture.audioCaptureStatus === 'not-requested'
+                          ? 'Disabled (video only)'
+                          : summary.capture.audioCaptureStatus === 'ended'
+                            ? 'Audio track ended'
+                            : 'No audio source captured'
+                      : preferences.includeAudio
+                        ? 'Standby (audio enabled)'
+                        : 'Disabled'}
                   </dd>
                 </div>
               </dl>
+
+              {summary.capture.audioNotice && (
+                <p className="rounded-md border border-[#D97706]/30 bg-[#FFFBEB] px-2.5 py-1.5 text-[11px] leading-snug text-[#B45309]">
+                  {summary.capture.audioNotice}
+                </p>
+              )}
 
               <div className="border-t border-[#E2E8F0] pt-2">
                 <StatusLabel
@@ -257,6 +305,13 @@ export function StreamingQualityDiagnosticsPanel({
                   <dd className="font-medium text-[#172033]">{formatFps(summary.outgoing.fps)}</dd>
                 </div>
                 <div className="flex items-center justify-between gap-2">
+                  <dt className="text-[#64748B]">Video Codec</dt>
+                  <dd className="font-mono font-medium text-[#172033]">
+                    {summary.outgoing.negotiatedCodec ?? summary.outgoing.codec ?? summary.outgoing.selectedCodec ?? 'Unavailable'}
+                    {summary.outgoing.negotiatedProfile ? ` (${summary.outgoing.negotiatedProfile})` : ''}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-2">
                   <dt className="text-[#64748B]">Outgoing Bitrate</dt>
                   <dd className="font-medium text-[#172033]">
                     {formatRate(summary.outgoing.bitrateKbps)}
@@ -272,7 +327,29 @@ export function StreamingQualityDiagnosticsPanel({
                     {formatCount(summary.outgoing.framesSent)}
                   </dd>
                 </div>
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-[#64748B]">Audio Sender</dt>
+                  <dd className="font-medium text-[#172033]">
+                    {summary.outgoing.audioSenderTrackStatus ?? 'none'}
+                    {summary.outgoing.audioCodec ? ` (${summary.outgoing.audioCodec})` : ''}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-[#64748B]">Audio RTP Sent</dt>
+                  <dd className="font-medium text-[#172033]">
+                    {formatAudioTraffic(
+                      summary.outgoing.audioPacketsSent,
+                      summary.outgoing.audioBytesSent
+                    )}
+                  </dd>
+                </div>
               </dl>
+
+              {summary.outgoing.fallbackReason && (
+                <p className="rounded-md border border-[#D97706]/30 bg-[#FFFBEB] px-2.5 py-1.5 text-[11px] leading-snug text-[#B45309]">
+                  {summary.outgoing.fallbackReason}
+                </p>
+              )}
 
               <div className="border-t border-[#E2E8F0] pt-2">
                 <StatusLabel
@@ -312,6 +389,13 @@ export function StreamingQualityDiagnosticsPanel({
                   <dd className="font-medium text-[#172033]">{formatFps(summary.incoming.fps)}</dd>
                 </div>
                 <div className="flex items-center justify-between gap-2">
+                  <dt className="text-[#64748B]">Video Codec</dt>
+                  <dd className="font-mono font-medium text-[#172033]">
+                    {summary.incoming.negotiatedCodec ?? summary.incoming.codec ?? 'Unavailable'}
+                    {summary.incoming.negotiatedProfile ? ` (${summary.incoming.negotiatedProfile})` : ''}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-2">
                   <dt className="text-[#64748B]">Incoming Bitrate</dt>
                   <dd className="font-medium text-[#172033]">
                     {formatRate(summary.incoming.bitrateKbps)}
@@ -323,13 +407,46 @@ export function StreamingQualityDiagnosticsPanel({
                     {formatCount(summary.incoming.framesDecoded)}
                   </dd>
                 </div>
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-[#64748B]">Audio Receiver</dt>
+                  <dd className="font-medium text-[#172033]">
+                    {summary.incoming.audioReceiverTrackStatus ?? 'none'}
+                    {summary.incoming.audioCodec ? ` (${summary.incoming.audioCodec})` : ''}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-[#64748B]">Audio RTP Received</dt>
+                  <dd className="font-medium text-[#172033]">
+                    {formatAudioTraffic(
+                      summary.incoming.audioPacketsReceived,
+                      summary.incoming.audioBytesReceived
+                    )}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-[#64748B]">TV Audio Playback</dt>
+                  <dd className="font-medium text-[#172033]">
+                    {summary.incoming.autoplayBlocked
+                      ? 'autoplay-blocked'
+                      : summary.incoming.audioPlaybackStatus ?? 'Unavailable'}
+                  </dd>
+                </div>
               </dl>
 
-              <div className="border-t border-[#E2E8F0] pt-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#E2E8F0] pt-2">
                 <StatusLabel
                   status={summary.incoming.verification.status}
                   tone={summary.incoming.verification.tone}
                 />
+                {(() => {
+                  const audioAccent = audioDiagnosticBadgeClass(summary.audioDiagnosticStatus);
+                  return (
+                    <span className={`inline-flex items-center gap-1.5 text-[11px] font-semibold ${audioAccent.text}`}>
+                      <span className={`h-2 w-2 rounded-full shrink-0 ${audioAccent.dot}`} aria-hidden="true" />
+                      <span>{summary.audioDiagnosticStatus}</span>
+                    </span>
+                  );
+                })()}
               </div>
             </div>
           </div>
@@ -337,17 +454,19 @@ export function StreamingQualityDiagnosticsPanel({
           {/* Per-peer live verification table when any outbound or incoming stream exists */}
           {hasMultiplePeers && (
             <div className="overflow-x-auto border-t border-[#E2E8F0] bg-white">
-              <table className="w-full min-w-[780px] text-left text-xs">
+              <table className="w-full min-w-[920px] text-left text-xs">
                 <thead className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-medium text-[#64748B]">
                   <tr>
                     <th className="px-4 py-2">Stream</th>
                     <th className="px-4 py-2">Direction</th>
                     <th className="px-4 py-2">Connection</th>
+                    <th className="px-4 py-2">Codec</th>
                     <th className="px-4 py-2">RTP Resolution</th>
                     <th className="px-4 py-2">&lt;video&gt; Size</th>
                     <th className="px-4 py-2">Actual FPS</th>
                     <th className="px-4 py-2">Bitrate</th>
                     <th className="px-4 py-2">Frames</th>
+                    <th className="px-4 py-2">Audio</th>
                     <th className="px-4 py-2">Quality Status</th>
                   </tr>
                 </thead>
@@ -394,6 +513,12 @@ export function StreamingQualityDiagnosticsPanel({
                             )}
                           </div>
                         </td>
+                        <td className="px-4 py-2 font-mono text-[#172033]">
+                          {peer.telemetry.negotiatedVideoCodec ??
+                            peer.telemetry.codecMimeType ??
+                            peer.telemetry.selectedVideoCodec ??
+                            '—'}
+                        </td>
                         <td className="px-4 py-2 text-[#172033]">
                           {formatDimensionsLabel(
                             peer.telemetry.encodedWidth,
@@ -409,6 +534,13 @@ export function StreamingQualityDiagnosticsPanel({
                         </td>
                         <td className="px-4 py-2 text-[#172033]">
                           {formatCount(peer.telemetry.framesSent)}
+                        </td>
+                        <td className="px-4 py-2 font-sans text-[#172033]">
+                          {peer.telemetry.audioSenderTrackStatus ?? 'none'}
+                          {peer.telemetry.audioPacketsSent !== null &&
+                          peer.telemetry.audioPacketsSent !== undefined
+                            ? ` (${peer.telemetry.audioPacketsSent})`
+                            : ''}
                         </td>
                         <td className="px-4 py-2 font-sans">
                           <StatusLabel status={verification.status} tone={verification.tone} />
@@ -462,6 +594,12 @@ export function StreamingQualityDiagnosticsPanel({
                             )}
                           </div>
                         </td>
+                        <td className="px-4 py-2 font-mono text-[#172033]">
+                          {entry.telemetry.negotiatedVideoCodec ??
+                            entry.telemetry.codecMimeType ??
+                            entry.streamMeta?.codec ??
+                            '—'}
+                        </td>
                         <td className="px-4 py-2 text-[#172033]">
                           {formatDimensionsLabel(
                             entry.telemetry.decodedWidth,
@@ -482,6 +620,13 @@ export function StreamingQualityDiagnosticsPanel({
                         </td>
                         <td className="px-4 py-2 text-[#172033]">
                           {formatCount(entry.telemetry.framesDecoded)}
+                        </td>
+                        <td className="px-4 py-2 font-sans text-[#172033]">
+                          {entry.telemetry.autoplayBlocked
+                            ? 'autoplay-blocked'
+                            : entry.telemetry.audioPlaybackStatus ??
+                              entry.telemetry.audioReceiverTrackStatus ??
+                              'none'}
                         </td>
                         <td className="px-4 py-2 font-sans">
                           <StatusLabel status={verification.status} tone={verification.tone} />

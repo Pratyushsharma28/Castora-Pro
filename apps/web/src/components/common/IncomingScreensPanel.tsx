@@ -2,7 +2,11 @@ import { useState } from 'react';
 import { Monitor, RotateCcw, Volume2, VolumeX } from 'lucide-react';
 import { evaluateConnectionQuality } from '../../services/streamingDiagnosticsService';
 import type { IncomingScreenEntry } from '../../services/webrtcSignalingBridge';
-import type { PeerConnectionRecoveryInfo, WebRtcConnectionPhase } from '../../types/studio';
+import type {
+  AudioPlaybackStatus,
+  PeerConnectionRecoveryInfo,
+  WebRtcConnectionPhase,
+} from '../../types/studio';
 import { SignalBadge, type SignalTone } from './SignalBadge';
 import { TelemetryStrip } from './TelemetryStrip';
 import { VideoSurface } from './VideoSurface';
@@ -19,6 +23,10 @@ interface IncomingScreensPanelProps {
     senderDeviceId: string,
     width: number | null,
     height: number | null
+  ) => void;
+  onIncomingAudioPlayback?: (
+    senderDeviceId: string,
+    state: { playbackStatus: AudioPlaybackStatus; autoplayBlocked: boolean }
   ) => void;
 }
 
@@ -60,6 +68,7 @@ export function IncomingScreensPanel({
   onToggleMutePeer,
   onRetryPeer,
   onIncomingVideoDimensions,
+  onIncomingAudioPlayback,
 }: IncomingScreensPanelProps) {
   const [mutedMap, setMutedMap] = useState<Record<string, boolean>>({});
 
@@ -92,8 +101,8 @@ export function IncomingScreensPanel({
           {streams.map((entry, idx) => {
             const muted =
               mutedByPeerId !== undefined
-                ? (mutedByPeerId[entry.senderDeviceId] ?? true)
-                : (mutedMap[entry.senderDeviceId] ?? true);
+                ? (mutedByPeerId[entry.senderDeviceId] ?? false)
+                : (mutedMap[entry.senderDeviceId] ?? false);
             const badge = incomingBadge(entry.phase, entry.stream !== null, entry.recovery);
             const quality = evaluateConnectionQuality({
               phase: entry.phase,
@@ -107,6 +116,7 @@ export function IncomingScreensPanel({
                 entry.phase === 'disconnected' ||
                 Boolean(entry.recovery?.exhausted));
             const hasAudio = Boolean(entry.stream?.getAudioTracks().length);
+            const audioBlocked = Boolean(entry.autoplayBlocked || entry.telemetry.autoplayBlocked);
 
             return (
               <div key={entry.senderDeviceId} className="min-w-0 space-y-2.5">
@@ -116,12 +126,28 @@ export function IncomingScreensPanel({
                   subtitle={`${entry.senderPlatform} · ${entry.senderDeviceId}`}
                   stream={entry.stream}
                   muted={muted}
+                  autoplayBlocked={audioBlocked}
                   allowFullscreen
                   large={streams.length === 1}
                   highlight={entry.phase === 'connected' && entry.stream !== null}
                   onVideoDimensionsChange={(width, height) =>
                     onIncomingVideoDimensions?.(entry.senderDeviceId, width, height)
                   }
+                  onAudioPlaybackChange={(state) =>
+                    onIncomingAudioPlayback?.(entry.senderDeviceId, state)
+                  }
+                  onActivateAudio={() => {
+                    if (muted) {
+                      if (onToggleMutePeer) {
+                        onToggleMutePeer(entry.senderDeviceId);
+                      } else {
+                        setMutedMap((prev) => ({
+                          ...prev,
+                          [entry.senderDeviceId]: false,
+                        }));
+                      }
+                    }
+                  }}
                   standbyReason={
                     entry.errorMessage ??
                     entry.statusDetail ??
@@ -167,6 +193,13 @@ export function IncomingScreensPanel({
                           type="button"
                           disabled={!entry.stream || !hasAudio}
                           onClick={() => {
+                            if (audioBlocked) {
+                              onIncomingAudioPlayback?.(entry.senderDeviceId, {
+                                playbackStatus: 'playing',
+                                autoplayBlocked: false,
+                              });
+                              if (!muted) return;
+                            }
                             if (onToggleMutePeer) {
                               onToggleMutePeer(entry.senderDeviceId);
                             } else {
@@ -176,14 +209,26 @@ export function IncomingScreensPanel({
                               }));
                             }
                           }}
-                          className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-45"
+                          className={`inline-flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium disabled:opacity-45 ${
+                            audioBlocked && hasAudio
+                              ? 'border-[#D97706] bg-[#FFFBEB] text-[#B45309] hover:bg-[#FEF3C7]'
+                              : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]'
+                          }`}
                         >
-                          {muted ? (
+                          {muted || audioBlocked ? (
                             <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
                           ) : (
                             <Volume2 className="h-3.5 w-3.5 text-[#2563EB]" aria-hidden="true" />
                           )}
-                          <span>{hasAudio ? (muted ? 'Unmute' : 'Mute') : 'No audio'}</span>
+                          <span>
+                            {!hasAudio
+                              ? 'No audio'
+                              : audioBlocked
+                                ? 'Activate Audio'
+                                : muted
+                                  ? 'Unmute'
+                                  : 'Mute'}
+                          </span>
                         </button>
                       </div>
                     </div>

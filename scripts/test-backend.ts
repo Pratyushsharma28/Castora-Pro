@@ -15,6 +15,7 @@ import {
 } from '../apps/web/src/services/screenCaptureService.ts';
 import {
   buildStageDiagnosticsSummary,
+  evaluateAudioDiagnosticState,
   evaluateConnectionQuality,
   evaluateQualityVerification,
   formatDimensionsLabel,
@@ -31,11 +32,14 @@ import {
   applyQualityProfileToPreferences,
   assessNetworkCondition,
   computeConcurrencyScaledBitrateKbps,
+  extractH264FmtpInfo,
+  getCodecFallbackChain,
+  inspectSdpNegotiatedMedia,
   orderVideoCodecsForPreference,
   resolveProfileIdFromPreferences,
   resolveQualityTarget,
 } from '../apps/web/src/services/videoQualityService.ts';
-import { buildRtcConfiguration } from '../apps/web/src/services/webrtcPeerService.ts';
+import { CastoraWebRtcPeer, buildRtcConfiguration } from '../apps/web/src/services/webrtcPeerService.ts';
 import { WebRtcSignalingBridge } from '../apps/web/src/services/webrtcSignalingBridge.ts';
 import type { CapturePreferences } from '../apps/web/src/types/studio.ts';
 import type { CastoraEnvelope } from '../apps/web/src/types/protocol.ts';
@@ -2327,7 +2331,16 @@ async function main() {
     const rankedH264 = orderVideoCodecsForPreference(sampleCaps, 'H264');
     assert.equal(rankedH264.codecHint, 'H264');
     assert.equal(rankedH264.orderedCodecs[0].mimeType, 'video/H264');
-    assert.equal(rankedH264.orderedCodecs[0].sdpFmtpLine?.includes('640032'), true, 'High H264 profile prioritized first');
+    assert.equal(
+      rankedH264.orderedCodecs[0].sdpFmtpLine?.includes('42e01f'),
+      true,
+      'Constrained Baseline H264 (packetization-mode=1) must rank first for TV compatibility'
+    );
+    assert.equal(
+      rankedH264.orderedCodecs.some((c) => c.sdpFmtpLine?.includes('640032')),
+      true,
+      'High profile 640032 stays included as fallback H264 option'
+    );
     const rankedVp9 = orderVideoCodecsForPreference(sampleCaps, 'VP9');
     assert.equal(rankedVp9.codecHint, 'VP9');
     assert.equal(rankedVp9.orderedCodecs[0].mimeType, 'video/VP9');
@@ -4638,6 +4651,9 @@ async function main() {
     const joinStatuses = joinResponses.map((r) => r.status);
     assert.equal(joinStatuses.filter((s) => s === 200).length, 6, 'Exactly 6 unique valid concurrent requests accepted');
     assert.equal(joinStatuses.filter((s) => s === 409).length, 2, 'Duplicate ID and duplicate name rejected with 409');
+    const acceptedConcurrentIds = concurrentRequests
+      .filter((_req, idx) => joinStatuses[idx] === 200)
+      .map((req) => req.receiverDeviceId);
 
     // Add 7th unique valid pending request while all 6 are pending
     const seventhJoin = await fetch(`${baseUrl}/api/rooms/${capDmRoomId}/pair-requests`, {
@@ -4656,8 +4672,9 @@ async function main() {
     assert.equal(seventhJoin.status, 200);
 
     // Concurrently approve all 7 pending requests -> exactly 6 succeed (200), 1 receives 409 ROOM_FULL
+    const approveCandidateIds = [...acceptedConcurrentIds, 'conc-7-valid'];
     const approveResults = await Promise.all(
-      ['conc-1', 'conc-2', 'conc-3', 'conc-4', 'conc-5', 'conc-6', 'conc-7-valid'].map((id) =>
+      approveCandidateIds.map((id) =>
         fetch(`${baseUrl}/api/rooms/${capDmRoomId}/pair-requests/${id}/approve`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${capDmData.hostToken}` },
@@ -4667,20 +4684,21 @@ async function main() {
     const approveStatuses = approveResults.map((r) => r.status);
     assert.equal(approveStatuses.filter((s) => s === 200).length, 6, 'Max 6 paired devices enforced under concurrent approvals');
     assert.equal(approveStatuses.filter((s) => s === 409).length, 1, '7th concurrent approval rejected with 409 ROOM_FULL');
+    const overflowCandidateId = approveCandidateIds.find((_id, idx) => approveStatuses[idx] === 409)!;
 
     const fullSnap = ((await (await fetch(`${baseUrl}/api/rooms/${capDmRoomId}`)).json()) as { room: RoomSnapshot }).room;
     assert.equal(fullSnap.pairedReceiverCount, 6);
     const slotIndexes = fullSnap.pairedReceivers.map((r) => r.assignedSlotIndex).sort((a, b) => a - b);
     assert.deepEqual(slotIndexes, [0, 1, 2, 3, 4, 5], 'All 6 receiver slots uniquely assigned');
 
-    // Remove conc-3, then approve conc-7-valid into freed slot cleanly
+    // Remove one approved receiver (conc-3), then approve the overflow pending request into the freed slot cleanly
     const removeConc3 = await fetch(`${baseUrl}/api/rooms/${capDmRoomId}/receivers/conc-3`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${capDmData.hostToken}` },
     });
     assert.equal(removeConc3.status, 200);
     const approveSeventhAfterFree = await fetch(
-      `${baseUrl}/api/rooms/${capDmRoomId}/pair-requests/conc-7-valid/approve`,
+      `${baseUrl}/api/rooms/${capDmRoomId}/pair-requests/${overflowCandidateId}/approve`,
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${capDmData.hostToken}` },
@@ -4690,7 +4708,7 @@ async function main() {
     const slotFreedSnap = (await approveSeventhAfterFree.json()) as { room: RoomSnapshot };
     assert.equal(slotFreedSnap.room.pairedReceiverCount, 6);
     assert.equal(
-      slotFreedSnap.room.pairedReceivers.some((r) => r.deviceId === 'conc-7-valid'),
+      slotFreedSnap.room.pairedReceivers.some((r) => r.deviceId === overflowCandidateId),
       true
     );
 
@@ -5599,7 +5617,673 @@ async function main() {
     }
     console.log('  [PASS] Extra. Production JSON errors, reverse-proxy TLS health, CORS & WS Origin enforcement verified');
 
-    console.log('\nAll Stage 3 (14) + Stage 4A (10) + Stage 4B (10) + Stage 4C (4) + Stage 4D (3) + Stage 4E (4) + Stage 4F (4) + Stage 4G (5) + Stage 4H (6) + Production Hardening tests passed!');
+    // =========================================================================
+    // STAGE 4I: H.264 / AV1 TV COMPATIBILITY, FALLBACK & END-TO-END AUDIO
+    // =========================================================================
+    console.log('\n[Stage 4I] Running H.264 / AV1 Codec Compatibility & End-to-End Audio Verification...');
+
+    // 4I.1. H.264 TV-compatible profile prioritization, receiver capability filtering & SDP inspection
+    const fullH264List = [
+      { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=0;profile-level-id=42e01f' },
+      { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032' },
+      { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f' },
+      { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f' },
+      { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' },
+      { mimeType: 'video/VP9', clockRate: 90000 },
+      { mimeType: 'video/VP8', clockRate: 90000 },
+      { mimeType: 'video/rtx', clockRate: 90000 },
+    ] as RTCRtpCodec[];
+
+    const tvOrdered = orderVideoCodecsForPreference(fullH264List, 'H264', fullH264List);
+    const fmtpInfos = tvOrdered.orderedCodecs
+      .filter((c) => c.mimeType === 'video/H264')
+      .map((c) => extractH264FmtpInfo(c.sdpFmtpLine));
+    assert.equal(fmtpInfos[0].profilePrefix, '42e0');
+    assert.equal(fmtpInfos[0].packetizationMode, '1');
+    assert.equal(fmtpInfos[1].profilePrefix, '4200');
+    assert.equal(fmtpInfos[2].profilePrefix, '4d00');
+    assert.equal(fmtpInfos[3].profilePrefix, '6400');
+    assert.equal(fmtpInfos[4].packetizationMode, '0');
+
+    // Non-H264 receiver capabilities (only VP9/VP8 present)
+    const vp9OnlyCaps = [
+      { mimeType: 'video/VP9', clockRate: 90000 },
+      { mimeType: 'video/VP8', clockRate: 90000 },
+    ] as RTCRtpCodec[];
+    const h264Unavailable = orderVideoCodecsForPreference(vp9OnlyCaps, 'H264', vp9OnlyCaps);
+    assert.equal(h264Unavailable.codecHint, 'VP9');
+    assert.deepEqual(h264Unavailable.availableVideoCodecs, ['VP9', 'VP8']);
+
+    assert.deepEqual(getCodecFallbackChain('H264'), ['H264', 'VP9', 'VP8']);
+    assert.deepEqual(getCodecFallbackChain('AV1'), ['AV1', 'VP9', 'H264', 'VP8']);
+    assert.deepEqual(getCodecFallbackChain('VP9'), ['VP9', 'H264', 'VP8']);
+
+    const h264AnswerSdp = [
+      'v=0',
+      'm=video 9 UDP/TLS/RTP/SAVPF 96 98',
+      'a=rtpmap:96 H264/90000',
+      'a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f',
+      'a=rtpmap:98 VP9/90000',
+      'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+      'a=rtpmap:111 opus/48000/2',
+    ].join('\r\n');
+    const inspectedH264 = inspectSdpNegotiatedMedia(h264AnswerSdp);
+    assert.equal(inspectedH264.primaryVideoCodec, 'H264');
+    assert.equal(inspectedH264.h264ProfileLevelId, '42e01f');
+    assert.equal(inspectedH264.primaryAudioCodec, 'OPUS');
+    assert.equal(inspectedH264.videoRejected, false);
+
+    const rejectedSdp = [
+      'v=0',
+      'm=video 0 UDP/TLS/RTP/SAVPF 96',
+      'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+      'a=rtpmap:111 opus/48000/2',
+    ].join('\r\n');
+    const inspectedRejected = inspectSdpNegotiatedMedia(rejectedSdp);
+    assert.equal(inspectedRejected.videoRejected, true);
+    assert.equal(inspectedRejected.primaryAudioCodec, 'OPUS');
+    console.log('  [PASS] 4I.1. H.264 TV profile order (42e0 > 4200 > 4d00 > 6400), fallback chains & SDP inspection verified');
+
+    // 4I.2. Real automatic H.264 SDP rejection -> VP9 fallback + zero-frame AV1 stall -> VP9 fallback while preserving audio
+    class CodecFallbackFakePc extends FakeRtcPeerConnection {
+      rejectVideoOnH264Answer = false;
+      zeroFramesOnAv1 = false;
+      async setRemoteDescription(desc: RTCSessionDescriptionInit) {
+        if (this.rejectVideoOnH264Answer && desc.type === 'answer' && desc.sdp?.includes('H264')) {
+          throw new Error('Incompatible H264 profile rejected by remote TV');
+        }
+        await super.setRemoteDescription(desc);
+      }
+      async createOffer(options?: RTCOfferOptions) {
+        const base = await super.createOffer(options);
+        const preferred = this.lastCodecPreferences?.[0]?.mimeType ?? 'video/VP9';
+        const pt = preferred.includes('H264') ? 96 : preferred.includes('AV1') ? 100 : 98;
+        const name = preferred.includes('H264')
+          ? 'H264'
+          : preferred.includes('AV1')
+            ? 'AV1'
+            : preferred.includes('VP8')
+              ? 'VP8'
+              : 'VP9';
+        const activeSending = this.getTransceivers().some(
+          (t) => t.sender.track !== null && (t.direction === 'sendonly' || t.direction === 'sendrecv')
+        );
+        const hasAudio = this.getAudioSender()?.track !== null;
+        return {
+          type: 'offer' as const,
+          sdp: `v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF ${pt}\r\na=rtpmap:${pt} ${name}/90000\r\n${name === 'H264' ? `a=fmtp:${pt} level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n` : ''}a=${activeSending ? 'sendrecv' : 'recvonly'}\r\n${hasAudio ? 'm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\na=sendrecv\r\n' : ''}`,
+        };
+      }
+      async getStats() {
+        if (this.zeroFramesOnAv1) {
+          const map = new Map<string, Record<string, unknown>>();
+          map.set('av1-codec', { id: 'av1-codec', type: 'codec', mimeType: 'video/AV1' });
+          map.set('out-vid-0', {
+            id: 'out-vid-0',
+            type: 'outbound-rtp',
+            kind: 'video',
+            codecId: 'av1-codec',
+            framesEncoded: 0,
+            framesSent: 0,
+            bytesSent: 0,
+            timestamp: Date.now(),
+          });
+          map.set('opus-codec', { id: 'opus-codec', type: 'codec', mimeType: 'audio/opus' });
+          map.set('out-aud-0', {
+            id: 'out-aud-0',
+            type: 'outbound-rtp',
+            kind: 'audio',
+            codecId: 'opus-codec',
+            packetsSent: 120,
+            bytesSent: 18_400,
+            timestamp: Date.now(),
+          });
+          return map;
+        }
+        return super.getStats();
+      }
+    }
+
+    const fallbackEvents: Array<{ nextCodec: string; reason: string }> = [];
+    const offerHints: string[] = [];
+    const fallbackSenderPc = new CodecFallbackFakePc();
+    fallbackSenderPc.rejectVideoOnH264Answer = true;
+    const peer4iFallback = new CastoraWebRtcPeer({
+      localDeviceId: 'mac-4i-a',
+      peerDeviceId: 'tv-4i-b',
+      sessionId: 'sess-4i-fallback',
+      targetFps: 60,
+      networkPrefs: {
+        preferLanDirectP2P: true,
+        stunUrls: 'stun:stun.l.google.com:19302',
+        turnUrl: '',
+        turnUsername: '',
+        turnCredential: '',
+      },
+      rtcFactory: () => fallbackSenderPc as unknown as RTCPeerConnection,
+      codecStallSampleThreshold: 2,
+      callbacks: {
+        onOfferCreated: (offer) => {
+          offerHints.push(offer.codecHint);
+        },
+        onIceCandidate: () => {},
+        onInboundStream: () => {},
+        onPhaseChange: () => {},
+        onIceConnectionChange: () => {},
+        onCodecFallback: (nextCodec, reason) => {
+          fallbackEvents.push({ nextCodec, reason });
+        },
+        onStats: () => {},
+        onError: () => {},
+      },
+    });
+
+    const streamWithAudio = new FakeMediaStream('4i-stream', 'mac-av', {
+      width: 1920,
+      height: 1080,
+      frameRate: 60,
+      includeAudio: true,
+    });
+    await peer4iFallback.publishLocalStream({
+      localStream: streamWithAudio as unknown as MediaStream,
+      streamId: 'stream-4i-1',
+      preferences: {
+        resolution: '1080p',
+        targetFps: 60,
+        codecPreference: 'H264',
+        includeAudio: true,
+        maxBitrateKbps: 10_000,
+        adaptiveBitrate: true,
+      },
+      activeOutboundPeers: 1,
+    });
+    // Simulate TV rejecting H264 answer SDP -> must trigger fallback offer to VP9 and keep audio track alive!
+    await peer4iFallback.acceptAnswer(
+      'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 H264/90000\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\n'
+    );
+    await waitUntil(() => fallbackEvents.length >= 1, 'H264 rejection falls back to VP9');
+    assert.equal(fallbackEvents[0].nextCodec, 'VP9');
+    assert.equal(peer4iFallback.getAudioSenderTrackStatus(), 'live', 'Audio sender preserved during codec fallback');
+    assert.equal(fallbackSenderPc.audioSetParametersCalls, 0);
+
+    // Verify mid-stream switch to AV1 then automatic zero-frame stall fallback back to VP9 while preserving audio!
+    fallbackSenderPc.rejectVideoOnH264Answer = false;
+    await peer4iFallback.acceptAnswer(
+      'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 98\r\na=rtpmap:98 VP9/90000\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\n'
+    );
+    fallbackSenderPc.emitConnectionDrop('connected');
+    await peer4iFallback.updateEncodingPreferences(
+      {
+        resolution: '1080p',
+        targetFps: 60,
+        codecPreference: 'AV1',
+        includeAudio: true,
+        maxBitrateKbps: 10_000,
+        adaptiveBitrate: true,
+      },
+      1
+    );
+    await peer4iFallback.acceptAnswer(
+      'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 100\r\na=rtpmap:100 AV1/90000\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\n'
+    );
+    fallbackSenderPc.zeroFramesOnAv1 = true;
+    await peer4iFallback.sampleAndAdaptStats(1000);
+    await peer4iFallback.sampleAndAdaptStats(3000);
+    await waitUntil(
+      () => fallbackEvents.length >= 2,
+      'AV1 zero-frame encoder stall triggers fallback to VP9'
+    );
+    assert.equal(fallbackEvents[1].nextCodec, 'VP9');
+    assert.equal(peer4iFallback.getAudioSenderTrackStatus(), 'live', 'Audio track unaffected by AV1->VP9 stall fallback');
+    peer4iFallback.close('4I fallback check complete');
+    console.log('  [PASS] 4I.2. Automatic H.264/AV1 -> VP9 fallback (SDP reject & zero-frame stall) preserving audio verified');
+
+    // 4I.3. Audio capture + video-before-audio AND audio-before-video ontrack assembly + track resilience + VP9/AV1/H264 audio E2E
+    const prevGlobalMediaStream = (globalThis as { MediaStream?: unknown }).MediaStream;
+    class BrowserLikeMediaStream {
+      readonly id = 'assembled-stream';
+      private readonly tracks: FakeTrack[];
+      constructor(tracks: FakeTrack[] = []) {
+        this.tracks = Array.isArray(tracks) ? [...tracks] : [];
+      }
+      getVideoTracks() {
+        return this.tracks.filter((t) => t.kind === 'video');
+      }
+      getAudioTracks() {
+        return this.tracks.filter((t) => t.kind === 'audio');
+      }
+      getTracks() {
+        return [...this.tracks];
+      }
+      addTrack(track: FakeTrack) {
+        if (!this.tracks.includes(track)) {
+          this.tracks.push(track);
+        }
+      }
+    }
+    (globalThis as { MediaStream?: unknown }).MediaStream = BrowserLikeMediaStream;
+    try {
+      const receiverPc = new CodecFallbackFakePc();
+      let latestInboundStream: FakeMediaStream | null = null;
+      const receiverPeer = new CastoraWebRtcPeer({
+        localDeviceId: 'tv-4i-rx',
+        peerDeviceId: 'mac-4i-tx',
+        sessionId: 'sess-4i-rx',
+        targetFps: 60,
+        networkPrefs: {
+          preferLanDirectP2P: true,
+          stunUrls: 'stun:stun.l.google.com:19302',
+          turnUrl: '',
+          turnUsername: '',
+          turnCredential: '',
+        },
+        rtcFactory: () => receiverPc as unknown as RTCPeerConnection,
+        callbacks: {
+          onOfferCreated: () => {},
+          onIceCandidate: () => {},
+          onInboundStream: (stream) => {
+            latestInboundStream = stream as unknown as FakeMediaStream | null;
+          },
+          onPhaseChange: () => {},
+          onIceConnectionChange: () => {},
+          onStats: () => {},
+          onError: () => {},
+        },
+      });
+
+      const remoteAV = new FakeMediaStream('remote-av', 'mac-av', {
+        width: 1920,
+        height: 1080,
+        frameRate: 60,
+        includeAudio: true,
+      });
+      const remoteVideoTrack = remoteAV.getVideoTracks()[0];
+      const remoteAudioTrack = remoteAV.getAudioTracks()[0];
+
+      // Fire audio BEFORE video without stream array (simulates transceiver-only audio-first Safari/Chrome ontrack)
+      receiverPc.ontrack?.({ track: remoteAudioTrack, streams: [] });
+      assert.equal(latestInboundStream !== null, true);
+      assert.equal(latestInboundStream!.getAudioTracks().length, 1);
+      assert.equal(latestInboundStream!.getVideoTracks().length, 0);
+      assert.equal(receiverPeer.getAudioReceiverTrackStatus(), 'live');
+
+      // Now fire video track
+      receiverPc.ontrack?.({ track: remoteVideoTrack, streams: [] });
+      assert.equal(latestInboundStream!.getVideoTracks().length, 1);
+      assert.equal(latestInboundStream!.getAudioTracks().length, 1, 'Combined MediaStream holds BOTH video and audio');
+
+      // Transient track mute on remote audio must keep track in stream and report 'muted', NOT drop it
+      remoteAudioTrack.muted = true;
+      remoteAudioTrack.dispatchEventName('mute');
+      assert.equal(latestInboundStream!.getAudioTracks().length, 1);
+      assert.equal(receiverPeer.getAudioReceiverTrackStatus(), 'muted');
+
+      remoteAudioTrack.muted = false;
+      remoteAudioTrack.dispatchEventName('unmute');
+      assert.equal(receiverPeer.getAudioReceiverTrackStatus(), 'live');
+
+      // Ending audio track preserves video and transitions audio track status cleanly to 'ended'
+      remoteAudioTrack.readyState = 'ended';
+      remoteAudioTrack.dispatchEventName('ended');
+      assert.equal(latestInboundStream!.getVideoTracks().length, 1, 'Video survives audio track ending');
+      assert.equal(receiverPeer.getAudioReceiverTrackStatus(), 'ended');
+
+      receiverPeer.close('4I receiver check complete');
+    } finally {
+      (globalThis as { MediaStream?: unknown }).MediaStream = prevGlobalMediaStream;
+    }
+
+    // 4I.4. Full server-backed WebRtcSignalingBridge audio + codec telemetry across VP9, AV1, and H264 + video-only notice + reconnect audio preservation
+    const iRoomRes = await fetch(`${baseUrl}/api/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostDeviceId: 'mac-4i-host',
+        hostDeviceName: 'Mac Studio 4I',
+        hostPlatform: 'macos',
+      }),
+    });
+    assert.equal(iRoomRes.status, 201);
+    const iRoomData = (await iRoomRes.json()) as { room: RoomSnapshot; hostToken: string };
+    const iRoomId = iRoomData.room.roomId;
+
+    const iHostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 'mac-4i-host',
+      deviceName: 'Mac Studio 4I',
+      platform: 'macos',
+      role: 'both',
+      roomId: iRoomId,
+      token: iRoomData.hostToken,
+    });
+    await iHostWs.waitForMessage((m) => m.messageType === 'room_state');
+
+    const iTvJoin = (await (
+      await fetch(`${baseUrl}/api/rooms/${iRoomId}/pair-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiverDeviceId: 'tv-4i-receiver',
+          deviceName: 'Living Room TV',
+          platform: 'android',
+        }),
+      })
+    ).json()) as { memberToken: string };
+    const iTvWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 'tv-4i-receiver',
+      deviceName: 'Living Room TV',
+      platform: 'android',
+      role: 'both',
+      roomId: iRoomId,
+      token: iTvJoin.memberToken,
+    });
+    const iApprovedRoom = (
+      (await (
+        await fetch(`${baseUrl}/api/rooms/${iRoomId}/pair-requests/tv-4i-receiver/approve`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${iRoomData.hostToken}` },
+        })
+      ).json()) as { room: RoomSnapshot }
+    ).room;
+
+    const iLogs: string[] = [];
+    const vp9AudioPrefs: CapturePreferences = {
+      resolution: '1080p',
+      targetFps: 60,
+      codecPreference: 'VP9',
+      includeAudio: true,
+      maxBitrateKbps: 10_000,
+      adaptiveBitrate: true,
+    };
+
+    const iHostBridge = new WebRtcSignalingBridge({
+      deviceId: 'mac-4i-host',
+      preferences: vp9AudioPrefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(iHostWs),
+      callbacks: {
+        onStateChange: () => {},
+        onLogEvent: (_cat, title, detail) => {
+          iLogs.push(`${title}: ${detail}`);
+        },
+      },
+      captureFn: makeDynamicCapture('mac-4i-av', {
+        width: 1920,
+        height: 1080,
+        frameRate: 60,
+        includeAudio: true,
+      }),
+      rtcFactory: () => new CodecFallbackFakePc() as unknown as RTCPeerConnection,
+    });
+    const iTvBridge = new WebRtcSignalingBridge({
+      deviceId: 'tv-4i-receiver',
+      preferences: vp9AudioPrefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(iTvWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('tv-4i-unused', { width: 1920, height: 1080, frameRate: 60 }),
+      rtcFactory: () => new CodecFallbackFakePc() as unknown as RTCPeerConnection,
+    });
+
+    let latest4iRoom = iApprovedRoom;
+    const attach4iWs = (
+      wsClient: TestWsClient,
+      bridge: WebRtcSignalingBridge,
+      devId: string,
+      role: 'host' | 'receiver'
+    ) => {
+      wsClient.ws.on('message', (raw, isBinary) => {
+        if (isBinary) return;
+        const msg = JSON.parse(raw.toString('utf8')) as CastoraEnvelope;
+        if (msg.messageType === 'room_state' && msg.roomId === iRoomId) {
+          latest4iRoom = { ...latest4iRoom, ...(msg.payload as Partial<RoomSnapshot>) };
+          bridge.updateContext({
+            deviceId: devId,
+            activeRoom: latest4iRoom,
+            activeRoomRole: role,
+            preferences: vp9AudioPrefs,
+            networkPrefs: netPrefs4b,
+          });
+        } else if (
+          msg.messageType === 'stream_start' ||
+          msg.messageType === 'session_offer' ||
+          msg.messageType === 'session_answer' ||
+          msg.messageType === 'ice_candidate' ||
+          msg.messageType === 'stream_stop'
+        ) {
+          void bridge.handleIncomingEnvelope(msg);
+        }
+      });
+    };
+    attach4iWs(iHostWs, iHostBridge, 'mac-4i-host', 'host');
+    attach4iWs(iTvWs, iTvBridge, 'tv-4i-receiver', 'receiver');
+    iHostBridge.updateContext({
+      deviceId: 'mac-4i-host',
+      activeRoom: iApprovedRoom,
+      activeRoomRole: 'host',
+      preferences: vp9AudioPrefs,
+      networkPrefs: netPrefs4b,
+    });
+    iTvBridge.updateContext({
+      deviceId: 'tv-4i-receiver',
+      activeRoom: iApprovedRoom,
+      activeRoomRole: 'receiver',
+      preferences: vp9AudioPrefs,
+      networkPrefs: netPrefs4b,
+    });
+
+    await iHostBridge.startScreenSharing('tv-4i-receiver');
+    await waitUntil(
+      () => iTvBridge.getSnapshot().incomingStreams.some((s) => s.senderDeviceId === 'mac-4i-host' && s.stream !== null),
+      'TV receives VP9 stream from Mac'
+    );
+    const rxEntryVp9 = iTvBridge.getSnapshot().incomingStreams[0];
+    assert.equal(rxEntryVp9.streamMeta?.codec, 'VP9');
+    assert.equal(rxEntryVp9.stream!.getAudioTracks().length, 1, 'VP9 share delivers audio track to TV');
+    assert.equal(iHostBridge.getSnapshot().localCaptureMeta?.audioCaptureStatus, 'captured');
+
+    // Update incoming audio playback blocked -> clear via Activate Audio
+    iTvBridge.updateIncomingAudioPlaybackState('mac-4i-host', {
+      playbackStatus: 'autoplay-blocked',
+      autoplayBlocked: true,
+    });
+    assert.equal(iTvBridge.getSnapshot().inboundTelemetry.audioDiagnosticStatus, 'Audio received but playback blocked');
+    iTvBridge.updateIncomingAudioPlaybackState('mac-4i-host', {
+      playbackStatus: 'playing',
+      autoplayBlocked: false,
+    });
+    assert.equal(iTvBridge.getSnapshot().inboundTelemetry.audioDiagnosticStatus, 'Audio successfully playing');
+
+    // Switch mid-stream to AV1 and H264 — audio track remains live without losing stream!
+    await iHostBridge.applyCapturePreferencesUpdate({ ...vp9AudioPrefs, codecPreference: 'AV1' });
+    await waitUntil(
+      () => iTvBridge.getSnapshot().incomingStreams[0]?.streamMeta?.codec === 'AV1',
+      'TV receives AV1 stream_start update'
+    );
+    assert.equal(iTvBridge.getSnapshot().incomingStreams[0].stream!.getAudioTracks().length, 1, 'AV1 maintains audio track');
+
+    await iHostBridge.applyCapturePreferencesUpdate({ ...vp9AudioPrefs, codecPreference: 'H264' });
+    await waitUntil(
+      () => iTvBridge.getSnapshot().incomingStreams[0]?.streamMeta?.codec === 'H264',
+      'TV receives H264 stream_start update'
+    );
+    assert.equal(iTvBridge.getSnapshot().incomingStreams[0].stream!.getAudioTracks().length, 1, 'H264 maintains audio track');
+
+    // Full peer reconnect on TV preserves stream & audio
+    await iHostBridge.retryPeerConnection('tv-4i-receiver');
+    await waitUntil(
+      () => iTvBridge.getSnapshot().incomingStreams[0]?.phase === 'connected' && iTvBridge.getSnapshot().incomingStreams[0]?.stream !== null,
+      'Reconnect finishes cleanly with stream restored'
+    );
+    assert.equal(iTvBridge.getSnapshot().incomingStreams[0].stream!.getAudioTracks().length, 1, 'Audio preserved across peer-replace reconnect');
+    console.log('  [PASS] 4I.3 & 4I.4. End-to-end VP9/AV1/H264 video+audio, ontrack ordering, autoplay state & reconnect verified');
+
+    // 4I.5. Stats collector audio RTP counters + all 5 evaluateAudioDiagnosticState paths + video-only share warning
+    const audioStatsCollector = new WebRtcStatsCollector('bidirectional');
+    const mockReport = new Map<string, Record<string, unknown>>();
+    mockReport.set('vc-out', { id: 'vc-out', type: 'codec', mimeType: 'video/VP9' });
+    mockReport.set('ac-out', { id: 'ac-out', type: 'codec', mimeType: 'audio/opus' });
+    mockReport.set('vc-in', { id: 'vc-in', type: 'codec', mimeType: 'video/H264', sdpFmtpLine: 'profile-level-id=42e01f' });
+    mockReport.set('ac-in', { id: 'ac-in', type: 'codec', mimeType: 'audio/opus' });
+    mockReport.set('out-v', {
+      id: 'out-v',
+      type: 'outbound-rtp',
+      kind: 'video',
+      codecId: 'vc-out',
+      frameWidth: 1920,
+      frameHeight: 1080,
+      framesPerSecond: 60,
+      bytesSent: 500_000,
+      framesSent: 60,
+      framesEncoded: 60,
+      timestamp: 1000,
+    });
+    mockReport.set('out-a', {
+      id: 'out-a',
+      type: 'outbound-rtp',
+      kind: 'audio',
+      codecId: 'ac-out',
+      packetsSent: 50,
+      bytesSent: 8_000,
+      timestamp: 1000,
+    });
+    mockReport.set('in-v', {
+      id: 'in-v',
+      type: 'inbound-rtp',
+      kind: 'video',
+      codecId: 'vc-in',
+      frameWidth: 1920,
+      frameHeight: 1080,
+      framesPerSecond: 60,
+      bytesReceived: 500_000,
+      framesDecoded: 60,
+      framesDropped: 0,
+      timestamp: 1000,
+    });
+    mockReport.set('in-a', {
+      id: 'in-a',
+      type: 'inbound-rtp',
+      kind: 'audio',
+      codecId: 'ac-in',
+      packetsReceived: 48,
+      bytesReceived: 7_680,
+      timestamp: 1000,
+    });
+    const fakePcStats = { getStats: async () => mockReport as unknown as RTCStatsReport } as unknown as RTCPeerConnection;
+    const statsLocalStream = new FakeMediaStream('4i5-local', 'mac-av', {
+      width: 1920,
+      height: 1080,
+      frameRate: 60,
+      includeAudio: true,
+    });
+    const sampled = await audioStatsCollector.sampleBidirectional({
+      pc: fakePcStats,
+      outboundTargetFps: 60,
+      inboundTargetFps: 60,
+      connectionState: 'connected',
+      localVideoTrack: statsLocalStream.getVideoTracks()[0] as unknown as MediaStreamTrack,
+      localAudioTrack: statsLocalStream.getAudioTracks()[0] as unknown as MediaStreamTrack,
+      hasInboundVideo: true,
+      hasInboundAudio: true,
+    });
+    assert.equal(sampled.outbound.negotiatedVideoCodec, 'VP9');
+    assert.equal(sampled.outbound.negotiatedAudioCodec, 'OPUS');
+    assert.equal(sampled.outbound.audioPacketsSent, 50);
+    assert.equal(sampled.inbound.negotiatedVideoCodec, 'H264');
+    assert.equal(sampled.inbound.negotiatedAudioCodec, 'OPUS');
+    assert.equal(sampled.inbound.audioPacketsReceived, 48);
+
+    // Check all 5 diagnostic states
+    assert.equal(
+      evaluateAudioDiagnosticState({
+        isSharingLocal: true,
+        hasIncomingStream: false,
+        connectionState: 'connected',
+        localHasAudio: false,
+        audioCaptureStatus: 'not-captured-no-source',
+      }),
+      'Audio not captured'
+    );
+    assert.equal(
+      evaluateAudioDiagnosticState({
+        isSharingLocal: true,
+        hasIncomingStream: false,
+        connectionState: 'connected',
+        localHasAudio: true,
+        audioCaptureStatus: 'captured',
+        audioSenderTrackStatus: 'live',
+        audioPacketsSent: 0,
+      }),
+      'Audio not transmitted'
+    );
+    assert.equal(
+      evaluateAudioDiagnosticState({
+        isSharingLocal: false,
+        hasIncomingStream: true,
+        connectionState: 'connected',
+        hasIncomingAudioTrack: true,
+        audioReceiverTrackStatus: 'live',
+        audioPacketsReceived: 0,
+      }),
+      'Audio not received'
+    );
+    assert.equal(
+      evaluateAudioDiagnosticState({
+        isSharingLocal: false,
+        hasIncomingStream: true,
+        connectionState: 'connected',
+        hasIncomingAudioTrack: true,
+        audioReceiverTrackStatus: 'live',
+        audioPacketsReceived: 40,
+        audioPlaybackStatus: 'autoplay-blocked',
+        autoplayBlocked: true,
+      }),
+      'Audio received but playback blocked'
+    );
+    assert.equal(
+      evaluateAudioDiagnosticState({
+        isSharingLocal: false,
+        hasIncomingStream: true,
+        connectionState: 'connected',
+        hasIncomingAudioTrack: true,
+        audioReceiverTrackStatus: 'live',
+        audioPacketsReceived: 40,
+        audioPlaybackStatus: 'playing',
+        autoplayBlocked: false,
+      }),
+      'Audio successfully playing'
+    );
+
+    // Video-only screen capture when audio requested gives explicit guidance notice cleanly
+    const vidOnlySession = await startScreenCapture({
+      preferences: vp9AudioPrefs,
+      onNativeEnded: () => {},
+      env: {
+        isSecureContext: true,
+        mediaDevices: {
+          getDisplayMedia: async () =>
+            new FakeMediaStream('video-only', 'disp', {
+              width: 1920,
+              height: 1080,
+              frameRate: 60,
+              includeAudio: false,
+            }) as unknown as MediaStream,
+        },
+      },
+    });
+    assert.equal(vidOnlySession.hasAudio, false);
+    assert.equal(vidOnlySession.audioCaptureStatus, 'not-captured-no-source');
+    assert.equal(typeof vidOnlySession.audioNotice, 'string');
+    vidOnlySession.stop();
+
+    iHostBridge.dispose();
+    iTvBridge.dispose();
+    await iHostWs.close();
+    await iTvWs.close();
+    console.log('  [PASS] 4I.5. Audio RTP stats (OPUS + packets/bytes), 5 diagnostic states & video-only guidance verified');
+
+    console.log('\nAll Stage 3 (14) + Stage 4A (10) + Stage 4B (10) + Stage 4C (4) + Stage 4D (3) + Stage 4E (4) + Stage 4F (4) + Stage 4G (5) + Stage 4H (6) + Stage 4I (5) + Production Hardening tests passed!');
   } finally {
     await instance.close();
   }

@@ -1,5 +1,7 @@
 import type { CastoraEnvelope, CastoraPlatform, CastoraVideoCodec } from '../types/protocol';
 import type {
+  AudioCaptureStatus,
+  AudioPlaybackStatus,
   CapturePreferences,
   NetworkPreferences,
   PeerConnectionRecoveryInfo,
@@ -12,6 +14,7 @@ import {
   startScreenCapture,
   type CapturedScreenSession,
 } from './screenCaptureService';
+import { evaluateAudioDiagnosticState } from './streamingDiagnosticsService';
 import { createEmptyTelemetry } from './streamStatsService';
 import { resolveQualityTarget } from './videoQualityService';
 import { CastoraWebRtcPeer } from './webrtcPeerService';
@@ -45,6 +48,8 @@ export interface IncomingScreenEntry {
   telemetry: StreamTelemetrySnapshot;
   renderedWidth: number | null;
   renderedHeight: number | null;
+  audioPlaybackStatus?: AudioPlaybackStatus | null;
+  autoplayBlocked?: boolean;
   startedAt: string;
   lastActivityAt: number;
 }
@@ -77,6 +82,8 @@ export interface WebRtcSessionSnapshot {
     height: number | null;
     fps: number | null;
     hasAudio: boolean;
+    audioCaptureStatus?: AudioCaptureStatus;
+    audioNotice?: string | null;
   } | null;
   remoteStream: MediaStream | null;
   activeSessionId: string | null;
@@ -226,6 +233,41 @@ export class WebRtcSignalingBridge {
     this.emit();
   }
 
+  updateIncomingAudioPlaybackState(
+    senderDeviceId: string,
+    state: { playbackStatus: AudioPlaybackStatus; autoplayBlocked: boolean }
+  ): void {
+    const entry = this.incomingMap.get(senderDeviceId);
+    if (!entry) return;
+    if (
+      entry.audioPlaybackStatus === state.playbackStatus &&
+      Boolean(entry.autoplayBlocked) === state.autoplayBlocked
+    ) {
+      return;
+    }
+    entry.audioPlaybackStatus = state.playbackStatus;
+    entry.autoplayBlocked = state.autoplayBlocked;
+    const hasIncomingAudioTrack = Boolean(entry.stream?.getAudioTracks().length);
+    const audioDiagnosticStatus = evaluateAudioDiagnosticState({
+      isSharingLocal: false,
+      hasIncomingStream: Boolean(entry.stream),
+      connectionState: entry.phase,
+      hasIncomingAudioTrack,
+      audioReceiverTrackStatus: entry.telemetry.audioReceiverTrackStatus,
+      audioPacketsReceived: entry.telemetry.audioPacketsReceived,
+      audioPlaybackStatus: state.playbackStatus,
+      autoplayBlocked: state.autoplayBlocked,
+    });
+    entry.telemetry = {
+      ...entry.telemetry,
+      audioPlaybackStatus: state.playbackStatus,
+      autoplayBlocked: state.autoplayBlocked,
+      audioDiagnosticStatus,
+    };
+    this.incomingMap.set(senderDeviceId, entry);
+    this.emit();
+  }
+
   getEffectivePreferencesForPeer(peerDeviceId: string): CapturePreferences {
     const override = this.peerQualityOverrides.get(peerDeviceId);
     if (!override) return this.preferences;
@@ -304,6 +346,8 @@ export class WebRtcSignalingBridge {
     const resolutionOrFpsChanged =
       previousPrefs.resolution !== nextPreferences.resolution ||
       previousPrefs.targetFps !== nextPreferences.targetFps;
+    const codecChanged = previousPrefs.codecPreference !== nextPreferences.codecPreference;
+    const audioChanged = previousPrefs.includeAudio !== nextPreferences.includeAudio;
 
     let notice: string | null = null;
 
@@ -345,8 +389,23 @@ export class WebRtcSignalingBridge {
       }
     }
 
+    if (
+      this.captureSession &&
+      audioChanged &&
+      nextPreferences.includeAudio &&
+      !this.captureSession.hasAudio
+    ) {
+      const audioMsg =
+        'Audio is enabled, but the active screen capture only contains video. Click Change Screen and enable audio in the browser picker to include audio.';
+      notice = notice ? `${notice} ${audioMsg}` : audioMsg;
+      this.statusDetail = audioMsg;
+      this.callbacks.onLogEvent('webrtc', 'Screen re-share needed to add audio track', audioMsg);
+    }
+
     this.preferences = nextPreferences;
     const activeCount = Math.max(1, this.outboundMap.size);
+    const signaling = this.getSignalingClient();
+    const roomId = this.activeRoom?.roomId ?? null;
 
     for (const peerId of Array.from(this.outboundMap.keys())) {
       const peer = this.peers.get(peerId);
@@ -358,6 +417,7 @@ export class WebRtcSignalingBridge {
           width: this.captureSession?.actualWidth,
           height: this.captureSession?.actualHeight,
         });
+        const codecDiag = peer.getCodecDiagnostics();
         if (outEntry) {
           const abrState = peer.getAdaptiveState();
           outEntry.telemetry = {
@@ -375,14 +435,63 @@ export class WebRtcSignalingBridge {
               abrState?.lastAdjustmentAction ??
               (resolved.adaptiveEnabled ? 'none' : 'manual-locked'),
             supportedAdaptiveControls: peer.getSupportedAdaptiveControls(),
+            selectedVideoCodec: effectivePrefs.codecPreference,
+            negotiatedVideoCodec: codecDiag.negotiatedVideoCodec,
+            negotiatedVideoProfile: codecDiag.negotiatedVideoProfile,
+            codecFallbackReason: codecDiag.codecFallbackReason,
             resolution:
               this.captureSession?.actualWidth && this.captureSession?.actualHeight
                 ? `${this.captureSession.actualWidth}×${this.captureSession.actualHeight}`
                 : outEntry.telemetry.resolution,
           };
           this.outboundMap.set(peerId, outEntry);
+
+          if (codecChanged && signaling && roomId) {
+            const width = Math.max(
+              320,
+              Math.min(3840, Math.round(this.captureSession?.actualWidth ?? resolved.targetWidth))
+            );
+            const height = Math.max(
+              240,
+              Math.min(2160, Math.round(this.captureSession?.actualHeight ?? resolved.targetHeight))
+            );
+            const fps = Math.max(
+              1,
+              Math.min(120, Math.round(this.captureSession?.actualFrameRate ?? effectivePrefs.targetFps))
+            );
+            const announcedCodec: CastoraVideoCodec =
+              effectivePrefs.codecPreference === 'H264'
+                ? 'H264'
+                : effectivePrefs.codecPreference === 'VP9'
+                  ? 'VP9'
+                  : effectivePrefs.codecPreference === 'AV1'
+                    ? 'AV1'
+                    : 'VP8';
+            signaling.sendEnvelope({
+              messageType: 'stream_start',
+              senderDeviceId: this.deviceId,
+              receiverDeviceId: peerId,
+              roomId,
+              payload: {
+                sessionId: outEntry.sessionId,
+                streamId: outEntry.streamId,
+                width,
+                height,
+                fps,
+                codec: announcedCodec,
+              },
+            });
+          }
         }
       }
+    }
+
+    if (codecChanged && this.outboundMap.size > 0) {
+      this.callbacks.onLogEvent(
+        'webrtc',
+        'Updated video codec preference',
+        `Renegotiating active outbound stream(s) for ${nextPreferences.codecPreference} while keeping audio intact.`
+      );
     }
 
     this.emit();
@@ -465,12 +574,33 @@ export class WebRtcSignalingBridge {
       height: liveCapHeight,
     });
 
+    const localCaptureAudioStatus: AudioCaptureStatus = this.captureSession
+      ? (this.captureSession.audioCaptureStatus ?? (this.captureSession.hasAudio ? 'captured' : 'unknown'))
+      : this.preferences.includeAudio
+        ? 'unknown'
+        : 'not-requested';
+
     const outboundTelemetry: StreamTelemetrySnapshot = primaryOutbound
       ? {
           ...primaryOutbound.telemetry,
           captureWidth: primaryOutbound.telemetry.captureWidth ?? liveCapWidth,
           captureHeight: primaryOutbound.telemetry.captureHeight ?? liveCapHeight,
           captureFps: primaryOutbound.telemetry.captureFps ?? liveCapFps,
+          selectedVideoCodec:
+            primaryOutbound.telemetry.selectedVideoCodec ?? this.preferences.codecPreference,
+          audioCaptureStatus:
+            primaryOutbound.telemetry.audioCaptureStatus ?? localCaptureAudioStatus,
+          audioDiagnosticStatus:
+            primaryOutbound.telemetry.audioDiagnosticStatus ??
+            evaluateAudioDiagnosticState({
+              isSharingLocal: Boolean(this.captureSession),
+              hasIncomingStream: false,
+              connectionState: primaryOutbound.phase,
+              localHasAudio: this.captureSession?.hasAudio ?? false,
+              audioCaptureStatus: localCaptureAudioStatus,
+              audioSenderTrackStatus: primaryOutbound.telemetry.audioSenderTrackStatus,
+              audioPacketsSent: primaryOutbound.telemetry.audioPacketsSent,
+            }),
         }
       : {
           ...createEmptyTelemetry(this.preferences.targetFps, this.captureSession ? phase : 'idle'),
@@ -493,6 +623,23 @@ export class WebRtcSignalingBridge {
           lastAdjustmentReason: resolvedGlobal.adaptiveEnabled
             ? null
             : 'Manual quality locked — automatic adaptation paused.',
+          selectedVideoCodec: this.preferences.codecPreference,
+          audioCaptureStatus: this.captureSession ? localCaptureAudioStatus : null,
+          audioSenderTrackStatus: this.captureSession
+            ? this.captureSession.hasAudio
+              ? 'live'
+              : 'none'
+            : null,
+          audioDiagnosticStatus: this.captureSession
+            ? evaluateAudioDiagnosticState({
+                isSharingLocal: true,
+                hasIncomingStream: false,
+                connectionState: phase,
+                localHasAudio: this.captureSession.hasAudio,
+                audioCaptureStatus: localCaptureAudioStatus,
+                audioSenderTrackStatus: this.captureSession.hasAudio ? 'live' : 'none',
+              })
+            : null,
         };
 
     const inboundTelemetry: StreamTelemetrySnapshot = primaryInbound
@@ -500,6 +647,26 @@ export class WebRtcSignalingBridge {
           ...primaryInbound.telemetry,
           renderedWidth: primaryInbound.renderedWidth,
           renderedHeight: primaryInbound.renderedHeight,
+          audioPlaybackStatus:
+            primaryInbound.audioPlaybackStatus ?? primaryInbound.telemetry.audioPlaybackStatus ?? null,
+          autoplayBlocked:
+            primaryInbound.autoplayBlocked ?? primaryInbound.telemetry.autoplayBlocked ?? false,
+          audioDiagnosticStatus:
+            primaryInbound.telemetry.audioDiagnosticStatus ??
+            evaluateAudioDiagnosticState({
+              isSharingLocal: false,
+              hasIncomingStream: Boolean(primaryInbound.stream),
+              connectionState: primaryInbound.phase,
+              hasIncomingAudioTrack: Boolean(primaryInbound.stream?.getAudioTracks().length),
+              audioReceiverTrackStatus: primaryInbound.telemetry.audioReceiverTrackStatus,
+              audioPacketsReceived: primaryInbound.telemetry.audioPacketsReceived,
+              audioPlaybackStatus:
+                primaryInbound.audioPlaybackStatus ??
+                primaryInbound.telemetry.audioPlaybackStatus ??
+                null,
+              autoplayBlocked:
+                primaryInbound.autoplayBlocked ?? primaryInbound.telemetry.autoplayBlocked ?? false,
+            }),
         }
       : createEmptyTelemetry(this.preferences.targetFps, 'idle');
 
@@ -520,6 +687,8 @@ export class WebRtcSignalingBridge {
             height: liveCapHeight,
             fps: liveCapFps,
             hasAudio: this.captureSession.hasAudio,
+            audioCaptureStatus: localCaptureAudioStatus,
+            audioNotice: this.captureSession.audioNotice ?? null,
           }
         : null,
       remoteStream: primaryInbound?.stream ?? null,
@@ -704,20 +873,101 @@ export class WebRtcSignalingBridge {
         onConnectionFailure: (reason) => {
           this.schedulePeerRecovery(peerDeviceId, reason);
         },
-        onStats: (dualStats) => {
-          const now = Date.now();
+        onCodecFallback: (nextCodec, reason) => {
+          this.statusDetail = reason;
+          this.callbacks.onLogEvent(
+            'webrtc',
+            `Video codec fell back to ${nextCodec} (${peerLabel})`,
+            reason
+          );
           const outEntry = this.outboundMap.get(peerDeviceId);
           if (outEntry) {
-            outEntry.telemetry = dualStats.outbound;
+            outEntry.statusDetail = reason;
+            outEntry.telemetry = {
+              ...outEntry.telemetry,
+              negotiatedVideoCodec: nextCodec,
+              codecMimeType: `video/${nextCodec}`,
+              codecFallbackReason: reason,
+            };
+            this.outboundMap.set(peerDeviceId, outEntry);
+            const signaling = this.getSignalingClient();
+            const roomId = this.activeRoom?.roomId;
+            if (signaling && roomId) {
+              const resolved = resolveQualityTarget(this.getEffectivePreferencesForPeer(peerDeviceId), {
+                width: this.captureSession?.actualWidth,
+                height: this.captureSession?.actualHeight,
+              });
+              signaling.sendEnvelope({
+                messageType: 'stream_start',
+                senderDeviceId: this.deviceId,
+                receiverDeviceId: peerDeviceId,
+                roomId,
+                payload: {
+                  sessionId: outEntry.sessionId,
+                  streamId: outEntry.streamId,
+                  width: Math.max(
+                    320,
+                    Math.min(3840, Math.round(this.captureSession?.actualWidth ?? resolved.targetWidth))
+                  ),
+                  height: Math.max(
+                    240,
+                    Math.min(2160, Math.round(this.captureSession?.actualHeight ?? resolved.targetHeight))
+                  ),
+                  fps: Math.max(
+                    1,
+                    Math.min(120, Math.round(this.captureSession?.actualFrameRate ?? resolved.targetFps))
+                  ),
+                  codec: nextCodec,
+                },
+              });
+            }
+          }
+          this.emit();
+        },
+        onStats: (dualStats) => {
+          const now = Date.now();
+          const captureAudioStatus = this.captureSession?.audioCaptureStatus ?? null;
+          const outEntry = this.outboundMap.get(peerDeviceId);
+          if (outEntry) {
+            const outAudioStatus = evaluateAudioDiagnosticState({
+              isSharingLocal: Boolean(this.captureSession),
+              hasIncomingStream: false,
+              connectionState: outEntry.phase,
+              localHasAudio: this.captureSession?.hasAudio ?? false,
+              audioCaptureStatus: captureAudioStatus,
+              audioSenderTrackStatus: dualStats.outbound.audioSenderTrackStatus,
+              audioPacketsSent: dualStats.outbound.audioPacketsSent,
+            });
+            outEntry.telemetry = {
+              ...dualStats.outbound,
+              audioCaptureStatus: captureAudioStatus,
+              audioDiagnosticStatus: outAudioStatus,
+            };
             outEntry.lastActivityAt = now;
             this.outboundMap.set(peerDeviceId, outEntry);
           }
           const inEntry = this.incomingMap.get(peerDeviceId);
           if (inEntry) {
+            const playbackStatus = inEntry.audioPlaybackStatus ?? null;
+            const blocked = Boolean(inEntry.autoplayBlocked);
+            const hasIncomingAudio = Boolean(inEntry.stream?.getAudioTracks().length);
+            const inAudioStatus = evaluateAudioDiagnosticState({
+              isSharingLocal: false,
+              hasIncomingStream: Boolean(inEntry.stream),
+              connectionState: inEntry.phase,
+              hasIncomingAudioTrack: hasIncomingAudio,
+              audioReceiverTrackStatus: dualStats.inbound.audioReceiverTrackStatus,
+              audioPacketsReceived: dualStats.inbound.audioPacketsReceived,
+              audioPlaybackStatus: playbackStatus,
+              autoplayBlocked: blocked,
+            });
             inEntry.telemetry = {
               ...dualStats.inbound,
               renderedWidth: inEntry.renderedWidth,
               renderedHeight: inEntry.renderedHeight,
+              audioPlaybackStatus: playbackStatus,
+              autoplayBlocked: blocked,
+              audioDiagnosticStatus: inAudioStatus,
             };
             inEntry.lastActivityAt = now;
             this.incomingMap.set(peerDeviceId, inEntry);
@@ -1295,6 +1545,17 @@ export class WebRtcSignalingBridge {
           );
           this.stopSharing('capture_revoked');
         },
+        onAudioTrackStateChange: (status, notice) => {
+          if (this.captureSession === session) {
+            this.captureSession.audioCaptureStatus = status;
+            this.captureSession.audioNotice = notice;
+            if (notice) {
+              this.statusDetail = notice;
+              this.callbacks.onLogEvent('webrtc', 'Screen audio track state updated', notice);
+            }
+            this.emit();
+          }
+        },
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to start screen capture';
@@ -1333,10 +1594,17 @@ export class WebRtcSignalingBridge {
       this.callbacks.onLogEvent('webrtc', 'Actual capture resolution reported', capNotice);
     }
 
+    if (this.preferences.includeAudio && !session.hasAudio && session.audioNotice) {
+      this.callbacks.onLogEvent('webrtc', 'Screen shared without audio track', session.audioNotice);
+      if (!this.statusDetail) {
+        this.statusDetail = session.audioNotice;
+      }
+    }
+
     this.callbacks.onLogEvent(
       'webrtc',
       'Local screen capture started',
-      `Track active${resLabel ? ` (${resLabel})` : ''}${session.actualFrameRate ? ` @ ${Math.round(session.actualFrameRate)} FPS` : ''}.`
+      `Track active${resLabel ? ` (${resLabel})` : ''}${session.actualFrameRate ? ` @ ${Math.round(session.actualFrameRate)} FPS` : ''} · Audio: ${session.hasAudio ? 'captured' : session.audioCaptureStatus}.`
     );
 
     const targets = this.resolvePublishTargets(targetSelection);
@@ -1451,6 +1719,17 @@ export class WebRtcSignalingBridge {
           this.captureSession.actualWidth && this.captureSession.actualHeight
             ? `${this.captureSession.actualWidth}×${this.captureSession.actualHeight}`
             : null,
+        selectedVideoCodec: effectivePrefs.codecPreference,
+        audioCaptureStatus: this.captureSession.audioCaptureStatus,
+        audioSenderTrackStatus: this.captureSession.hasAudio ? 'live' : 'none',
+        audioDiagnosticStatus: evaluateAudioDiagnosticState({
+          isSharingLocal: true,
+          hasIncomingStream: false,
+          connectionState: 'connecting',
+          localHasAudio: this.captureSession.hasAudio,
+          audioCaptureStatus: this.captureSession.audioCaptureStatus,
+          audioSenderTrackStatus: this.captureSession.hasAudio ? 'live' : 'none',
+        }),
       },
     });
     this.statusDetail = `Sharing screen to ${meta.deviceName}...`;

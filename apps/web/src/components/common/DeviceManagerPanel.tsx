@@ -387,7 +387,7 @@ export function DeviceManagerPanel({
         serverPublishedStreams.some((s) => s.targetDeviceId === deviceId);
       const isOutgoingStreaming = Boolean(outbound);
       const hasIncomingAudioTrack = Boolean(incoming?.stream?.getAudioTracks().length);
-      const incomingMuted = mutedByPeerId[params.id] ?? true;
+      const incomingMuted = mutedByPeerId[params.id] ?? false;
 
       const resolution =
         incoming?.telemetry.resolution ??

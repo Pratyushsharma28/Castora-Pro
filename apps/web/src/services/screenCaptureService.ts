@@ -1,4 +1,4 @@
-import type { CapturePreferences } from '../types/studio';
+import type { AudioCaptureStatus, CapturePreferences } from '../types/studio';
 
 export type ScreenCaptureErrorCode =
   | 'SECURE_CONTEXT_REQUIRED'
@@ -23,7 +23,11 @@ export class ScreenCaptureError extends Error {
 export interface CapturedScreenSession {
   stream: MediaStream;
   videoTrack: MediaStreamTrack;
+  audioTrack?: MediaStreamTrack | null;
   hasAudio: boolean;
+  audioRequested?: boolean;
+  audioCaptureStatus?: AudioCaptureStatus;
+  audioNotice?: string | null;
   actualWidth: number | null;
   actualHeight: number | null;
   actualFrameRate: number | null;
@@ -191,6 +195,7 @@ export function stopMediaStreamTracks(stream: MediaStream | null): void {
 export async function startScreenCapture(params: {
   preferences: CapturePreferences;
   onNativeEnded: () => void;
+  onAudioTrackStateChange?: (status: AudioCaptureStatus, notice: string | null) => void;
   env?: {
     isSecureContext?: boolean;
     mediaDevices?: Pick<MediaDevices, 'getDisplayMedia'> | undefined;
@@ -245,6 +250,23 @@ export async function startScreenCapture(params: {
     }
   }
 
+  const audioTracks = stream.getAudioTracks();
+  const audioTrack = audioTracks.find((t) => t.readyState !== 'ended') ?? audioTracks[0] ?? null;
+  const hasAudio = Boolean(audioTrack && audioTrack.readyState !== 'ended');
+  const audioRequested = Boolean(params.preferences.includeAudio);
+
+  let audioCaptureStatus: AudioCaptureStatus;
+  let audioNotice: string | null = null;
+  if (hasAudio) {
+    audioCaptureStatus = 'captured';
+  } else if (audioRequested) {
+    audioCaptureStatus = 'not-captured-no-source';
+    audioNotice =
+      'Audio was requested, but the browser returned video only. On macOS, select a Browser Tab with "Share tab audio" or Entire Screen with "Share system audio".';
+  } else {
+    audioCaptureStatus = 'not-requested';
+  }
+
   const settings = videoTrack.getSettings();
   let intentionallyStopped = false;
 
@@ -254,22 +276,64 @@ export async function startScreenCapture(params: {
     params.onNativeEnded();
   };
 
+  const handleAudioEnded = () => {
+    if (intentionallyStopped) return;
+    session.hasAudio = false;
+    session.audioCaptureStatus = 'ended';
+    session.audioNotice = 'Captured audio track ended while screen video remained active.';
+    params.onAudioTrackStateChange?.('ended', session.audioNotice);
+  };
+
+  const handleAudioMuted = () => {
+    if (intentionallyStopped) return;
+    params.onAudioTrackStateChange?.(
+      session.audioCaptureStatus ?? 'captured',
+      'Captured audio track is temporarily muted.'
+    );
+  };
+
+  const handleAudioUnmuted = () => {
+    if (intentionallyStopped) return;
+    if (audioTrack && audioTrack.readyState === 'live') {
+      session.hasAudio = true;
+      session.audioCaptureStatus = 'captured';
+      session.audioNotice = null;
+      params.onAudioTrackStateChange?.('captured', null);
+    }
+  };
+
   videoTrack.addEventListener('ended', handleTrackEnded);
+  if (audioTrack && typeof audioTrack.addEventListener === 'function') {
+    audioTrack.addEventListener('ended', handleAudioEnded);
+    audioTrack.addEventListener('mute', handleAudioMuted);
+    audioTrack.addEventListener('unmute', handleAudioUnmuted);
+  }
 
   const stop = () => {
     if (intentionallyStopped) return;
     intentionallyStopped = true;
     videoTrack.removeEventListener('ended', handleTrackEnded);
+    if (audioTrack && typeof audioTrack.removeEventListener === 'function') {
+      audioTrack.removeEventListener('ended', handleAudioEnded);
+      audioTrack.removeEventListener('mute', handleAudioMuted);
+      audioTrack.removeEventListener('unmute', handleAudioUnmuted);
+    }
     stopMediaStreamTracks(stream);
   };
 
-  return {
+  const session: CapturedScreenSession = {
     stream,
     videoTrack,
-    hasAudio: stream.getAudioTracks().length > 0,
+    audioTrack,
+    hasAudio,
+    audioRequested,
+    audioCaptureStatus,
+    audioNotice,
     actualWidth: typeof settings.width === 'number' ? settings.width : null,
     actualHeight: typeof settings.height === 'number' ? settings.height : null,
     actualFrameRate: typeof settings.frameRate === 'number' ? settings.frameRate : null,
     stop,
   };
+
+  return session;
 }

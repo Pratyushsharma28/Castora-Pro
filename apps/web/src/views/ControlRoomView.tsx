@@ -21,6 +21,7 @@ import type {
 } from '../services/backendClient';
 import type { WebRtcSessionSnapshot } from '../services/webrtcSignalingBridge';
 import type {
+  AudioPlaybackStatus,
   BrowserCapabilityReport,
   CapturePreferences,
   ConnectedReceiverSlot,
@@ -60,6 +61,10 @@ interface ControlRoomViewProps {
     senderDeviceId: string,
     width: number | null,
     height: number | null
+  ) => void;
+  onIncomingAudioPlayback?: (
+    senderDeviceId: string,
+    state: { playbackStatus: AudioPlaybackStatus; autoplayBlocked: boolean }
   ) => void;
 }
 
@@ -109,6 +114,7 @@ export function ControlRoomView({
   onToggleMutePeer,
   onNavigate,
   onIncomingVideoDimensions,
+  onIncomingAudioPlayback,
 }: ControlRoomViewProps) {
   const [shareBusy, setShareBusy] = useState(false);
   const [roomBusy, setRoomBusy] = useState(false);
@@ -559,6 +565,7 @@ export function ControlRoomView({
               onToggleMutePeer={onToggleMutePeer}
               onRetryPeer={onRetryPeer}
               onIncomingVideoDimensions={onIncomingVideoDimensions}
+              onIncomingAudioPlayback={onIncomingAudioPlayback}
             />
           )}
 

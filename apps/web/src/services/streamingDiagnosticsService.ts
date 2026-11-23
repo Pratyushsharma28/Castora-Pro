@@ -1,5 +1,10 @@
 import type {
+  AudioCaptureStatus,
+  AudioDiagnosticState,
+  AudioPlaybackStatus,
+  AudioTrackStatus,
   CapturePreferences,
+  CodecPreference,
   ConnectionQualityLevel,
   PeerConnectionRecoveryInfo,
   QualityVerificationStatus,
@@ -26,12 +31,15 @@ export interface StageDiagnosticsSummary {
   requestedPresetLabel: string;
   requestedDimensionsLabel: string;
   requestedFps: number;
+  selectedCodec: CodecPreference;
   connectionState: WebRtcConnectionPhase;
   capture: {
     width: number | null;
     height: number | null;
     fps: number | null;
     hasAudio: boolean;
+    audioCaptureStatus: AudioCaptureStatus;
+    audioNotice: string | null;
     verification: QualityVerificationResult;
   };
   outgoing: {
@@ -43,6 +51,14 @@ export interface StageDiagnosticsSummary {
     framesSent: number | null;
     framesEncoded: number | null;
     codec: string | null;
+    selectedCodec: CodecPreference | null;
+    negotiatedCodec: string | null;
+    negotiatedProfile: string | null;
+    fallbackReason: string | null;
+    audioCodec: string | null;
+    audioSenderTrackStatus: AudioTrackStatus | null;
+    audioPacketsSent: number | null;
+    audioBytesSent: number | null;
     verification: QualityVerificationResult;
   };
   incoming: {
@@ -54,9 +70,99 @@ export interface StageDiagnosticsSummary {
     bitrateKbps: number | null;
     framesDecoded: number | null;
     codec: string | null;
+    negotiatedCodec: string | null;
+    negotiatedProfile: string | null;
+    fallbackReason: string | null;
+    audioCodec: string | null;
+    audioReceiverTrackStatus: AudioTrackStatus | null;
+    audioPacketsReceived: number | null;
+    audioBytesReceived: number | null;
+    audioPlaybackStatus: AudioPlaybackStatus | null;
+    autoplayBlocked: boolean;
     verification: QualityVerificationResult;
   };
+  audioDiagnosticStatus: AudioDiagnosticState;
   overallVerification: QualityVerificationResult;
+}
+
+export function evaluateAudioDiagnosticState(params: {
+  isSharingLocal: boolean;
+  hasIncomingStream: boolean;
+  connectionState: WebRtcConnectionPhase;
+  localHasAudio?: boolean | null;
+  audioCaptureStatus?: AudioCaptureStatus | null;
+  audioSenderTrackStatus?: AudioTrackStatus | null;
+  audioPacketsSent?: number | null;
+  hasIncomingAudioTrack?: boolean | null;
+  audioReceiverTrackStatus?: AudioTrackStatus | null;
+  audioPacketsReceived?: number | null;
+  audioPlaybackStatus?: AudioPlaybackStatus | null;
+  autoplayBlocked?: boolean | null;
+}): AudioDiagnosticState {
+  if (params.hasIncomingStream) {
+    if (
+      params.autoplayBlocked === true ||
+      params.audioPlaybackStatus === 'autoplay-blocked' ||
+      params.audioPlaybackStatus === 'muted-by-user'
+    ) {
+      return 'Audio received but playback blocked';
+    }
+
+    const receiverHasTrack =
+      params.audioReceiverTrackStatus === 'live' ||
+      params.audioReceiverTrackStatus === 'muted' ||
+      params.hasIncomingAudioTrack === true;
+    const receivedPackets = params.audioPacketsReceived ?? null;
+
+    if (!receiverHasTrack) {
+      if (
+        params.audioCaptureStatus === 'not-requested' ||
+        params.audioCaptureStatus === 'not-captured-no-source'
+      ) {
+        return 'Audio not captured';
+      }
+      if (receivedPackets !== null && receivedPackets > 0) {
+        return 'Audio received but playback blocked';
+      }
+      return 'Audio not received';
+    }
+
+    if (receivedPackets === 0 && params.connectionState === 'connected') {
+      return 'Audio not received';
+    }
+
+    if (
+      params.audioPlaybackStatus === 'playing' ||
+      params.audioReceiverTrackStatus === 'live'
+    ) {
+      return 'Audio successfully playing';
+    }
+
+    return 'Audio received but playback blocked';
+  }
+
+  if (params.isSharingLocal) {
+    if (
+      !params.localHasAudio ||
+      params.audioCaptureStatus === 'not-requested' ||
+      params.audioCaptureStatus === 'not-captured-no-source' ||
+      params.audioCaptureStatus === 'ended'
+    ) {
+      return 'Audio not captured';
+    }
+
+    if (
+      params.audioSenderTrackStatus === 'none' ||
+      params.audioSenderTrackStatus === 'ended' ||
+      (params.connectionState === 'connected' && params.audioPacketsSent === 0)
+    ) {
+      return 'Audio not transmitted';
+    }
+
+    return 'Audio successfully playing';
+  }
+
+  return 'Audio not captured';
 }
 
 function classifyTier(
@@ -249,6 +355,8 @@ export function buildStageDiagnosticsSummary(params: {
     height: number | null;
     fps: number | null;
     hasAudio: boolean;
+    audioCaptureStatus?: AudioCaptureStatus;
+    audioNotice?: string | null;
   } | null;
   outboundTelemetry: StreamTelemetrySnapshot;
   primaryIncoming?: {
@@ -257,6 +365,9 @@ export function buildStageDiagnosticsSummary(params: {
     renderedWidth: number | null;
     renderedHeight: number | null;
     phase: WebRtcConnectionPhase;
+    hasAudioTrack?: boolean;
+    autoplayBlocked?: boolean;
+    audioPlaybackStatus?: AudioPlaybackStatus | null;
   } | null;
 }): StageDiagnosticsSummary {
   const presetSpec = VIDEO_QUALITY_PRESETS[params.preferences.resolution];
@@ -333,16 +444,47 @@ export function buildStageDiagnosticsSummary(params: {
     overallVerification = outgoingVerification;
   }
 
+  const audioCaptureStatus: AudioCaptureStatus =
+    params.localCaptureMeta?.audioCaptureStatus ??
+    params.outboundTelemetry.audioCaptureStatus ??
+    (params.isSharingLocal
+      ? params.localCaptureMeta?.hasAudio
+        ? 'captured'
+        : params.preferences.includeAudio
+          ? 'not-captured-no-source'
+          : 'not-requested'
+      : 'unknown');
+
+  const audioDiagnosticStatus = evaluateAudioDiagnosticState({
+    isSharingLocal: params.isSharingLocal,
+    hasIncomingStream: Boolean(params.primaryIncoming),
+    connectionState: params.primaryIncoming?.phase ?? params.connectionState,
+    localHasAudio: params.localCaptureMeta?.hasAudio ?? false,
+    audioCaptureStatus,
+    audioSenderTrackStatus: params.outboundTelemetry.audioSenderTrackStatus ?? null,
+    audioPacketsSent: params.outboundTelemetry.audioPacketsSent ?? null,
+    hasIncomingAudioTrack: params.primaryIncoming?.hasAudioTrack ?? null,
+    audioReceiverTrackStatus: inTelemetry?.audioReceiverTrackStatus ?? null,
+    audioPacketsReceived: inTelemetry?.audioPacketsReceived ?? null,
+    audioPlaybackStatus:
+      params.primaryIncoming?.audioPlaybackStatus ?? inTelemetry?.audioPlaybackStatus ?? null,
+    autoplayBlocked:
+      params.primaryIncoming?.autoplayBlocked ?? inTelemetry?.autoplayBlocked ?? null,
+  });
+
   return {
     requestedPresetLabel,
     requestedDimensionsLabel: presetSpec.shortDetail,
     requestedFps: params.preferences.targetFps,
+    selectedCodec: params.outboundTelemetry.selectedVideoCodec ?? params.preferences.codecPreference,
     connectionState: params.connectionState,
     capture: {
       width: capWidth,
       height: capHeight,
       fps: capFps,
       hasAudio: Boolean(params.localCaptureMeta?.hasAudio),
+      audioCaptureStatus,
+      audioNotice: params.localCaptureMeta?.audioNotice ?? null,
       verification: captureVerification,
     },
     outgoing: {
@@ -353,7 +495,21 @@ export function buildStageDiagnosticsSummary(params: {
       targetBitrateKbps: params.outboundTelemetry.targetBitrateKbps ?? null,
       framesSent: params.outboundTelemetry.framesSent ?? null,
       framesEncoded: params.outboundTelemetry.framesEncoded ?? null,
-      codec: params.outboundTelemetry.codecMimeType ?? null,
+      codec:
+        params.outboundTelemetry.negotiatedVideoCodec ??
+        params.outboundTelemetry.codecMimeType ??
+        null,
+      selectedCodec: params.outboundTelemetry.selectedVideoCodec ?? params.preferences.codecPreference,
+      negotiatedCodec:
+        params.outboundTelemetry.negotiatedVideoCodec ??
+        params.outboundTelemetry.codecMimeType ??
+        null,
+      negotiatedProfile: params.outboundTelemetry.negotiatedVideoProfile ?? null,
+      fallbackReason: params.outboundTelemetry.codecFallbackReason ?? null,
+      audioCodec: params.outboundTelemetry.negotiatedAudioCodec ?? null,
+      audioSenderTrackStatus: params.outboundTelemetry.audioSenderTrackStatus ?? null,
+      audioPacketsSent: params.outboundTelemetry.audioPacketsSent ?? null,
+      audioBytesSent: params.outboundTelemetry.audioBytesSent ?? null,
       verification: outgoingVerification,
     },
     incoming: {
@@ -364,9 +520,25 @@ export function buildStageDiagnosticsSummary(params: {
       fps: decFps,
       bitrateKbps: inTelemetry?.bitrateKbps ?? null,
       framesDecoded: inTelemetry?.framesDecoded ?? null,
-      codec: inTelemetry?.codecMimeType ?? null,
+      codec: inTelemetry?.negotiatedVideoCodec ?? inTelemetry?.codecMimeType ?? null,
+      negotiatedCodec:
+        inTelemetry?.negotiatedVideoCodec ??
+        inTelemetry?.codecMimeType ??
+        null,
+      negotiatedProfile: inTelemetry?.negotiatedVideoProfile ?? null,
+      fallbackReason: inTelemetry?.codecFallbackReason ?? null,
+      audioCodec: inTelemetry?.negotiatedAudioCodec ?? null,
+      audioReceiverTrackStatus: inTelemetry?.audioReceiverTrackStatus ?? null,
+      audioPacketsReceived: inTelemetry?.audioPacketsReceived ?? null,
+      audioBytesReceived: inTelemetry?.audioBytesReceived ?? null,
+      audioPlaybackStatus:
+        params.primaryIncoming?.audioPlaybackStatus ?? inTelemetry?.audioPlaybackStatus ?? null,
+      autoplayBlocked: Boolean(
+        params.primaryIncoming?.autoplayBlocked ?? inTelemetry?.autoplayBlocked ?? false
+      ),
       verification: incomingVerification,
     },
+    audioDiagnosticStatus,
     overallVerification,
   };
 }

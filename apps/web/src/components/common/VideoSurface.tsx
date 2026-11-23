@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Maximize2, Minimize2, Monitor } from 'lucide-react';
+import { Maximize2, Minimize2, Monitor, Volume2 } from 'lucide-react';
+import type { AudioPlaybackStatus } from '../../types/studio';
 
 interface VideoSurfaceProps {
   slotLabel: string;
@@ -7,6 +8,7 @@ interface VideoSurfaceProps {
   subtitle?: string;
   stream: MediaStream | null;
   muted?: boolean;
+  autoplayBlocked?: boolean;
   standbyReason: string;
   statusBadge?: ReactNode;
   actions?: ReactNode;
@@ -15,6 +17,11 @@ interface VideoSurfaceProps {
   allowFullscreen?: boolean;
   large?: boolean;
   onVideoDimensionsChange?: (width: number | null, height: number | null) => void;
+  onAudioPlaybackChange?: (state: {
+    playbackStatus: AudioPlaybackStatus;
+    autoplayBlocked: boolean;
+  }) => void;
+  onActivateAudio?: () => void;
 }
 
 type FullscreenDocument = Document & {
@@ -64,6 +71,7 @@ export function VideoSurface({
   subtitle,
   stream,
   muted = true,
+  autoplayBlocked = false,
   standbyReason,
   statusBadge,
   actions,
@@ -72,16 +80,26 @@ export function VideoSurface({
   allowFullscreen = true,
   large = false,
   onVideoDimensionsChange,
+  onAudioPlaybackChange,
+  onActivateAudio,
 }: VideoSurfaceProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const videoViewportRef = useRef<HTMLDivElement | null>(null);
   const onVideoDimensionsChangeRef = useRef(onVideoDimensionsChange);
   onVideoDimensionsChangeRef.current = onVideoDimensionsChange;
+  const onAudioPlaybackChangeRef = useRef(onAudioPlaybackChange);
+  onAudioPlaybackChangeRef.current = onAudioPlaybackChange;
   const lastReportedDimsRef = useRef<{ width: number | null; height: number | null }>({
     width: null,
     height: null,
   });
+  const lastReportedAudioRef = useRef<{
+    playbackStatus: AudioPlaybackStatus | null;
+    autoplayBlocked: boolean;
+  }>({ playbackStatus: null, autoplayBlocked: false });
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [internalAutoplayBlocked, setInternalAutoplayBlocked] = useState(false);
+  const [hasAudioTracks, setHasAudioTracks] = useState(false);
 
   const emitVideoDimensions = useCallback((width: number | null, height: number | null) => {
     const last = lastReportedDimsRef.current;
@@ -89,6 +107,49 @@ export function VideoSurface({
     lastReportedDimsRef.current = { width, height };
     onVideoDimensionsChangeRef.current?.(width, height);
   }, []);
+
+  const emitAudioPlaybackState = useCallback(
+    (playbackStatus: AudioPlaybackStatus, blocked: boolean) => {
+      const last = lastReportedAudioRef.current;
+      if (last.playbackStatus === playbackStatus && last.autoplayBlocked === blocked) return;
+      lastReportedAudioRef.current = { playbackStatus, autoplayBlocked: blocked };
+      onAudioPlaybackChangeRef.current?.({ playbackStatus, autoplayBlocked: blocked });
+    },
+    []
+  );
+
+  const syncAudioState = useCallback(
+    (blockedOverride?: boolean) => {
+      const el = videoRef.current;
+      const audioCount = stream?.getAudioTracks?.().length ?? 0;
+      setHasAudioTracks(audioCount > 0);
+      if (!stream || !el) return;
+
+      const blocked = blockedOverride ?? internalAutoplayBlocked;
+      if (audioCount === 0) {
+        emitAudioPlaybackState('no-audio-track', false);
+        return;
+      }
+      if (blocked) {
+        emitAudioPlaybackState('autoplay-blocked', true);
+        return;
+      }
+      if (muted || el.muted) {
+        emitAudioPlaybackState('muted-by-user', false);
+        return;
+      }
+      if (el.paused) {
+        emitAudioPlaybackState('paused', false);
+        return;
+      }
+      if (el.readyState >= 2) {
+        emitAudioPlaybackState('playing', false);
+      } else {
+        emitAudioPlaybackState('waiting', false);
+      }
+    },
+    [emitAudioPlaybackState, internalAutoplayBlocked, muted, stream]
+  );
 
   const syncVideoDimensions = useCallback(() => {
     const el = videoRef.current;
@@ -103,25 +164,166 @@ export function VideoSurface({
     const el = videoRef.current;
     if (!el) {
       emitVideoDimensions(null, null);
+      setHasAudioTracks(false);
       return;
     }
+
+    let cancelled = false;
+    setInternalAutoplayBlocked(false);
+
     if (stream) {
+      const audioCount = stream.getAudioTracks?.().length ?? 0;
+      setHasAudioTracks(audioCount > 0);
       el.srcObject = stream;
-      void el.play().catch(() => {
-        // Autoplay policy may hold unmuted playback until user gesture
-      });
+      el.playsInline = true;
+      el.volume = 1;
+      el.muted = muted;
+
+      const attemptPlay = async () => {
+        try {
+          await el.play();
+          if (cancelled) return;
+          setInternalAutoplayBlocked(false);
+          if (audioCount > 0) {
+            emitAudioPlaybackState(muted || el.muted ? 'muted-by-user' : 'playing', false);
+          } else {
+            emitAudioPlaybackState('no-audio-track', false);
+          }
+        } catch {
+          if (cancelled) return;
+          if (!muted) {
+            setInternalAutoplayBlocked(true);
+            el.muted = true;
+            try {
+              await el.play();
+            } catch {
+              // Video play also rejected outside interaction gesture
+            }
+            if (!cancelled) {
+              emitAudioPlaybackState(
+                audioCount > 0 ? 'autoplay-blocked' : 'no-audio-track',
+                audioCount > 0
+              );
+            }
+          }
+        }
+      };
+
+      void attemptPlay();
       syncVideoDimensions();
+
+      const handleTrackChange = () => {
+        const nextCount = stream.getAudioTracks?.().length ?? 0;
+        setHasAudioTracks(nextCount > 0);
+        if (nextCount > 0 && !muted && el.paused) {
+          void attemptPlay();
+        } else {
+          syncAudioState();
+        }
+      };
+
+      const handleMediaEvent = () => {
+        syncAudioState();
+      };
+
+      stream.addEventListener?.('addtrack', handleTrackChange);
+      stream.addEventListener?.('removetrack', handleTrackChange);
+      el.addEventListener('playing', handleMediaEvent);
+      el.addEventListener('pause', handleMediaEvent);
+      el.addEventListener('waiting', handleMediaEvent);
+      el.addEventListener('volumechange', handleMediaEvent);
+      el.addEventListener('loadedmetadata', handleMediaEvent);
+
+      return () => {
+        cancelled = true;
+        stream.removeEventListener?.('addtrack', handleTrackChange);
+        stream.removeEventListener?.('removetrack', handleTrackChange);
+        el.removeEventListener('playing', handleMediaEvent);
+        el.removeEventListener('pause', handleMediaEvent);
+        el.removeEventListener('waiting', handleMediaEvent);
+        el.removeEventListener('volumechange', handleMediaEvent);
+        el.removeEventListener('loadedmetadata', handleMediaEvent);
+        el.srcObject = null;
+        emitVideoDimensions(null, null);
+      };
     } else {
       el.srcObject = null;
+      setHasAudioTracks(false);
       emitVideoDimensions(null, null);
     }
     return () => {
+      cancelled = true;
       if (el) {
         el.srcObject = null;
       }
       emitVideoDimensions(null, null);
     };
-  }, [emitVideoDimensions, stream, syncVideoDimensions]);
+  }, [emitAudioPlaybackState, emitVideoDimensions, stream, syncVideoDimensions]);
+
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el || !stream) return;
+    let cancelled = false;
+    el.volume = 1;
+
+    if (muted) {
+      el.muted = true;
+      setInternalAutoplayBlocked(false);
+      syncAudioState(false);
+      return;
+    }
+
+    el.muted = false;
+    void el
+      .play()
+      .then(() => {
+        if (cancelled) return;
+        setInternalAutoplayBlocked(false);
+        syncAudioState(false);
+      })
+      .catch(async () => {
+        if (cancelled) return;
+        const audioCount = stream.getAudioTracks?.().length ?? 0;
+        if (audioCount > 0) {
+          setInternalAutoplayBlocked(true);
+          el.muted = true;
+          try {
+            await el.play();
+          } catch {
+            // Ignore secondary fallback rejection
+          }
+          if (!cancelled) {
+            emitAudioPlaybackState('autoplay-blocked', true);
+          }
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [emitAudioPlaybackState, muted, stream, syncAudioState]);
+
+  const handleActivateAudio = useCallback(async () => {
+    const el = videoRef.current;
+    if (!el || !stream) return;
+    if (muted) {
+      onActivateAudio?.();
+    }
+    el.muted = false;
+    el.volume = 1;
+    try {
+      await el.play();
+      setInternalAutoplayBlocked(false);
+      emitAudioPlaybackState(
+        (stream.getAudioTracks?.().length ?? 0) > 0 ? 'playing' : 'no-audio-track',
+        false
+      );
+    } catch {
+      setInternalAutoplayBlocked(true);
+      el.muted = true;
+      emitAudioPlaybackState('autoplay-blocked', true);
+    }
+  }, [emitAudioPlaybackState, muted, onActivateAudio, stream]);
 
   const handleExitFullscreen = useCallback(async () => {
     const videoEl = videoRef.current as FullscreenVideoElement | null;
@@ -191,6 +393,24 @@ export function VideoSurface({
     const videoEl = videoRef.current as FullscreenVideoElement | null;
     if (!target) return;
 
+    // Clicking Fullscreen is a user gesture — also unlock blocked audio if caller wants unmuted playback
+    if (videoEl && !muted && internalAutoplayBlocked && stream) {
+      videoEl.muted = false;
+      videoEl.volume = 1;
+      void videoEl
+        .play()
+        .then(() => {
+          setInternalAutoplayBlocked(false);
+          emitAudioPlaybackState(
+            (stream.getAudioTracks?.().length ?? 0) > 0 ? 'playing' : 'no-audio-track',
+            false
+          );
+        })
+        .catch(() => {
+          videoEl.muted = true;
+        });
+    }
+
     const activeEl = getCurrentFullscreenElement();
 
     try {
@@ -219,7 +439,10 @@ export function VideoSurface({
     } catch {
       // Ignore fullscreen rejection if browser blocks outside direct gesture
     }
-  }, [handleExitFullscreen]);
+  }, [emitAudioPlaybackState, handleExitFullscreen, internalAutoplayBlocked, muted, stream]);
+
+  const effectiveAutoplayBlocked =
+    Boolean(stream) && hasAudioTracks && (autoplayBlocked || internalAutoplayBlocked);
 
   return (
     <div
@@ -288,20 +511,34 @@ export function VideoSurface({
         }
       >
         {stream ? (
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted={muted}
-            onLoadedMetadata={syncVideoDimensions}
-            onResize={syncVideoDimensions}
-            onDoubleClick={allowFullscreen ? () => void handleFullscreen() : undefined}
-            className={
-              isFullscreen
-                ? 'h-screen w-screen bg-black object-contain block m-0 p-0 rounded-none'
-                : 'absolute inset-0 h-full w-full bg-[#0F172A] object-contain'
-            }
-          />
+          <>
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted={muted || internalAutoplayBlocked}
+              onLoadedMetadata={syncVideoDimensions}
+              onResize={syncVideoDimensions}
+              onDoubleClick={allowFullscreen ? () => void handleFullscreen() : undefined}
+              className={
+                isFullscreen
+                  ? 'h-screen w-screen bg-black object-contain block m-0 p-0 rounded-none'
+                  : 'absolute inset-0 h-full w-full bg-[#0F172A] object-contain'
+              }
+            />
+            {effectiveAutoplayBlocked && !isFullscreen && (
+              <div className="pointer-events-none absolute inset-x-0 bottom-4 z-10 flex justify-center px-4">
+                <button
+                  type="button"
+                  onClick={() => void handleActivateAudio()}
+                  className="pointer-events-auto inline-flex min-h-[42px] items-center gap-2 rounded-xl border border-white/25 bg-[#172033]/90 px-4 py-2 text-xs font-semibold text-white shadow-lg backdrop-blur-sm transition hover:bg-[#2563EB] focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                >
+                  <Volume2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>Activate Audio</span>
+                </button>
+              </div>
+            )}
+          </>
         ) : (
           <div className="flex h-full w-full flex-col items-center justify-center px-6 py-8 text-center">
             <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#E2E8F0] bg-white text-[#64748B] shadow-xs">

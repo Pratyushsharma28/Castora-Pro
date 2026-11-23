@@ -46,6 +46,7 @@ import {
 import type { CastoraVideoCodec, DeviceCapabilities } from './types/protocol';
 import type {
   ActivityEvent,
+  AudioPlaybackStatus,
   BrowserCapabilityReport,
   CapturePreferences,
   ConnectedReceiverSlot,
@@ -217,7 +218,7 @@ export function App() {
     resolution: '1080p',
     targetFps: 60,
     codecPreference: 'H264',
-    includeAudio: false,
+    includeAudio: true,
     maxBitrateKbps: 10_000,
     adaptiveBitrate: true,
   });
@@ -1209,6 +1210,16 @@ export function App() {
     []
   );
 
+  const handleIncomingAudioPlayback = useCallback(
+    (
+      senderDeviceId: string,
+      state: { playbackStatus: AudioPlaybackStatus; autoplayBlocked: boolean }
+    ) => {
+      bridgeRef.current?.updateIncomingAudioPlaybackState(senderDeviceId, state);
+    },
+    []
+  );
+
   const handleRetryPeer = useCallback((peerDeviceId: string) => {
     if (!bridgeRef.current) return;
     void bridgeRef.current.retryPeerConnection(peerDeviceId);
@@ -1222,7 +1233,7 @@ export function App() {
   const handleToggleMutePeer = useCallback((peerDeviceId: string) => {
     setMutedSlots((prev) => ({
       ...prev,
-      [peerDeviceId]: !(prev[peerDeviceId] ?? true),
+      [peerDeviceId]: !(prev[peerDeviceId] ?? false),
     }));
   }, []);
 
@@ -1376,7 +1387,9 @@ export function App() {
         recovery: incomingFromHost?.recovery ?? outboundToHost?.recovery ?? null,
         stream: incomingFromHost?.stream ?? null,
         hasAudioTrack: Boolean(incomingFromHost?.stream?.getAudioTracks().length),
-        muted: mutedSlots[activeRoom.hostDeviceId] ?? true,
+        muted: mutedSlots[activeRoom.hostDeviceId] ?? false,
+        autoplayBlocked: incomingFromHost?.autoplayBlocked ?? false,
+        audioPlaybackStatus: incomingFromHost?.audioPlaybackStatus ?? null,
         telemetry:
           incomingFromHost?.telemetry ??
           outboundToHost?.telemetry ??
@@ -1401,7 +1414,9 @@ export function App() {
         recovery: incoming?.recovery ?? outbound?.recovery ?? null,
         stream: incoming?.stream ?? null,
         hasAudioTrack: Boolean(incoming?.stream?.getAudioTracks().length),
-        muted: mutedSlots[rx.deviceId] ?? true,
+        muted: mutedSlots[rx.deviceId] ?? false,
+        autoplayBlocked: incoming?.autoplayBlocked ?? false,
+        audioPlaybackStatus: incoming?.audioPlaybackStatus ?? null,
         telemetry:
           incoming?.telemetry ??
           outbound?.telemetry ??
@@ -1422,7 +1437,9 @@ export function App() {
     recovery: entry.recovery ?? null,
     stream: entry.stream,
     hasAudioTrack: Boolean(entry.stream?.getAudioTracks().length),
-    muted: mutedSlots[entry.senderDeviceId] ?? true,
+    muted: mutedSlots[entry.senderDeviceId] ?? false,
+    autoplayBlocked: entry.autoplayBlocked ?? false,
+    audioPlaybackStatus: entry.audioPlaybackStatus ?? null,
     telemetry: entry.telemetry,
   }));
 
@@ -1538,6 +1555,7 @@ export function App() {
             onToggleMutePeer={handleToggleMutePeer}
             onNavigate={setDestination}
             onIncomingVideoDimensions={handleIncomingVideoDimensions}
+            onIncomingAudioPlayback={handleIncomingAudioPlayback}
           />
         )}
 
@@ -1577,6 +1595,7 @@ export function App() {
             onReconnectBackend={handleReconnectBackend}
             onRetryPeer={handleRetryPeer}
             onViewStream={handleViewDeviceStream}
+            onIncomingAudioPlayback={handleIncomingAudioPlayback}
             lastSignalingActivityAt={lastSignalingActivityAt}
             onNavigate={setDestination}
             onLogEvent={logEvent}
@@ -1666,7 +1685,7 @@ export function App() {
             onClearFocusedDevice={() => setFocusedStreamDeviceId(null)}
             onToggleMute={(slotIndex) => {
               const targetId = multiViewSlots[slotIndex]?.receiverDeviceId ?? String(slotIndex);
-              setMutedSlots((prev) => ({ ...prev, [targetId]: !(prev[targetId] ?? true) }));
+              setMutedSlots((prev) => ({ ...prev, [targetId]: !(prev[targetId] ?? false) }));
             }}
             onDisconnectSlot={
               activeRoomRole === 'host'
@@ -1676,6 +1695,7 @@ export function App() {
                 : undefined
             }
             onIncomingVideoDimensions={handleIncomingVideoDimensions}
+            onIncomingAudioPlayback={handleIncomingAudioPlayback}
             onLogEvent={logEvent}
           />
         )}

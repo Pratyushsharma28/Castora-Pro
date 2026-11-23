@@ -164,8 +164,21 @@ export function probeBrowserCapabilities(): BrowserCapabilityReport {
       ? RTCRtpReceiver.getCapabilities('video')
       : null;
 
-  const senderCodecs = (senderCaps?.codecs ?? []).map((c) => c.mimeType);
-  const receiverCodecs = (receiverCaps?.codecs ?? []).map((c) => c.mimeType);
+  const senderCodecObjs = senderCaps?.codecs ?? [];
+  const receiverCodecObjs = receiverCaps?.codecs ?? [];
+  const senderCodecs = senderCodecObjs.map((c) => c.mimeType);
+  const receiverCodecs = receiverCodecObjs.map((c) => c.mimeType);
+  const h264Profiles = Array.from(
+    new Set(
+      [...senderCodecObjs, ...receiverCodecObjs]
+        .filter((c) => c.mimeType.toLowerCase() === 'video/h264' && c.sdpFmtpLine)
+        .map((c) => {
+          const m = c.sdpFmtpLine?.match(/profile-level-id=([0-9a-f]+)/i);
+          return m ? m[1].toLowerCase() : null;
+        })
+        .filter((p): p is string => Boolean(p))
+    )
+  );
   const uniqueCodecs = Array.from(
     new Set(
       [...senderCodecs, ...receiverCodecs]
@@ -185,6 +198,11 @@ export function probeBrowserCapabilities(): BrowserCapabilityReport {
     supportsRtcPeerConnection: typeof RTCPeerConnection === 'function',
     supportsVideoH264Encode: senderCodecs.some((m) => m.toLowerCase() === 'video/h264'),
     supportsVideoH264Decode: receiverCodecs.some((m) => m.toLowerCase() === 'video/h264'),
+    supportsVideoVp9Encode: senderCodecs.some((m) => m.toLowerCase() === 'video/vp9'),
+    supportsVideoVp9Decode: receiverCodecs.some((m) => m.toLowerCase() === 'video/vp9'),
+    supportsVideoAv1Encode: senderCodecs.some((m) => m.toLowerCase() === 'video/av1'),
+    supportsVideoAv1Decode: receiverCodecs.some((m) => m.toLowerCase() === 'video/av1'),
+    h264Profiles,
     detectedVideoCodecs: uniqueCodecs,
     supportsBarcodeDetector: 'BarcodeDetector' in window,
     supportsFullscreen: Boolean(
