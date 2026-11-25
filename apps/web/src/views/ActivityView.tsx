@@ -34,15 +34,20 @@ export function ActivityView({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           {embedded ? (
-            <h2 className="font-display text-base font-semibold text-[#172033]">
+            <h2 className="font-display text-base font-semibold text-[#141414]">
               Activity &amp; Diagnostics Log
             </h2>
           ) : (
-            <h1 className="font-display text-xl font-semibold tracking-tight text-[#172033]">
-              Activity Log
-            </h1>
+            <>
+              <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#797D82]">
+                06 · RUNTIME TELEMETRY
+              </div>
+              <h1 className="mt-0.5 font-display text-2xl font-bold tracking-[-0.025em] text-[#141414]">
+                Activity Log
+              </h1>
+            </>
           )}
-          <p className="text-xs text-[#64748B]">
+          <p className="text-xs text-[#5C6063]">
             Runtime browser checks, room signaling events, and WebRTC diagnostics.
           </p>
         </div>
@@ -51,7 +56,7 @@ export function ActivityView({
           <div
             role="group"
             aria-label="Filter Activity Events"
-            className="inline-flex flex-wrap rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] p-0.5"
+            className="inline-flex flex-wrap rounded-[10px] border border-[#D5D7DE] bg-[#EBEBEB] p-0.5"
           >
             {FILTER_OPTIONS.map((opt) => {
               const active = filter === opt.id;
@@ -62,8 +67,8 @@ export function ActivityView({
                   onClick={() => setFilter(opt.id)}
                   className={`min-h-[32px] rounded-lg px-2.5 text-xs font-medium transition-colors ${
                     active
-                      ? 'bg-white text-[#172033] shadow-xs'
-                      : 'text-[#64748B] hover:text-[#172033]'
+                      ? 'bg-[#141414] text-white'
+                      : 'text-[#5C6063] hover:text-[#141414]'
                   }`}
                 >
                   {opt.label}
@@ -76,7 +81,7 @@ export function ActivityView({
             type="button"
             onClick={onClearEvents}
             disabled={events.length === 0}
-            className="inline-flex min-h-[36px] items-center gap-1.5 rounded-[10px] border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#64748B] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-40"
+            className="inline-flex min-h-[36px] items-center gap-1.5 rounded-[10px] border border-[#D5D7DE] bg-white px-3 text-xs font-medium text-[#5C6063] transition-colors hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-40"
           >
             <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
             <span>Clear</span>
@@ -84,8 +89,8 @@ export function ActivityView({
         </div>
       </div>
 
-      <div className="overflow-hidden rounded-xl border border-[#E2E8F0] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-        <div className="hidden sm:grid grid-cols-12 border-b border-[#E2E8F0] bg-[#F8FAFC] px-4 py-2.5 text-xs font-medium text-[#64748B]">
+      <div className="castora-card overflow-hidden">
+        <div className="hidden sm:grid grid-cols-12 border-b border-[#D5D7DE] bg-[#FAFAFA] px-4 py-2.5 font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
           <span className="col-span-2">Time</span>
           <span className="col-span-2">Category</span>
           <span className="col-span-3">Event</span>
@@ -93,24 +98,24 @@ export function ActivityView({
         </div>
 
         {visibleEvents.length === 0 ? (
-          <div className="px-4 py-8 text-center text-xs text-[#64748B]">
+          <div className="px-4 py-8 text-center text-xs text-[#5C6063]">
             No activity events match the selected filter.
           </div>
         ) : (
-          <ul className="divide-y divide-[#E2E8F0]">
+          <ul className="divide-y divide-[#D5D7DE]">
             {visibleEvents.map((evt) => (
               <li
                 key={evt.id}
                 className="grid grid-cols-1 gap-1.5 px-4 py-3 text-xs sm:grid-cols-12 sm:items-start sm:gap-3"
               >
-                <span className="font-mono text-[#64748B] tabular-metrics sm:col-span-2">
+                <span className="font-mono text-[#5C6063] tabular-metrics sm:col-span-2">
                   {evt.timestamp}
                 </span>
-                <span className="font-medium capitalize text-[#2563EB] sm:col-span-2">
+                <span className="font-mono text-[11px] font-medium uppercase tracking-wider text-[#FF6041] sm:col-span-2">
                   {evt.category}
                 </span>
-                <span className="font-medium text-[#172033] sm:col-span-3">{evt.title}</span>
-                <span className="text-[#64748B] leading-relaxed sm:col-span-5">{evt.detail}</span>
+                <span className="font-medium text-[#141414] sm:col-span-3">{evt.title}</span>
+                <span className="text-[#5C6063] leading-relaxed sm:col-span-5">{evt.detail}</span>
               </li>
             ))}
           </ul>

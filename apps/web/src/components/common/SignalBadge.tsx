@@ -13,12 +13,12 @@ export function SignalBadge({ label, tone, pulse = false }: SignalBadgeProps) {
     tone === 'active'
       ? 'text-[#15803D]'
       : tone === 'signal'
-        ? 'text-[#2563EB]'
+        ? 'text-[#FF6041]'
         : tone === 'warn'
           ? 'text-[#B45309]'
           : tone === 'fault'
             ? 'text-[#DC2626]'
-            : 'text-[#64748B]';
+            : 'text-[#5C6063]';
 
   return (
     <span
@@ -36,7 +36,7 @@ export function SignalBadge({ label, tone, pulse = false }: SignalBadgeProps) {
       {tone === 'standby' && (
         <span
           aria-hidden="true"
-          className="inline-block h-2 w-2 rounded-full bg-[#CBD5E1]"
+          className="inline-block h-2 w-2 rounded-full bg-[#D5D7DE]"
         />
       )}
       <span>{label}</span>

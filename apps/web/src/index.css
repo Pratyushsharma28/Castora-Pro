@@ -1,19 +1,24 @@
 @import "tailwindcss";
 
 @theme {
-  --font-display: "Plus Jakarta Sans", "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-sans: "Inter", "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-display: "Figtree", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Figtree", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Fragment Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
 :root {
-  --castora-bg: #F5F7FB;
+  --castora-bg: #F2F2F2;
   --castora-surface: #FFFFFF;
-  --castora-bay: #F8FAFC;
-  --castora-line: #E2E8F0;
-  --castora-text: #172033;
-  --castora-muted: #64748B;
-  --castora-signal: #2563EB;
+  --castora-bay: #FAFAFA;
+  --castora-muted-surface: #EBEBEB;
+  --castora-line: #D5D7DE;
+  --castora-text: #141414;
+  --castora-muted: #5C6063;
+  --castora-subtle: #797D82;
+  --castora-accent: #FF6041;
+  --castora-accent-hover: #E85032;
+  --castora-obsidian: #141414;
+  --castora-signal: #FF6041;
   --castora-active: #16A34A;
   --castora-warn: #D97706;
   --castora-fault: #DC2626;
@@ -25,6 +30,8 @@
     background-color: var(--castora-bg);
     color: var(--castora-text);
     font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
   h1,
@@ -32,6 +39,7 @@
   h3,
   h4 {
     font-family: var(--font-display);
+    letter-spacing: -0.02em;
   }
 
   button:not(:disabled),
@@ -43,8 +51,9 @@
   button:focus-visible,
   a:focus-visible,
   input:focus-visible,
-  select:focus-visible {
-    outline: 2px solid #2563EB;
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: 2px solid #FF6041;
     outline-offset: 2px;
   }
 }
@@ -52,6 +61,72 @@
 .tabular-metrics {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* Create Studio architectural surface tokens & subtle compositor micro-interactions */
+.castora-card {
+  background-color: #FFFFFF;
+  border: 1px solid #D5D7DE;
+  border-radius: 12px;
+  transition:
+    border-color 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.castora-card-interactive:hover {
+  border-color: rgba(20, 20, 20, 0.38);
+  box-shadow: 0 10px 26px -6px rgba(0, 0, 0, 0.05);
+}
+
+.castora-stage-shadow {
+  box-shadow: 0 10px 26px -4px rgba(0, 0, 0, 0.05);
+}
+
+@keyframes castoraViewEnter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.castora-view-enter {
+  animation: castoraViewEnter 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.castora-roll-label {
+  position: relative;
+  display: inline-flex;
+  overflow: hidden;
+  line-height: 1.25;
+}
+
+.castora-roll-track {
+  display: flex;
+  flex-direction: column;
+  transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.castora-roll-trigger:hover .castora-roll-track,
+.castora-roll-trigger:focus-visible .castora-roll-track {
+  transform: translateY(-50%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .castora-view-enter {
+    animation: none !important;
+  }
+  .castora-card,
+  .castora-roll-track {
+    transition: none !important;
+  }
+  .castora-roll-trigger:hover .castora-roll-track,
+  .castora-roll-trigger:focus-visible .castora-roll-track {
+    transform: none !important;
+  }
 }
 
 :fullscreen,
@@ -181,4 +256,3 @@ body:has(.castora-video-fs:-webkit-full-screen) [data-castora-card-footer] {
   object-fit: contain !important;
   background: #000000 !important;
 }
-

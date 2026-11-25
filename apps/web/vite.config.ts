@@ -20,8 +20,8 @@ export default defineConfig({
         short_name: 'Castora Pro',
         description:
           'Multi-device WebRTC screen casting and offline-capable Digital Signage player for macOS and Google TV.',
-        theme_color: '#2563EB',
-        background_color: '#F5F7FB',
+        theme_color: '#141414',
+        background_color: '#F2F2F2',
         display: 'standalone',
         start_url: '/',
         scope: '/',

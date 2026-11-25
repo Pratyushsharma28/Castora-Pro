@@ -164,26 +164,26 @@ export function AdaptiveQualityPanel({
     <section
       data-castora-chrome
       aria-label="Adaptive Streaming Quality"
-      className="overflow-hidden rounded-xl border border-[#E2E8F0] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+      className="castora-card overflow-hidden"
     >
       {/* Header Row */}
       <div className="flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:px-5">
         <div className="min-w-0 space-y-0.5">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <div className="flex items-center gap-2">
-              <Gauge className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
-              <h2 className="text-sm font-semibold text-[#172033]">
+              <Gauge className="h-4 w-4 text-[#FF6041]" aria-hidden="true" />
+              <h2 className="font-display text-sm font-semibold text-[#141414]">
                 Adaptive Streaming Quality
               </h2>
             </div>
-            <span className="text-xs font-semibold text-[#2563EB]">
+            <span className="font-mono text-xs font-medium text-[#FF6041]">
               {adaptiveEnabled ? 'Auto Mode' : 'Manual Mode'}
             </span>
             <span className={`text-xs font-medium ${netInfo.toneClass}`}>
               · Network: {netInfo.label}
             </span>
           </div>
-          <p className="text-xs text-[#64748B]">
+          <p className="text-xs text-[#5C6063]">
             Monitors WebRTC RTT, loss, jitter, dropped frames, and estimated uplink per peer without renegotiating SDP.
           </p>
         </div>
@@ -192,15 +192,15 @@ export function AdaptiveQualityPanel({
           <div
             role="group"
             aria-label="Quality Control Mode"
-            className="inline-flex rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5"
+            className="inline-flex rounded-lg border border-[#D5D7DE] bg-[#EBEBEB] p-0.5"
           >
             <button
               type="button"
               onClick={() => handleSelectMode(true)}
               className={`min-h-[30px] rounded-md px-3 text-xs font-medium transition-colors whitespace-nowrap ${
                 adaptiveEnabled
-                  ? 'bg-white text-[#172033] shadow-xs'
-                  : 'text-[#64748B] hover:text-[#172033]'
+                  ? 'bg-[#141414] text-white'
+                  : 'text-[#5C6063] hover:text-[#141414]'
               }`}
             >
               Auto
@@ -210,8 +210,8 @@ export function AdaptiveQualityPanel({
               onClick={() => handleSelectMode(false)}
               className={`min-h-[30px] rounded-md px-3 text-xs font-medium transition-colors whitespace-nowrap ${
                 !adaptiveEnabled
-                  ? 'bg-white text-[#172033] shadow-xs'
-                  : 'text-[#64748B] hover:text-[#172033]'
+                  ? 'bg-[#141414] text-white'
+                  : 'text-[#5C6063] hover:text-[#141414]'
               }`}
             >
               Manual
@@ -222,7 +222,7 @@ export function AdaptiveQualityPanel({
             <button
               type="button"
               onClick={() => handleSelectMode(false)}
-              className="inline-flex min-h-[32px] items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] whitespace-nowrap"
+              className="inline-flex min-h-[32px] items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] hover:bg-[#141414] hover:text-white whitespace-nowrap"
             >
               <Lock className="h-3 w-3" aria-hidden="true" />
               <span>Return to Manual</span>
@@ -233,7 +233,7 @@ export function AdaptiveQualityPanel({
             type="button"
             aria-expanded={expanded}
             onClick={() => setExpanded((prev) => !prev)}
-            className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+            className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-2.5 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414]"
           >
             <span>{expanded ? 'Hide Controls' : 'Show Controls'}</span>
             {expanded ? (
@@ -248,13 +248,13 @@ export function AdaptiveQualityPanel({
       {expanded && (
         <>
           {/* Quality Profiles Selector */}
-          <div className="border-t border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3.5 sm:px-5 space-y-2.5">
+          <div className="border-t border-[#D5D7DE] bg-[#FAFAFA] px-4 py-3.5 sm:px-5 space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-              <div className="flex items-center gap-1.5 font-medium text-[#172033]">
-                <SlidersHorizontal className="h-3.5 w-3.5 text-[#64748B]" aria-hidden="true" />
+              <div className="flex items-center gap-1.5 font-medium text-[#141414]">
+                <SlidersHorizontal className="h-3.5 w-3.5 text-[#5C6063]" aria-hidden="true" />
                 <span>Quality Profile</span>
               </div>
-              <span className="text-[11px] text-[#64748B]">
+              <span className="font-mono text-[11px] text-[#5C6063]">
                 {activeProfileId
                   ? `Selected: ${QUALITY_PROFILES[activeProfileId].label} (${QUALITY_PROFILES[activeProfileId].specLabel})`
                   : `Custom (${preferences.resolution.toUpperCase()} · ${preferences.targetFps} FPS · ${formatCapRate(resolvedGlobal.configuredMaxBitrateKbps)})`}
@@ -270,25 +270,27 @@ export function AdaptiveQualityPanel({
                     key={id}
                     type="button"
                     onClick={() => handleSelectProfile(id)}
-                    className={`flex flex-col items-start rounded-lg border px-3 py-2 text-left transition-colors ${
+                    className={`flex flex-col items-start rounded-lg border px-3 py-2.5 text-left transition-colors ${
                       isSelected
-                        ? 'border-[#2563EB] bg-[#EFF6FF]'
-                        : 'border-[#E2E8F0] bg-white hover:border-[#2563EB]/60'
+                        ? 'border-[#FF6041] bg-[#FFF4F1]'
+                        : 'border-[#D5D7DE] bg-white hover:border-[#141414]'
                     }`}
                   >
                     <div className="flex w-full items-center justify-between gap-2">
                       <span
                         className={`text-xs font-semibold ${
-                          isSelected ? 'text-[#2563EB]' : 'text-[#172033]'
+                          isSelected ? 'text-[#FF6041]' : 'text-[#141414]'
                         }`}
                       >
                         {profile.label}
                       </span>
                       {profile.isDefault && (
-                        <span className="text-[11px] font-medium text-[#64748B]">Default</span>
+                        <span className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                          Default
+                        </span>
                       )}
                     </div>
-                    <span className="mt-0.5 text-[11px] text-[#64748B] tabular-metrics">
+                    <span className="mt-0.5 text-[11px] text-[#5C6063] tabular-metrics">
                       {profile.specLabel}
                     </span>
                   </button>
@@ -298,11 +300,13 @@ export function AdaptiveQualityPanel({
           </div>
 
           {/* Live Readouts Strip */}
-          <div className="grid grid-cols-2 divide-y divide-[#E2E8F0] border-t border-[#E2E8F0] bg-white sm:grid-cols-4 sm:divide-x sm:divide-y-0 tabular-metrics">
+          <div className="grid grid-cols-2 divide-y divide-[#D5D7DE] border-t border-[#D5D7DE] bg-white sm:grid-cols-4 sm:divide-x sm:divide-y-0 tabular-metrics">
             <div className="px-4 py-3">
-              <div className="text-[11px] font-medium text-[#64748B]">Actual Resolution</div>
-              <div className="mt-0.5 text-sm font-semibold text-[#172033]">{actualResLabel}</div>
-              <div className="mt-0.5 text-[11px] text-[#64748B]">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Actual Resolution
+              </div>
+              <div className="mt-1 text-sm font-semibold text-[#141414]">{actualResLabel}</div>
+              <div className="mt-0.5 text-[11px] text-[#5C6063]">
                 {scaleFactor > 1
                   ? `Encoder scale: ${scaleFactor.toFixed(1)}× down`
                   : `Requested: ${preferences.resolution.toUpperCase()}`}
@@ -310,33 +314,39 @@ export function AdaptiveQualityPanel({
             </div>
 
             <div className="px-4 py-3">
-              <div className="text-[11px] font-medium text-[#64748B]">Current FPS</div>
-              <div className="mt-0.5 text-sm font-semibold text-[#172033]">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Current FPS
+              </div>
+              <div className="mt-1 text-sm font-semibold text-[#141414]">
                 {actualFps !== null && Number.isFinite(actualFps)
                   ? `${actualFps.toFixed(1)} FPS`
                   : 'Unavailable'}
               </div>
-              <div className="mt-0.5 text-[11px] text-[#64748B]">
+              <div className="mt-0.5 text-[11px] text-[#5C6063]">
                 Target cap: {currentTargetFps} FPS
               </div>
             </div>
 
             <div className="px-4 py-3">
-              <div className="text-[11px] font-medium text-[#64748B]">Current Bitrate</div>
-              <div className="mt-0.5 text-sm font-semibold text-[#172033]">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Current Bitrate
+              </div>
+              <div className="mt-1 text-sm font-semibold text-[#141414]">
                 {formatRate(telemetry.bitrateKbps)}
               </div>
-              <div className="mt-0.5 text-[11px] text-[#64748B]">
+              <div className="mt-0.5 text-[11px] text-[#5C6063]">
                 Target cap: {formatCapRate(currentTargetBitrate)}
               </div>
             </div>
 
             <div className="px-4 py-3">
-              <div className="text-[11px] font-medium text-[#64748B]">Network Assessment</div>
-              <div className={`mt-0.5 text-sm font-semibold ${netInfo.toneClass}`}>
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Network Assessment
+              </div>
+              <div className={`mt-1 text-sm font-semibold ${netInfo.toneClass}`}>
                 {netInfo.label}
               </div>
-              <div className="mt-0.5 truncate text-[11px] text-[#64748B]">
+              <div className="mt-0.5 truncate text-[11px] text-[#5C6063]">
                 RTT {rttText} · Loss {lossText} · Jitter {jitterText}
                 {availText !== '—' ? ` · Est ${availText}` : ''}
               </div>
@@ -344,44 +354,44 @@ export function AdaptiveQualityPanel({
           </div>
 
           {/* Last Automatic Adjustment Explanation */}
-          <div className="flex flex-col gap-2 border-t border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3 text-xs sm:flex-row sm:items-center sm:justify-between sm:px-5">
+          <div className="flex flex-col gap-2 border-t border-[#D5D7DE] bg-[#FAFAFA] px-4 py-3 text-xs sm:flex-row sm:items-center sm:justify-between sm:px-5">
             <div className="min-w-0 space-y-0.5">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                <span className="font-semibold text-[#172033]">Last Adjustment:</span>
-                <span className="text-[#172033]">{adjustmentText}</span>
+                <span className="font-semibold text-[#141414]">Last Adjustment:</span>
+                <span className="text-[#141414]">{adjustmentText}</span>
                 {adjustmentTimeLabel && (
-                  <span className="font-mono text-[11px] text-[#64748B] tabular-metrics">
+                  <span className="font-mono text-[11px] text-[#5C6063] tabular-metrics">
                     ({adjustmentTimeLabel})
                   </span>
                 )}
               </div>
               {controlSupportNote && (
-                <p className="text-[11px] text-[#64748B]">{controlSupportNote}</p>
+                <p className="text-[11px] text-[#5C6063]">{controlSupportNote}</p>
               )}
             </div>
           </div>
 
           {/* Per-Peer Independent Adaptation Status (up to 15 receivers) */}
-          <div className="border-t border-[#E2E8F0] bg-white">
+          <div className="border-t border-[#D5D7DE] bg-white">
             {webrtcState.outboundPeers.length === 0 ? (
-              <div className="px-4 py-3 text-xs text-[#64748B] sm:px-5">
+              <div className="px-4 py-3 text-xs text-[#5C6063] sm:px-5">
                 Per-peer adaptive status activates once you share your screen with connected room participants (up to 15 peers, each adapted independently).
               </div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[760px] text-left text-xs">
-                  <thead className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-medium text-[#64748B]">
+                  <thead className="border-b border-[#D5D7DE] bg-[#FAFAFA] font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
                     <tr>
-                      <th className="px-4 py-2">Receiving Peer</th>
-                      <th className="px-4 py-2">Mode</th>
-                      <th className="px-4 py-2">Network</th>
-                      <th className="px-4 py-2">Actual Output</th>
-                      <th className="px-4 py-2">Target Ceiling</th>
-                      <th className="px-4 py-2">Adaptation State &amp; Reason</th>
-                      {onSetPeerQualityOverride && <th className="px-4 py-2 text-right">Lock</th>}
+                      <th className="px-4 py-2.5">Receiving Peer</th>
+                      <th className="px-4 py-2.5">Mode</th>
+                      <th className="px-4 py-2.5">Network</th>
+                      <th className="px-4 py-2.5">Actual Output</th>
+                      <th className="px-4 py-2.5">Target Ceiling</th>
+                      <th className="px-4 py-2.5">Adaptation State &amp; Reason</th>
+                      {onSetPeerQualityOverride && <th className="px-4 py-2.5 text-right">Lock</th>}
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-[#E2E8F0] tabular-metrics">
+                  <tbody className="divide-y divide-[#D5D7DE] tabular-metrics">
                     {webrtcState.outboundPeers.map((peer) => {
                       const peerNet = formatNetworkCondition(derivePeerCondition(peer));
                       const peerAuto =
@@ -406,27 +416,27 @@ export function AdaptiveQualityPanel({
 
                       return (
                         <tr key={peer.targetDeviceId}>
-                          <td className="px-4 py-2 font-sans font-medium text-[#172033]">
+                          <td className="px-4 py-2.5 font-sans font-medium text-[#141414]">
                             {peer.targetName}
                           </td>
-                          <td className="px-4 py-2 font-sans text-[#172033]">
+                          <td className="px-4 py-2.5 font-sans text-[#141414]">
                             {peerAuto ? 'Auto' : 'Manual'}
                           </td>
-                          <td className={`px-4 py-2 font-sans font-medium ${peerNet.toneClass}`}>
+                          <td className={`px-4 py-2.5 font-sans font-medium ${peerNet.toneClass}`}>
                             {peerNet.label}
                           </td>
-                          <td className="px-4 py-2 text-[#172033]">
+                          <td className="px-4 py-2.5 text-[#141414]">
                             {peerRes} · {peerFps} · {formatRate(peer.telemetry.bitrateKbps)}
                           </td>
-                          <td className="px-4 py-2 text-[#172033]">
+                          <td className="px-4 py-2.5 text-[#141414]">
                             {formatCapRate(peer.telemetry.targetBitrateKbps)} · {peerTargetFps} FPS
                             {peerScale > 1 ? ` · ${peerScale.toFixed(1)}× scale` : ''}
                           </td>
-                          <td className="max-w-[280px] truncate px-4 py-2 font-sans text-[#64748B]" title={peerReason}>
+                          <td className="max-w-[280px] truncate px-4 py-2.5 font-sans text-[#5C6063]" title={peerReason}>
                             {peerReason}
                           </td>
                           {onSetPeerQualityOverride && (
-                            <td className="px-4 py-2 text-right font-sans">
+                            <td className="px-4 py-2.5 text-right font-sans">
                               <button
                                 type="button"
                                 onClick={() =>
@@ -434,7 +444,7 @@ export function AdaptiveQualityPanel({
                                     adaptiveBitrate: !peerAuto,
                                   })
                                 }
-                                className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-2 py-1 text-[11px] font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                                className="rounded-md border border-[#D5D7DE] bg-[#FAFAFA] px-2.5 py-1 text-[11px] font-medium text-[#141414] transition-colors hover:border-[#141414] hover:bg-[#141414] hover:text-white"
                               >
                                 {peerAuto ? 'Lock Manual' : 'Use Auto'}
                               </button>

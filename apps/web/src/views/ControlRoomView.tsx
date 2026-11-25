@@ -242,120 +242,155 @@ export function ControlRoomView({
         </div>
       )}
 
-      {/* Primary Workspace Overview Card */}
+      {/* Primary Workspace Overview Card — Obsidian architectural header + Swiss 4-column hairline grid */}
       <section
         aria-label="Workspace Summary"
-        className="overflow-hidden rounded-xl border border-[#E2E8F0] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+        className="overflow-hidden rounded-xl border border-[#141414] bg-white castora-stage-shadow"
       >
-        <div className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center gap-3">
-              <h1 className="font-display text-xl font-semibold tracking-tight text-[#172033]">
+        <div className="bg-[#141414] p-6 text-white sm:p-7">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em] text-[#A3A8AE]">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[#FF6041]" aria-hidden="true" />
+                  <span>01 · Studio Control</span>
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1.5 font-mono text-[11px] ${
+                    signalingState === 'connected'
+                      ? 'text-[#81FF28]'
+                      : signalingState === 'connecting'
+                        ? 'text-[#FF6041]'
+                        : signalingState === 'error'
+                          ? 'text-[#F87171]'
+                          : 'text-[#A3A8AE]'
+                  }`}
+                >
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${
+                      signalingState === 'connected'
+                        ? 'bg-[#81FF28]'
+                        : signalingState === 'connecting'
+                          ? 'bg-[#FF6041]'
+                          : signalingState === 'error'
+                            ? 'bg-[#F87171]'
+                            : 'bg-[#5C6063]'
+                    }`}
+                    aria-hidden="true"
+                  />
+                  <span>{wsBadge.label}</span>
+                </span>
+                {(signalingState === 'disconnected' || signalingState === 'error' || backendError) && (
+                  <button
+                    type="button"
+                    onClick={onReconnectBackend}
+                    aria-label="Reconnect to signaling server"
+                    className="inline-flex h-7 items-center gap-1 rounded-md border border-white/20 bg-white/10 px-2.5 text-xs font-medium text-white transition-colors hover:bg-white/20"
+                  >
+                    <RefreshCw className="h-3 w-3" aria-hidden="true" />
+                    <span>Reconnect</span>
+                  </button>
+                )}
+              </div>
+              <h1 className="font-display text-2xl font-semibold tracking-tight text-white sm:text-[28px]">
                 Castora Pro Workspace
               </h1>
-              <SignalBadge label={wsBadge.label} tone={wsBadge.tone} pulse={wsBadge.pulse} />
-              {(signalingState === 'disconnected' || signalingState === 'error' || backendError) && (
-                <button
-                  type="button"
-                  onClick={onReconnectBackend}
-                  aria-label="Reconnect to signaling server"
-                  className="inline-flex h-7 items-center gap-1 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
-                >
-                  <RefreshCw className="h-3 w-3" aria-hidden="true" />
-                  <span>Reconnect</span>
-                </button>
-              )}
+              <p className="text-xs text-[#A3A8AE] sm:text-sm">
+                Device: <span className="font-medium text-white">{deviceName}</span>
+                <span aria-hidden="true"> · </span>
+                <span>{capabilities.userAgentSummary}</span>
+              </p>
             </div>
-            <p className="text-sm text-[#64748B]">
-              Device: <span className="font-medium text-[#172033]">{deviceName}</span>
-              <span aria-hidden="true"> · </span>
-              <span>{capabilities.userAgentSummary}</span>
-            </p>
-          </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
-            {webrtcState.isSharingLocal ? (
-              <>
+            <div className="flex flex-wrap items-center gap-2.5">
+              {webrtcState.isSharingLocal ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={shareBusy || !canShareScreen}
+                    onClick={handleQuickShare}
+                    className="inline-flex min-h-[40px] items-center gap-2 rounded-lg border border-white/20 bg-white/10 px-4 text-sm font-medium text-white transition-colors hover:bg-white/20 disabled:opacity-50"
+                  >
+                    <MonitorPlay className="h-4 w-4" aria-hidden="true" />
+                    <span>{shareBusy ? 'Starting...' : 'Change Screen'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onStopSharing}
+                    className="inline-flex min-h-[40px] items-center gap-2 rounded-lg bg-[#DC2626] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#B91C1C]"
+                  >
+                    <Square className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Stop Sharing</span>
+                  </button>
+                </>
+              ) : (
                 <button
                   type="button"
                   disabled={shareBusy || !canShareScreen}
                   onClick={handleQuickShare}
-                  className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50"
+                  className="castora-roll-trigger inline-flex min-h-[40px] items-center gap-2 rounded-lg bg-[#FF6041] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#E85032] disabled:opacity-50"
                 >
-                  <MonitorPlay className="h-4 w-4" aria-hidden="true" />
-                  <span>{shareBusy ? 'Starting...' : 'Change Screen'}</span>
+                  <MonitorPlay className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span className="castora-roll-label h-[1.25em]">
+                    <span className="castora-roll-track">
+                      <span>{shareBusy ? 'Starting...' : 'Share Screen'}</span>
+                      <span aria-hidden="true">{shareBusy ? 'Starting...' : 'Share Screen'}</span>
+                    </span>
+                  </span>
                 </button>
-                <button
-                  type="button"
-                  onClick={onStopSharing}
-                  className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] bg-[#DC2626] px-4 text-sm font-semibold text-white hover:bg-[#B91C1C]"
-                >
-                  <Square className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Stop Sharing</span>
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                disabled={shareBusy || !canShareScreen}
-                onClick={handleQuickShare}
-                className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] bg-[#2563EB] px-4 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
-              >
-                <MonitorPlay className="h-4 w-4" aria-hidden="true" />
-                <span>{shareBusy ? 'Starting...' : 'Share Screen'}</span>
-              </button>
-            )}
+              )}
 
-            {!activeRoom ? (
-              <button
-                type="button"
-                disabled={roomBusy}
-                onClick={handleQuickCreateRoom}
-                className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50"
-              >
-                <Plus className="h-4 w-4" aria-hidden="true" />
-                <span>{roomBusy ? 'Creating...' : 'Create Room'}</span>
-              </button>
-            ) : (
-              <>
+              {!activeRoom ? (
                 <button
                   type="button"
-                  onClick={() => onNavigate('receivers')}
-                  className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                  disabled={roomBusy}
+                  onClick={handleQuickCreateRoom}
+                  className="inline-flex min-h-[40px] items-center gap-2 rounded-lg border border-white/20 bg-white/10 px-4 text-sm font-medium text-white transition-colors hover:bg-white/20 disabled:opacity-50"
                 >
-                  <Users className="h-4 w-4" aria-hidden="true" />
-                  <span>Manage Room</span>
+                  <Plus className="h-4 w-4" aria-hidden="true" />
+                  <span>{roomBusy ? 'Creating...' : 'Create Room'}</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => onNavigate('sessions')}
-                  className="inline-flex min-h-[40px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
-                >
-                  <ShieldCheck className="h-4 w-4" aria-hidden="true" />
-                  <span>Session Controls</span>
-                </button>
-              </>
-            )}
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('receivers')}
+                    className="inline-flex min-h-[40px] items-center gap-2 rounded-lg border border-white/20 bg-white/10 px-4 text-sm font-medium text-white transition-colors hover:bg-white/20"
+                  >
+                    <Users className="h-4 w-4" aria-hidden="true" />
+                    <span>Manage Room</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('sessions')}
+                    className="inline-flex min-h-[40px] items-center gap-2 rounded-lg border border-white/20 bg-white/10 px-4 text-sm font-medium text-white transition-colors hover:bg-white/20"
+                  >
+                    <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                    <span>Session Controls</span>
+                  </button>
+                </>
+              )}
+            </div>
           </div>
         </div>
 
-        {/* Single-row Status Strip (no nested cards) */}
-        <div className="grid grid-cols-1 divide-y divide-[#E2E8F0] border-t border-[#E2E8F0] bg-[#F8FAFC] sm:grid-cols-2 sm:divide-x lg:grid-cols-4 lg:divide-y-0">
-          <div className="px-5 py-3.5">
-            <div className="text-xs font-medium text-[#64748B]">
+        {/* Single-row Swiss Hairline Status Strip */}
+        <div className="grid grid-cols-1 divide-y divide-[#D5D7DE] bg-white sm:grid-cols-2 sm:divide-x lg:grid-cols-4 lg:divide-y-0">
+          <div className="px-5 py-4">
+            <div className="font-mono text-[11px] uppercase tracking-wider text-[#797D82]">
               {activeRoom?.roomName ? activeRoom.roomName : 'Current Room'}
             </div>
-            <div className="mt-1 flex items-center gap-2">
+            <div className="mt-1.5 flex items-center gap-2">
               {activeRoom ? (
                 <>
-                  <span className="font-mono text-base font-semibold tracking-wider text-[#172033] tabular-metrics">
+                  <span className="font-mono text-lg font-semibold tracking-wider text-[#141414] tabular-metrics">
                     {activeRoom.roomId}
                   </span>
                   <button
                     type="button"
                     onClick={handleCopyRoomCode}
                     aria-label="Copy room code"
-                    className="inline-flex h-6 items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 text-[11px] font-medium text-[#64748B] hover:border-[#2563EB] hover:text-[#2563EB]"
+                    className="inline-flex h-6 items-center gap-1 rounded-[4px] border border-[#D5D7DE] bg-[#FAFAFA] px-2 text-[11px] font-medium text-[#5C6063] transition-colors hover:border-[#141414] hover:text-[#141414]"
                   >
                     {copiedCode ? (
                       <>
@@ -371,18 +406,20 @@ export function ControlRoomView({
                   </button>
                 </>
               ) : (
-                <span className="text-sm font-medium text-[#64748B]">No active room</span>
+                <span className="text-sm font-medium text-[#5C6063]">No active room</span>
               )}
             </div>
           </div>
 
-          <div className="px-5 py-3.5">
-            <div className="text-xs font-medium text-[#64748B]">Connected Participants</div>
-            <div className="mt-1 flex items-baseline gap-2">
-              <span className="text-base font-semibold text-[#172033] tabular-metrics">
+          <div className="px-5 py-4">
+            <div className="font-mono text-[11px] uppercase tracking-wider text-[#797D82]">
+              Connected Participants
+            </div>
+            <div className="mt-1.5 flex items-baseline gap-2">
+              <span className="font-mono text-lg font-semibold text-[#141414] tabular-metrics">
                 {activeRoom ? connectedCount : 0}
               </span>
-              <span className="text-xs text-[#64748B] tabular-metrics">
+              <span className="text-xs text-[#5C6063] tabular-metrics">
                 {activeRoom
                   ? `in room (${pairedReceivers.length} / ${MAX_INITIAL_RECEIVERS} receiver slots)`
                   : `of ${MAX_INITIAL_RECEIVERS} receiver capacity`}
@@ -390,10 +427,12 @@ export function ControlRoomView({
             </div>
           </div>
 
-          <div className="px-5 py-3.5">
-            <div className="text-xs font-medium text-[#64748B]">Screen Sharing</div>
-            <div className="mt-1 flex items-center gap-2">
-              <span className="text-sm font-semibold text-[#172033]">{sharingSummary}</span>
+          <div className="px-5 py-4">
+            <div className="font-mono text-[11px] uppercase tracking-wider text-[#797D82]">
+              Screen Sharing
+            </div>
+            <div className="mt-1.5 flex items-center gap-2.5">
+              <span className="text-sm font-semibold text-[#141414]">{sharingSummary}</span>
               <SignalBadge
                 label={streamBadge.label}
                 tone={streamBadge.tone}
@@ -402,10 +441,12 @@ export function ControlRoomView({
             </div>
           </div>
 
-          <div className="px-5 py-3.5">
-            <div className="text-xs font-medium text-[#64748B]">Room Access</div>
-            <div className="mt-1 flex items-center justify-between gap-2">
-              <span className="text-sm font-medium text-[#172033]">
+          <div className="px-5 py-4">
+            <div className="font-mono text-[11px] uppercase tracking-wider text-[#797D82]">
+              Room Access
+            </div>
+            <div className="mt-1.5 flex items-center justify-between gap-2">
+              <span className="text-sm font-semibold text-[#141414]">
                 {activeRoom
                   ? activeRoomRole === 'host'
                     ? 'Host'
@@ -416,7 +457,7 @@ export function ControlRoomView({
                 <button
                   type="button"
                   onClick={() => onNavigate('receivers')}
-                  className="text-xs font-semibold text-[#2563EB] hover:underline"
+                  className="text-xs font-semibold text-[#FF6041] hover:underline"
                 >
                   {activeRoom.pendingCount} pending
                 </button>
@@ -429,7 +470,7 @@ export function ControlRoomView({
       {(actionError || webrtcState.errorMessage || backendError) && (
         <div
           role="alert"
-          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#DC2626]/30 bg-[#FEF2F2] px-4 py-3 text-sm text-[#B91C1C]"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#DC2626]/35 bg-[#FEF2F2] px-4 py-3 text-sm text-[#B91C1C]"
         >
           <span>{actionError ?? webrtcState.errorMessage ?? backendError}</span>
           {onRetryAllFailed &&
@@ -450,40 +491,51 @@ export function ControlRoomView({
       {/* Room Onboarding when not yet in a room */}
       {!activeRoom && (
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-          <div className="flex flex-col justify-between rounded-xl border border-[#E2E8F0] bg-white p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <div className="castora-card castora-card-interactive flex flex-col justify-between p-6">
             <div>
-              <h2 className="font-display text-base font-semibold text-[#172033]">
+              <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-[#797D82]">
+                01 · Host Broadcast
+              </div>
+              <h2 className="mt-2 font-display text-lg font-semibold text-[#141414]">
                 Create a Room
               </h2>
-              <p className="mt-1.5 text-sm leading-relaxed text-[#64748B]">
+              <p className="mt-1.5 text-sm leading-relaxed text-[#5C6063]">
                 Start a secure room with a 6-character code. Approve up to 15 participants and share screens in any direction.
               </p>
             </div>
-            <div className="mt-5">
+            <div className="mt-6">
               <button
                 type="button"
                 disabled={roomBusy}
                 onClick={handleQuickCreateRoom}
-                className="inline-flex min-h-[44px] items-center gap-2 rounded-[10px] bg-[#2563EB] px-4 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                className="castora-roll-trigger inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-[#141414] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#FF6041] disabled:opacity-50"
               >
-                <Plus className="h-4 w-4" aria-hidden="true" />
-                <span>{roomBusy ? 'Creating Room...' : 'Create Room'}</span>
+                <Plus className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span className="castora-roll-label h-[1.25em]">
+                  <span className="castora-roll-track">
+                    <span>{roomBusy ? 'Creating Room...' : 'Create Room'}</span>
+                    <span aria-hidden="true">{roomBusy ? 'Creating Room...' : 'Create Room'}</span>
+                  </span>
+                </span>
               </button>
             </div>
           </div>
 
           <form
             onSubmit={handleQuickJoinRoom}
-            className="flex flex-col justify-between rounded-xl border border-[#E2E8F0] bg-white p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+            className="castora-card castora-card-interactive flex flex-col justify-between p-6"
           >
             <div>
-              <h2 className="font-display text-base font-semibold text-[#172033]">
+              <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-[#797D82]">
+                02 · Connect Receiver
+              </div>
+              <h2 className="mt-2 font-display text-lg font-semibold text-[#141414]">
                 Join an Existing Room
               </h2>
-              <p className="mt-1.5 text-sm leading-relaxed text-[#64748B]">
+              <p className="mt-1.5 text-sm leading-relaxed text-[#5C6063]">
                 Enter the 6-character code shared by the room host to request access.
               </p>
-              <div className="mt-4 flex flex-col gap-2.5 sm:flex-row">
+              <div className="mt-5 flex flex-col gap-2.5 sm:flex-row">
                 <label htmlFor="home-join-room-code" className="sr-only">
                   6-character room code
                 </label>
@@ -498,12 +550,12 @@ export function ControlRoomView({
                     setJoinCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))
                   }
                   placeholder="Room code (e.g. K7M4P9)"
-                  className="h-11 flex-1 rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 font-mono text-sm font-semibold tracking-widest text-[#172033] placeholder:font-sans placeholder:tracking-normal placeholder:font-normal placeholder:text-[#94A3B8] focus:border-[#2563EB] focus:bg-white focus:outline-none"
+                  className="h-11 flex-1 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-3.5 font-mono text-sm font-semibold tracking-widest text-[#141414] placeholder:font-sans placeholder:tracking-normal placeholder:font-normal placeholder:text-[#797D82] focus:border-[#FF6041] focus:bg-white focus:outline-none"
                 />
                 <button
                   type="submit"
                   disabled={roomBusy || joinCode.length < 6}
-                  className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-semibold text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50"
+                  className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-lg border border-[#141414] bg-white px-4 text-sm font-semibold text-[#141414] transition-colors hover:bg-[#141414] hover:text-white disabled:border-[#D5D7DE] disabled:text-[#797D82] disabled:hover:bg-white disabled:opacity-60"
                 >
                   <LogIn className="h-4 w-4" aria-hidden="true" />
                   <span>{roomBusy ? 'Joining...' : 'Join Room'}</span>
@@ -516,22 +568,22 @@ export function ControlRoomView({
 
       {/* Pending approval alert for Host */}
       {activeRoom && activeRoomRole === 'host' && activeRoom.pendingCount > 0 && (
-        <div className="flex flex-col gap-3 rounded-xl border border-[#2563EB]/30 bg-[#EFF6FF] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-3 rounded-xl border border-[#FF6041]/45 bg-[#FFF4F1] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="text-sm font-semibold text-[#172033]">
+            <p className="text-sm font-semibold text-[#141414]">
               {activeRoom.pendingCount}{' '}
               {activeRoom.pendingCount === 1
                 ? 'participant is waiting for approval'
                 : 'participants are waiting for approval'}
             </p>
-            <p className="text-xs text-[#64748B]">
+            <p className="text-xs text-[#5C6063]">
               Review pending devices in Rooms before they can share or view screens.
             </p>
           </div>
           <button
             type="button"
             onClick={() => onNavigate('receivers')}
-            className="inline-flex min-h-[38px] shrink-0 items-center gap-1.5 rounded-[10px] bg-[#2563EB] px-4 text-xs font-semibold text-white hover:bg-[#1D4ED8]"
+            className="inline-flex min-h-[38px] shrink-0 items-center gap-1.5 rounded-lg bg-[#FF6041] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#E85032]"
           >
             <span>Review Requests</span>
             <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
@@ -543,13 +595,18 @@ export function ControlRoomView({
       {(webrtcState.incomingStreams.length > 0 || webrtcState.localStream) && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="font-display text-base font-semibold text-[#172033]">
-              Active Screens
-            </h2>
+            <div className="flex items-baseline gap-2.5">
+              <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-[#797D82]">
+                03 · Live Signals
+              </span>
+              <h2 className="font-display text-base font-semibold text-[#141414]">
+                Active Screens
+              </h2>
+            </div>
             <button
               type="button"
               onClick={() => onNavigate('multi-view')}
-              className="inline-flex items-center gap-1.5 text-sm font-medium text-[#2563EB] hover:underline"
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-[#141414] transition-colors hover:text-[#FF6041]"
             >
               <span>Open Screens Workspace</span>
               <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />

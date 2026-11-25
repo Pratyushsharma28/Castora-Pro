@@ -171,7 +171,7 @@ export function SessionManagementDashboard({
       margin: 1,
       errorCorrectionLevel: 'M',
       color: {
-        dark: '#172033',
+        dark: '#141414',
         light: '#FFFFFF',
       },
     })
@@ -233,19 +233,22 @@ export function SessionManagementDashboard({
   if (!activeRoom) {
     return (
       <div data-castora-chrome className="space-y-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <h1 className="font-display text-xl font-semibold tracking-tight text-[#172033]">
+            <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#797D82]">
+              05 · SESSION GOVERNANCE
+            </p>
+            <h1 className="mt-1 font-display text-2xl font-semibold tracking-tight text-[#141414]">
               Session Management
             </h1>
-            <p className="text-sm text-[#64748B]">
+            <p className="mt-1 text-sm text-[#5C6063]">
               Configure room identity, privacy mode, optional password protection, invitations, and host ownership.
             </p>
           </div>
           <button
             type="button"
             onClick={() => onNavigate('receivers')}
-            className="inline-flex h-10 items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+            className="inline-flex h-10 items-center gap-2 rounded-[10px] border border-[#D5D7DE] bg-white px-4 text-sm font-medium text-[#141414] transition-colors hover:border-[#141414]"
           >
             <span>Join via Code or Link</span>
             <ArrowRight className="h-4 w-4" aria-hidden="true" />
@@ -258,7 +261,7 @@ export function SessionManagementDashboard({
             className={`rounded-xl border px-4 py-3 text-sm ${
               feedback.tone === 'error'
                 ? 'border-[#DC2626]/30 bg-[#FEF2F2] text-[#B91C1C]'
-                : 'border-[#E2E8F0] bg-white text-[#172033]'
+                : 'border-[#D5D7DE] bg-white text-[#141414]'
             }`}
           >
             {feedback.text}
@@ -292,20 +295,20 @@ export function SessionManagementDashboard({
               })
               .finally(() => setBusyAction(null));
           }}
-          className="rounded-xl border border-[#E2E8F0] bg-white p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-5 max-w-2xl"
+          className="castora-card p-6 space-y-5 max-w-2xl"
         >
           <div>
-            <h2 className="font-display text-base font-semibold text-[#172033]">
+            <h2 className="font-display text-base font-semibold tracking-tight text-[#141414]">
               Start a Managed Session
             </h2>
-            <p className="mt-1 text-sm text-[#64748B]">
+            <p className="mt-1 text-sm text-[#5C6063]">
               Create a new room with custom privacy rules and an optional hashed password.
             </p>
           </div>
 
           <div className="space-y-4">
             <div>
-              <label htmlFor="session-create-name" className="block text-xs font-medium text-[#172033]">
+              <label htmlFor="session-create-name" className="block font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
                 Room Name (optional)
               </label>
               <input
@@ -315,12 +318,12 @@ export function SessionManagementDashboard({
                 value={createRoomName}
                 onChange={(e) => setCreateRoomName(e.target.value)}
                 placeholder="Design Review · Studio A"
-                className="mt-1.5 h-11 w-full rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 text-sm text-[#172033] placeholder:text-[#94A3B8] focus:border-[#2563EB] focus:bg-white focus:outline-none"
+                className="mt-1.5 h-11 w-full rounded-[10px] border border-[#D5D7DE] bg-[#FAFAFA] px-3.5 text-sm text-[#141414] placeholder:text-[#797D82] focus:border-[#FF6041] focus:bg-white focus:outline-none"
               />
             </div>
 
             <div>
-              <span className="block text-xs font-medium text-[#172033]">Privacy Mode</span>
+              <span className="block font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Privacy Mode</span>
               <div className="mt-1.5 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
                 {PRIVACY_OPTIONS.map((opt) => (
                   <button
@@ -329,19 +332,19 @@ export function SessionManagementDashboard({
                     onClick={() => setCreatePrivacy(opt.mode)}
                     className={`rounded-[10px] border p-3 text-left transition-colors ${
                       createPrivacy === opt.mode
-                        ? 'border-[#2563EB] bg-[#EFF6FF]'
-                        : 'border-[#E2E8F0] bg-[#F8FAFC] hover:bg-white'
+                        ? 'border-[#FF6041] bg-[#FFF4F1]'
+                        : 'border-[#D5D7DE] bg-[#FAFAFA] hover:bg-white'
                     }`}
                   >
-                    <div className="text-xs font-semibold text-[#172033]">{opt.label}</div>
-                    <p className="mt-1 text-[11px] leading-relaxed text-[#64748B]">{opt.summary}</p>
+                    <div className="text-xs font-semibold text-[#141414]">{opt.label}</div>
+                    <p className="mt-1 text-[11px] leading-relaxed text-[#5C6063]">{opt.summary}</p>
                   </button>
                 ))}
               </div>
             </div>
 
             <div>
-              <label htmlFor="session-create-password" className="block text-xs font-medium text-[#172033]">
+              <label htmlFor="session-create-password" className="block font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
                 Optional Room Password (4–64 characters)
               </label>
               <input
@@ -352,7 +355,7 @@ export function SessionManagementDashboard({
                 value={createPassword}
                 onChange={(e) => setCreatePassword(e.target.value)}
                 placeholder="Leave blank for no password"
-                className="mt-1.5 h-11 w-full rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 text-sm text-[#172033] placeholder:text-[#94A3B8] focus:border-[#2563EB] focus:bg-white focus:outline-none"
+                className="mt-1.5 h-11 w-full rounded-[10px] border border-[#D5D7DE] bg-[#FAFAFA] px-3.5 text-sm text-[#141414] placeholder:text-[#797D82] focus:border-[#FF6041] focus:bg-white focus:outline-none"
               />
             </div>
           </div>
@@ -360,7 +363,7 @@ export function SessionManagementDashboard({
           <button
             type="submit"
             disabled={busyAction !== null}
-            className="inline-flex min-h-[44px] items-center gap-2 rounded-[10px] bg-[#2563EB] px-5 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+            className="inline-flex min-h-[44px] items-center gap-2 rounded-[10px] bg-[#141414] px-5 text-sm font-semibold text-white transition-colors hover:bg-[#FF6041] disabled:opacity-50"
           >
             <Plus className="h-4 w-4" aria-hidden="true" />
             <span>{busyAction === 'create' ? 'Creating Session...' : 'Create Session Room'}</span>
@@ -404,10 +407,13 @@ export function SessionManagementDashboard({
   return (
     <div data-castora-chrome className="space-y-6">
       {/* Top Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2.5">
-            <h1 className="font-display text-xl font-semibold tracking-tight text-[#172033]">
+          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#797D82]">
+            05 · SESSION GOVERNANCE
+          </p>
+          <div className="mt-1 flex flex-wrap items-center gap-2.5">
+            <h1 className="font-display text-2xl font-semibold tracking-tight text-[#141414]">
               {activeRoom.roomName || `Room ${activeRoom.roomId}`}
             </h1>
             <SignalBadge label={privacyLabel(activeRoom.privacyMode)} tone="signal" />
@@ -415,10 +421,10 @@ export function SessionManagementDashboard({
               <SignalBadge label="Password Protected" tone="warn" />
             )}
           </div>
-          <p className="mt-0.5 text-xs text-[#64748B] tabular-metrics">
-            Room <span className="font-mono font-semibold text-[#172033]">{activeRoom.roomId}</span>
-            {' · '}Host: <span className="font-medium text-[#172033]">{activeRoom.hostDeviceName}</span>
-            {' · '}Your Role: <span className="font-medium text-[#172033]">{isHost ? 'Host' : 'Participant'}</span>
+          <p className="mt-1 text-xs text-[#5C6063] tabular-metrics">
+            Room <span className="font-mono font-semibold text-[#141414]">{activeRoom.roomId}</span>
+            {' · '}Host: <span className="font-medium text-[#141414]">{activeRoom.hostDeviceName}</span>
+            {' · '}Your Role: <span className="font-medium text-[#141414]">{isHost ? 'Host' : 'Participant'}</span>
           </p>
         </div>
 
@@ -441,7 +447,7 @@ export function SessionManagementDashboard({
                 })
                 .finally(() => setBusyAction(null));
             }}
-            className="inline-flex h-10 items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-3.5 text-sm font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50"
+            className="inline-flex h-10 items-center gap-2 rounded-[10px] border border-[#D5D7DE] bg-white px-3.5 text-sm font-medium text-[#141414] transition-colors hover:border-[#141414] disabled:opacity-50"
           >
             <RefreshCw className="h-4 w-4" aria-hidden="true" />
             <span>{busyAction === 'restore' ? 'Syncing...' : 'Verify Session'}</span>
@@ -474,7 +480,7 @@ export function SessionManagementDashboard({
                 <button
                   type="button"
                   onClick={() => setConfirmEndOpen(false)}
-                  className="inline-flex h-10 items-center rounded-[10px] border border-[#E2E8F0] bg-white px-3 text-sm font-medium text-[#64748B] hover:text-[#172033]"
+                  className="inline-flex h-10 items-center rounded-[10px] border border-[#D5D7DE] bg-white px-3 text-sm font-medium text-[#5C6063] hover:text-[#141414]"
                 >
                   Cancel
                 </button>
@@ -519,7 +525,7 @@ export function SessionManagementDashboard({
           className={`rounded-xl border px-4 py-3 text-sm ${
             feedback.tone === 'error'
               ? 'border-[#DC2626]/30 bg-[#FEF2F2] text-[#B91C1C]'
-              : 'border-[#E2E8F0] bg-white text-[#172033]'
+              : 'border-[#D5D7DE] bg-white text-[#141414]'
           }`}
         >
           {feedback.text}
@@ -529,55 +535,55 @@ export function SessionManagementDashboard({
       {/* Session Overview Strip */}
       <section
         aria-label="Session Overview Metrics"
-        className="overflow-hidden rounded-xl border border-[#E2E8F0] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+        className="castora-card overflow-hidden"
       >
-        <div className="grid grid-cols-1 divide-y divide-[#E2E8F0] sm:grid-cols-2 sm:divide-x lg:grid-cols-4 lg:divide-y-0">
+        <div className="grid grid-cols-1 divide-y divide-[#D5D7DE] sm:grid-cols-2 sm:divide-x lg:grid-cols-4 lg:divide-y-0">
           <div className="p-5">
-            <div className="flex items-center gap-1.5 text-xs font-medium text-[#64748B]">
+            <div className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
               <Clock className="h-3.5 w-3.5" aria-hidden="true" />
               <span>Session Duration</span>
             </div>
-            <div className="mt-1.5 font-mono text-2xl font-bold text-[#172033] tabular-metrics">
+            <div className="mt-1.5 font-mono text-2xl font-bold text-[#141414] tabular-metrics">
               {Number.isFinite(createdMs) ? formatDurationSeconds(durationSec) : 'Unavailable'}
             </div>
-            <div className="mt-1 text-xs text-[#64748B] tabular-metrics">
+            <div className="mt-1 text-xs text-[#5C6063] tabular-metrics">
               Created {formatClockTimestamp(activeRoom.createdAt)} · Expires{' '}
               {formatClockTimestamp(activeRoom.expiresAt)}
             </div>
           </div>
 
           <div className="p-5">
-            <div className="flex items-center gap-1.5 text-xs font-medium text-[#64748B]">
+            <div className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
               <Users className="h-3.5 w-3.5" aria-hidden="true" />
               <span>Room Capacity &amp; Queue</span>
             </div>
-            <div className="mt-1.5 text-2xl font-bold text-[#172033] tabular-metrics">
+            <div className="mt-1.5 text-2xl font-bold text-[#141414] tabular-metrics">
               {activeRoom.pairedReceiverCount} / {activeRoom.maxReceivers}
             </div>
-            <div className="mt-1 text-xs text-[#64748B] tabular-metrics">
+            <div className="mt-1 text-xs text-[#5C6063] tabular-metrics">
               {connectedTotal} online · {availableSlots} slots open · {activeRoom.pendingCount} pending
             </div>
           </div>
 
           <div className="p-5">
-            <div className="text-xs font-medium text-[#64748B]">Active Streams</div>
-            <div className="mt-1.5 text-2xl font-bold text-[#172033] tabular-metrics">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Active Streams</div>
+            <div className="mt-1.5 text-2xl font-bold text-[#141414] tabular-metrics">
               {incomingStreamCount} in · {outgoingStreamCount} out
             </div>
-            <div className="mt-1 text-xs text-[#64748B] tabular-metrics">
+            <div className="mt-1 text-xs text-[#5C6063] tabular-metrics">
               {totalTrackedRoomStreams} active room stream{totalTrackedRoomStreams === 1 ? '' : 's'}
             </div>
           </div>
 
           <div className="p-5">
-            <div className="text-xs font-medium text-[#64748B]">Connection Health</div>
+            <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Connection Health</div>
             <div className="mt-2 flex items-center gap-2">
               <SignalBadge label={healthLabel} tone={healthTone} pulse={signalingState === 'connecting'} />
-              <span className="text-xs text-[#64748B]">
+              <span className="text-xs text-[#5C6063]">
                 {backendHealth?.turnConfigured ? `TURN (${backendHealth.turnMode})` : 'P2P / STUN'}
               </span>
             </div>
-            <div className="mt-1.5 text-xs text-[#64748B] tabular-metrics">
+            <div className="mt-1.5 text-xs text-[#5C6063] tabular-metrics">
               Last activity: {formatClockTimestamp(lastParticipantActivityIso)}
             </div>
           </div>
@@ -588,9 +594,9 @@ export function SessionManagementDashboard({
         {/* Left Column: Room Info, Privacy, Password */}
         <div className="space-y-6 lg:col-span-6">
           {/* Room Information & Rename */}
-          <section className="rounded-xl border border-[#E2E8F0] bg-white p-5 sm:p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
-            <div className="flex items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3">
-              <h2 className="font-display text-base font-semibold text-[#172033]">
+          <section className="castora-card p-5 sm:p-6 space-y-4">
+            <div className="flex items-center justify-between gap-2 border-b border-[#D5D7DE] pb-3">
+              <h2 className="font-display text-base font-semibold text-[#141414]">
                 Room Details
               </h2>
               {isHost && !editingRoomName && (
@@ -600,7 +606,7 @@ export function SessionManagementDashboard({
                     setRoomNameDraft(activeRoom.roomName ?? `Room ${activeRoom.roomId}`);
                     setEditingRoomName(true);
                   }}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-2.5 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] hover:bg-white"
                 >
                   <Edit3 className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>Rename Room</span>
@@ -641,19 +647,19 @@ export function SessionManagementDashboard({
                   maxLength={64}
                   value={roomNameDraft}
                   onChange={(e) => setRoomNameDraft(e.target.value)}
-                  className="h-10 flex-1 rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-sm text-[#172033] focus:border-[#2563EB] focus:bg-white focus:outline-none"
+                  className="h-10 flex-1 rounded-[10px] border border-[#D5D7DE] bg-[#FAFAFA] px-3 text-sm text-[#141414] focus:border-[#FF6041] focus:bg-white focus:outline-none"
                 />
                 <button
                   type="submit"
                   disabled={busyAction !== null}
-                  className="inline-flex h-10 items-center justify-center rounded-[10px] bg-[#2563EB] px-4 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                  className="inline-flex h-10 items-center justify-center rounded-[10px] bg-[#141414] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#FF6041] disabled:opacity-50"
                 >
                   {busyAction === 'rename' ? 'Saving...' : 'Save Name'}
                 </button>
                 <button
                   type="button"
                   onClick={() => setEditingRoomName(false)}
-                  className="inline-flex h-10 items-center justify-center rounded-[10px] border border-[#E2E8F0] px-3 text-xs font-medium text-[#64748B]"
+                  className="inline-flex h-10 items-center justify-center rounded-[10px] border border-[#D5D7DE] px-3 text-xs font-medium text-[#5C6063] hover:text-[#141414]"
                 >
                   Cancel
                 </button>
@@ -662,29 +668,29 @@ export function SessionManagementDashboard({
 
             <dl className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
               <div>
-                <dt className="text-[#64748B]">Room Name</dt>
-                <dd className="mt-0.5 font-medium text-[#172033]">
+                <dt className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Room Name</dt>
+                <dd className="mt-0.5 font-medium text-[#141414]">
                   {activeRoom.roomName || `Room ${activeRoom.roomId}`}
                 </dd>
               </div>
               <div>
-                <dt className="text-[#64748B]">Room ID</dt>
-                <dd className="mt-0.5 font-mono font-semibold text-[#172033] tabular-metrics">
+                <dt className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Room ID</dt>
+                <dd className="mt-0.5 font-mono font-semibold text-[#141414] tabular-metrics">
                   {activeRoom.roomId}
                 </dd>
               </div>
               <div>
-                <dt className="text-[#64748B]">Current Host</dt>
-                <dd className="mt-0.5 font-medium text-[#172033]">
+                <dt className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Current Host</dt>
+                <dd className="mt-0.5 font-medium text-[#141414]">
                   {activeRoom.hostDeviceName}{' '}
-                  <span className="text-[#64748B]">
+                  <span className="text-[#5C6063]">
                     ({activeRoom.hostConnected ? 'Connected' : 'Temporarily disconnected'})
                   </span>
                 </dd>
               </div>
               <div>
-                <dt className="text-[#64748B]">Created</dt>
-                <dd className="mt-0.5 text-[#172033] tabular-metrics">
+                <dt className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Created</dt>
+                <dd className="mt-0.5 text-[#141414] tabular-metrics">
                   {activeRoom.createdAt ? new Date(activeRoom.createdAt).toLocaleString() : 'Unavailable'}
                 </dd>
               </div>
@@ -692,11 +698,11 @@ export function SessionManagementDashboard({
           </section>
 
           {/* Privacy Mode Card */}
-          <section className="rounded-xl border border-[#E2E8F0] bg-white p-5 sm:p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
-            <div className="flex items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3">
+          <section className="castora-card p-5 sm:p-6 space-y-4">
+            <div className="flex items-center justify-between gap-2 border-b border-[#D5D7DE] pb-3">
               <div className="flex items-center gap-2">
-                <Shield className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
-                <h2 className="font-display text-base font-semibold text-[#172033]">
+                <Shield className="h-4 w-4 text-[#FF6041]" aria-hidden="true" />
+                <h2 className="font-display text-base font-semibold text-[#141414]">
                   Privacy Mode
                 </h2>
               </div>
@@ -732,32 +738,32 @@ export function SessionManagementDashboard({
                     }}
                     className={`w-full rounded-[10px] border p-3.5 text-left transition-colors ${
                       selected
-                        ? 'border-[#2563EB] bg-[#EFF6FF]'
-                        : 'border-[#E2E8F0] bg-[#F8FAFC] hover:bg-white'
+                        ? 'border-[#FF6041] bg-[#FFF4F1]'
+                        : 'border-[#D5D7DE] bg-[#FAFAFA] hover:bg-white'
                     } disabled:cursor-default disabled:opacity-80`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-semibold text-[#172033]">{opt.label}</span>
-                      {selected && <Check className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />}
+                      <span className="text-sm font-semibold text-[#141414]">{opt.label}</span>
+                      {selected && <Check className="h-4 w-4 text-[#FF6041]" aria-hidden="true" />}
                     </div>
-                    <p className="mt-1 text-xs leading-relaxed text-[#64748B]">{opt.summary}</p>
+                    <p className="mt-1 text-xs leading-relaxed text-[#5C6063]">{opt.summary}</p>
                   </button>
                 );
               })}
             </div>
             {!isHost && (
-              <p className="text-xs text-[#64748B]">
+              <p className="text-xs text-[#5C6063]">
                 Only the current authorized host can change room privacy policies.
               </p>
             )}
           </section>
 
           {/* Optional Room Password Card */}
-          <section className="rounded-xl border border-[#E2E8F0] bg-white p-5 sm:p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
-            <div className="flex items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3">
+          <section className="castora-card p-5 sm:p-6 space-y-4">
+            <div className="flex items-center justify-between gap-2 border-b border-[#D5D7DE] pb-3">
               <div className="flex items-center gap-2">
-                <Lock className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
-                <h2 className="font-display text-base font-semibold text-[#172033]">
+                <Lock className="h-4 w-4 text-[#FF6041]" aria-hidden="true" />
+                <h2 className="font-display text-base font-semibold text-[#141414]">
                   Room Password
                 </h2>
               </div>
@@ -811,12 +817,12 @@ export function SessionManagementDashboard({
                         ? 'Enter new password (4–64 chars)'
                         : 'Set optional password (4–64 chars)'
                     }
-                    className="h-10 flex-1 rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-sm text-[#172033] placeholder:text-[#94A3B8] focus:border-[#2563EB] focus:bg-white focus:outline-none"
+                    className="h-10 flex-1 rounded-[10px] border border-[#D5D7DE] bg-[#FAFAFA] px-3 text-sm text-[#141414] placeholder:text-[#797D82] focus:border-[#FF6041] focus:bg-white focus:outline-none"
                   />
                   <button
                     type="submit"
                     disabled={busyAction !== null || passwordDraft.length < 4}
-                    className="inline-flex h-10 items-center justify-center gap-1.5 rounded-[10px] bg-[#2563EB] px-4 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                    className="inline-flex h-10 items-center justify-center gap-1.5 rounded-[10px] bg-[#141414] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#FF6041] disabled:opacity-50"
                   >
                     <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
                     <span>
@@ -859,7 +865,7 @@ export function SessionManagementDashboard({
                 )}
               </div>
             ) : (
-              <p className="text-xs leading-relaxed text-[#64748B]">
+              <p className="text-xs leading-relaxed text-[#5C6063]">
                 {activeRoom.passwordProtected
                   ? 'This room requires a password validated securely by the server.'
                   : 'No room password is currently set by the host.'}
@@ -871,11 +877,11 @@ export function SessionManagementDashboard({
         {/* Right Column: Invitation & QR, Host Transfer, Participant Overview */}
         <div className="space-y-6 lg:col-span-6">
           {/* Invitation & QR Code Card */}
-          <section className="rounded-xl border border-[#E2E8F0] bg-white p-5 sm:p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
-            <div className="flex items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3">
+          <section className="castora-card p-5 sm:p-6 space-y-4">
+            <div className="flex items-center justify-between gap-2 border-b border-[#D5D7DE] pb-3">
               <div className="flex items-center gap-2">
-                <QrCode className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
-                <h2 className="font-display text-base font-semibold text-[#172033]">
+                <QrCode className="h-4 w-4 text-[#FF6041]" aria-hidden="true" />
+                <h2 className="font-display text-base font-semibold text-[#141414]">
                   Room Invitation &amp; QR Code
                 </h2>
               </div>
@@ -901,7 +907,7 @@ export function SessionManagementDashboard({
                       })
                       .finally(() => setBusyAction(null));
                   }}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-2.5 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] hover:bg-white disabled:opacity-50"
                 >
                   <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>{busyAction === 'rotate-invite' ? 'Rotating...' : 'Rotate Link'}</span>
@@ -911,7 +917,7 @@ export function SessionManagementDashboard({
 
             {isHost ? (
               <div className="flex flex-col gap-5 sm:flex-row sm:items-center">
-                <div className="flex h-[180px] w-[180px] shrink-0 items-center justify-center rounded-xl border border-[#E2E8F0] bg-white p-2">
+                <div className="flex h-[180px] w-[180px] shrink-0 items-center justify-center rounded-xl border border-[#D5D7DE] bg-white p-2">
                   {qrDataUrl ? (
                     <img
                       src={qrDataUrl}
@@ -919,7 +925,7 @@ export function SessionManagementDashboard({
                       className="h-full w-full object-contain"
                     />
                   ) : (
-                    <div className="text-center text-xs text-[#64748B]">
+                    <div className="text-center text-xs text-[#5C6063]">
                       {inviteCode ? 'Rendering QR...' : 'Sync session to load invitation QR'}
                     </div>
                   )}
@@ -927,14 +933,14 @@ export function SessionManagementDashboard({
 
                 <div className="min-w-0 flex-1 space-y-3">
                   <div>
-                    <div className="text-xs font-medium text-[#64748B]">Shareable Invitation Link</div>
-                    <div className="mt-1 break-all rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 font-mono text-[11px] text-[#172033]">
+                    <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Shareable Invitation Link</div>
+                    <div className="mt-1 break-all rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-3 py-2 font-mono text-[11px] text-[#141414]">
                       {inviteCode
                         ? invitationUrl
                         : 'Click Verify Session above to load host invitation link.'}
                     </div>
                   </div>
-                  <p className="text-[11px] leading-relaxed text-[#64748B]">
+                  <p className="text-[11px] leading-relaxed text-[#5C6063]">
                     Invitation links identify the room without exposing authentication tokens. Existing room privacy and password rules still apply.
                   </p>
                   <div className="flex flex-wrap gap-2">
@@ -942,7 +948,7 @@ export function SessionManagementDashboard({
                       type="button"
                       disabled={!inviteCode}
                       onClick={() => void handleCopyText('invite', invitationUrl)}
-                      className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#2563EB] px-3.5 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                      className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#141414] px-3.5 text-xs font-semibold text-white transition-colors hover:bg-[#FF6041] disabled:opacity-50"
                     >
                       {copiedKey === 'invite' ? (
                         <>
@@ -959,7 +965,7 @@ export function SessionManagementDashboard({
                     <button
                       type="button"
                       onClick={() => void handleCopyText('code', activeRoom.roomId)}
-                      className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                      className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-3 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414]"
                     >
                       {copiedKey === 'code' ? (
                         <>
@@ -977,7 +983,7 @@ export function SessionManagementDashboard({
                 </div>
               </div>
             ) : (
-              <div className="space-y-2 text-xs leading-relaxed text-[#64748B]">
+              <div className="space-y-2 text-xs leading-relaxed text-[#5C6063]">
                 <p>
                   Invitation links and QR rotation are restricted to the room host to protect Private room access control.
                 </p>
@@ -985,7 +991,7 @@ export function SessionManagementDashboard({
                   <button
                     type="button"
                     onClick={() => void handleCopyText('code', activeRoom.roomId)}
-                    className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                    className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-3 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414]"
                   >
                     <Copy className="h-3.5 w-3.5" aria-hidden="true" />
                     <span>{copiedKey === 'code' ? 'Code Copied' : `Copy Room Code (${activeRoom.roomId})`}</span>
@@ -996,20 +1002,20 @@ export function SessionManagementDashboard({
           </section>
 
           {/* Host Ownership & Secure Transfer Card */}
-          <section className="rounded-xl border border-[#E2E8F0] bg-white p-5 sm:p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
-            <div className="flex items-center gap-2 border-b border-[#E2E8F0] pb-3">
-              <ShieldCheck className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
-              <h2 className="font-display text-base font-semibold text-[#172033]">
+          <section className="castora-card p-5 sm:p-6 space-y-4">
+            <div className="flex items-center gap-2 border-b border-[#D5D7DE] pb-3">
+              <ShieldCheck className="h-4 w-4 text-[#FF6041]" aria-hidden="true" />
+              <h2 className="font-display text-base font-semibold text-[#141414]">
                 Host Ownership &amp; Transfer
               </h2>
             </div>
 
             {activeRoom.hostTransfer && (
-              <div className="rounded-xl border border-[#2563EB]/30 bg-[#EFF6FF] p-4 space-y-3">
-                <div className="text-xs font-semibold text-[#172033]">
+              <div className="rounded-xl border border-[#FF6041]/35 bg-[#FFF4F1] p-4 space-y-3">
+                <div className="text-xs font-semibold text-[#141414]">
                   Pending Host Transfer → {activeRoom.hostTransfer.targetDeviceName}
                 </div>
-                <p className="text-xs text-[#64748B] tabular-metrics">
+                <p className="text-xs text-[#5C6063] tabular-metrics">
                   Request expires at {formatClockTimestamp(activeRoom.hostTransfer.expiresAt)}. Active streams remain live during ownership handoff.
                 </p>
 
@@ -1036,7 +1042,7 @@ export function SessionManagementDashboard({
                           })
                           .finally(() => setBusyAction(null));
                       }}
-                      className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#2563EB] px-3.5 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                      className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#141414] px-3.5 text-xs font-semibold text-white transition-colors hover:bg-[#FF6041] disabled:opacity-50"
                     >
                       <UserCheck className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>{busyAction === 'accept-transfer' ? 'Accepting...' : 'Accept Host Role'}</span>
@@ -1062,7 +1068,7 @@ export function SessionManagementDashboard({
                           })
                           .finally(() => setBusyAction(null));
                       }}
-                      className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#172033] hover:bg-[#F8FAFC] disabled:opacity-50"
+                      className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-3 text-xs font-medium text-[#141414] hover:bg-[#FAFAFA] disabled:opacity-50"
                     >
                       <X className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>Decline</span>
@@ -1089,7 +1095,7 @@ export function SessionManagementDashboard({
                         })
                         .finally(() => setBusyAction(null));
                     }}
-                    className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#172033] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-50"
+                    className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-3 text-xs font-medium text-[#141414] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-50"
                   >
                     <X className="h-3.5 w-3.5" aria-hidden="true" />
                     <span>Cancel Pending Transfer</span>
@@ -1101,7 +1107,7 @@ export function SessionManagementDashboard({
             {isHost ? (
               eligibleTransferTargets.length > 0 ? (
                 <div className="space-y-3">
-                  <p className="text-xs leading-relaxed text-[#64748B]">
+                  <p className="text-xs leading-relaxed text-[#5C6063]">
                     Room ownership stays bound to you across temporary network drops. To hand off host permissions without interrupting active streams, choose a connected participant below—they must explicitly accept.
                   </p>
                   <div className="flex flex-col gap-2 sm:flex-row">
@@ -1113,7 +1119,7 @@ export function SessionManagementDashboard({
                       value={selectedTransferTarget}
                       disabled={Boolean(activeRoom.hostTransfer) || busyAction !== null}
                       onChange={(e) => setSelectedTransferTarget(e.target.value)}
-                      className="h-10 flex-1 rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-sm text-[#172033] focus:border-[#2563EB] focus:bg-white focus:outline-none disabled:opacity-50"
+                      className="h-10 flex-1 rounded-[10px] border border-[#D5D7DE] bg-[#FAFAFA] px-3 text-sm text-[#141414] focus:border-[#FF6041] focus:bg-white focus:outline-none disabled:opacity-50"
                     >
                       {eligibleTransferTargets.map((member) => (
                         <option key={member.deviceId} value={member.deviceId}>
@@ -1147,7 +1153,7 @@ export function SessionManagementDashboard({
                           })
                           .finally(() => setBusyAction(null));
                       }}
-                      className="inline-flex h-10 items-center justify-center gap-1.5 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-xs font-semibold text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50"
+                      className="inline-flex h-10 items-center justify-center gap-1.5 rounded-[10px] border border-[#D5D7DE] bg-white px-4 text-xs font-semibold text-[#141414] transition-colors hover:border-[#141414] disabled:opacity-50"
                     >
                       <UserCheck className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>{busyAction === 'initiate-transfer' ? 'Sending...' : 'Transfer Host'}</span>
@@ -1155,46 +1161,46 @@ export function SessionManagementDashboard({
                   </div>
                 </div>
               ) : (
-                <p className="text-xs leading-relaxed text-[#64748B]">
+                <p className="text-xs leading-relaxed text-[#5C6063]">
                   Host ownership is preserved across temporary disconnections. Connect and pair another device to transfer host permissions cleanly.
                 </p>
               )
             ) : (
-              <p className="text-xs leading-relaxed text-[#64748B]">
+              <p className="text-xs leading-relaxed text-[#5C6063]">
                 Room ownership stays reserved for {activeRoom.hostDeviceName} even if their socket disconnects briefly. If they initiate a host transfer to you, an acceptance prompt will appear here.
               </p>
             )}
           </section>
 
           {/* Participant Overview Card */}
-          <section className="rounded-xl border border-[#E2E8F0] bg-white p-5 sm:p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
-            <div className="flex items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3">
-              <h2 className="font-display text-base font-semibold text-[#172033]">
+          <section className="castora-card p-5 sm:p-6 space-y-4">
+            <div className="flex items-center justify-between gap-2 border-b border-[#D5D7DE] pb-3">
+              <h2 className="font-display text-base font-semibold text-[#141414]">
                 Participant Overview
               </h2>
               <div className="flex items-center gap-3">
                 <button
                   type="button"
                   onClick={() => onNavigate('devices')}
-                  className="text-xs font-medium text-[#2563EB] hover:underline"
+                  className="text-xs font-medium text-[#FF6041] hover:underline"
                 >
                   Device Controls
                 </button>
                 <button
                   type="button"
                   onClick={() => onNavigate('receivers')}
-                  className="text-xs font-medium text-[#2563EB] hover:underline"
+                  className="text-xs font-medium text-[#FF6041] hover:underline"
                 >
                   Approvals ({activeRoom.pendingCount})
                 </button>
               </div>
             </div>
 
-            <ul className="divide-y divide-[#E2E8F0] text-xs">
+            <ul className="divide-y divide-[#D5D7DE] text-xs">
               <li className="flex items-center justify-between gap-3 py-2.5">
                 <div>
-                  <span className="font-semibold text-[#172033]">{activeRoom.hostDeviceName}</span>
-                  <span className="ml-2 text-[#64748B]">
+                  <span className="font-semibold text-[#141414]">{activeRoom.hostDeviceName}</span>
+                  <span className="ml-2 text-[#5C6063]">
                     Host · {activeRoom.hostDeviceType ?? activeRoom.hostPlatform}
                   </span>
                 </div>
@@ -1207,8 +1213,8 @@ export function SessionManagementDashboard({
               {activeRoom.pairedReceivers.map((rx) => (
                 <li key={rx.deviceId} className="flex items-center justify-between gap-3 py-2.5">
                   <div>
-                    <span className="font-semibold text-[#172033]">{rx.deviceName}</span>
-                    <span className="ml-2 text-[#64748B] tabular-metrics">
+                    <span className="font-semibold text-[#141414]">{rx.deviceName}</span>
+                    <span className="ml-2 text-[#5C6063] tabular-metrics">
                       Slot {rx.assignedSlotIndex + 1} · {rx.deviceType ?? rx.platform}
                     </span>
                   </div>
@@ -1222,8 +1228,8 @@ export function SessionManagementDashboard({
               {activeRoom.pendingRequests.map((req) => (
                 <li key={req.deviceId} className="flex items-center justify-between gap-3 py-2.5">
                   <div>
-                    <span className="font-semibold text-[#172033]">{req.deviceName}</span>
-                    <span className="ml-2 text-[#64748B]">
+                    <span className="font-semibold text-[#141414]">{req.deviceName}</span>
+                    <span className="ml-2 text-[#5C6063]">
                       Pending · {req.deviceType ?? req.platform}
                     </span>
                   </div>

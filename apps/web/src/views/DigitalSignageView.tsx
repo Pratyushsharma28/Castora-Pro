@@ -649,11 +649,14 @@ export function DigitalSignageView({
 
   if (accessKeyPrompt && !hostToken) {
     return (
-      <div className="mx-auto max-w-md rounded-xl border border-[#E2E8F0] bg-white p-6 shadow-xs">
-        <h1 className="font-display text-lg font-semibold text-[#172033]">
+      <div className="mx-auto max-w-md castora-card p-6">
+        <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#797D82]">
+          04 · DIGITAL SIGNAGE
+        </p>
+        <h1 className="mt-1 font-display text-lg font-semibold text-[#141414]">
           Signage Studio Access Key
         </h1>
-        <p className="mt-1 text-xs text-[#64748B]">
+        <p className="mt-1 text-xs text-[#5C6063]">
           This server requires the configured operator access key (`CASTORA_SIGNAGE_ACCESS_KEY`) to initialize a Digital Signage workspace.
         </p>
         <form
@@ -668,12 +671,12 @@ export function DigitalSignageView({
             value={accessKeyInput}
             onChange={(e) => setAccessKeyInput(e.target.value)}
             placeholder="Enter operator access key"
-            className="h-11 w-full rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 text-sm text-[#172033]"
+            className="h-11 w-full rounded-[10px] border border-[#D5D7DE] bg-[#FAFAFA] px-3.5 text-sm text-[#141414] focus:border-[#FF6041] focus:bg-white focus:outline-none"
           />
           {errorBanner && <p className="text-xs text-[#DC2626]">{errorBanner}</p>}
           <button
             type="submit"
-            className="h-11 w-full rounded-[10px] bg-[#2563EB] text-sm font-semibold text-white hover:bg-[#1D4ED8]"
+            className="h-11 w-full rounded-[10px] bg-[#141414] text-sm font-semibold text-white transition-colors hover:bg-[#FF6041]"
           >
             Unlock Digital Signage
           </button>
@@ -684,67 +687,78 @@ export function DigitalSignageView({
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h1 className="font-display text-xl font-semibold tracking-tight text-[#172033]">
-            Digital Signage &amp; Independent TV Playback
-          </h1>
-          <p className="text-sm text-[#64748B]">
-            Upload media, build mixed image/video playlists, and sync up to {MAX_SIGNAGE_SCREENS} screens for continuous unattended playback without WebRTC or host uptime.
-          </p>
-        </div>
+      {/* Studio Obsidian Hero Band */}
+      <section className="rounded-xl border border-[#262626] bg-[#141414] p-5 sm:p-6 text-white castora-stage-shadow">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#9A9FA6]">
+                04 · DIGITAL SIGNAGE
+              </span>
+              <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[#81FF28]">
+                <span className="h-1.5 w-1.5 rounded-full bg-[#81FF28]" />
+                {screens.length}/{MAX_SIGNAGE_SCREENS} SLOTS · {media.length} ASSETS · {playlists.length} PLAYLISTS
+              </span>
+            </div>
+            <h1 className="mt-1.5 font-display text-2xl font-semibold tracking-tight text-white">
+              Digital Signage &amp; Independent TV Playback
+            </h1>
+            <p className="mt-1 text-sm text-[#A1A6AE]">
+              Upload media, build mixed image/video playlists, and sync up to {MAX_SIGNAGE_SCREENS} screens for continuous unattended playback without WebRTC or host uptime.
+            </p>
+          </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
-          <PWAInstallButton compact />
-          <button
-            type="button"
-            onClick={() => setShowWorkspaceModal(true)}
-            className="inline-flex h-9 items-center gap-1.5 rounded-[10px] border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#172033] hover:bg-[#F8FAFC]"
-          >
-            <KeyRound className="h-3.5 w-3.5 text-[#64748B]" aria-hidden="true" />
-            <span>Workspace Key</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onOpenLocalPlayer()}
-            className="inline-flex h-9 items-center gap-1.5 rounded-[10px] bg-[#172033] px-3.5 text-xs font-semibold text-white hover:bg-[#0F172A]"
-          >
-            <Tv className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Launch TV Player Mode</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            <PWAInstallButton compact />
+            <button
+              type="button"
+              onClick={() => setShowWorkspaceModal(true)}
+              className="inline-flex h-9 items-center gap-1.5 rounded-[10px] border border-white/15 bg-white/10 px-3 text-xs font-medium text-white transition-colors hover:bg-white/15"
+            >
+              <KeyRound className="h-3.5 w-3.5 text-[#9A9FA6]" aria-hidden="true" />
+              <span>Workspace Key</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onOpenLocalPlayer()}
+              className="inline-flex h-9 items-center gap-1.5 rounded-[10px] bg-[#FF6041] px-3.5 text-xs font-semibold text-white transition-colors hover:bg-[#E85032]"
+            >
+              <Tv className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Launch TV Player Mode</span>
+            </button>
+          </div>
         </div>
-      </div>
+      </section>
 
       {/* Storage & Persistence Integrity Notice */}
       {storageStatus && (
         <div
           className={`flex flex-col gap-2 rounded-xl border px-4 py-3 text-xs sm:flex-row sm:items-center sm:justify-between ${
             storageStatus.persistentObjectStorage
-              ? 'border-[#E2E8F0] bg-white text-[#475569]'
+              ? 'border-[#D5D7DE] bg-white text-[#5C6063]'
               : 'border-[#D97706]/30 bg-[#FFFBEB] text-[#92400E]'
           }`}
         >
           <div className="flex items-center gap-2.5">
             <HardDrive
               className={`h-4 w-4 shrink-0 ${
-                storageStatus.persistentObjectStorage ? 'text-[#16A34A]' : 'text-[#D97706]'
+                storageStatus.persistentObjectStorage ? 'text-[#15803D]' : 'text-[#D97706]'
               }`}
               aria-hidden="true"
             />
             <span>
-              <strong>Storage:</strong>{' '}
+              <strong className="text-[#141414]">Storage:</strong>{' '}
               {storageStatus.storageProvider === 's3'
                 ? `S3-compatible object storage (${storageStatus.bucketName})`
                 : storageStatus.storageProvider === 'local-dev'
                   ? 'Local preview object storage'
                   : 'Unconfigured in production'}
               {' · '}
-              <strong>Database:</strong> {storageStatus.dbProvider === 'postgres' ? 'PostgreSQL' : 'SQLite'}
+              <strong className="text-[#141414]">Database:</strong> {storageStatus.dbProvider === 'postgres' ? 'PostgreSQL' : 'SQLite'}
               {storageStatus.warning ? ` — ${storageStatus.warning}` : ''}
             </span>
           </div>
-          <span className="font-mono text-[11px] tabular-metrics shrink-0">
+          <span className="font-mono text-[11px] tabular-metrics shrink-0 text-[#141414]">
             {screens.length}/{MAX_SIGNAGE_SCREENS} screens · {media.length} media · {playlists.length} playlists
           </span>
         </div>
@@ -768,52 +782,52 @@ export function DigitalSignageView({
       {statusNotice && (
         <div
           role="status"
-          className="flex items-center justify-between gap-3 rounded-xl border border-[#2563EB]/25 bg-[#EFF6FF] px-4 py-2.5 text-xs text-[#1E40AF]"
+          className="flex items-center justify-between gap-3 rounded-xl border border-[#FF6041]/30 bg-[#FFF4F1] px-4 py-2.5 text-xs text-[#141414]"
         >
           <span>{statusNotice}</span>
-          <button type="button" onClick={() => setStatusNotice(null)} aria-label="Dismiss notice">
+          <button type="button" onClick={() => setStatusNotice(null)} aria-label="Dismiss notice" className="text-[#5C6063] hover:text-[#141414]">
             <X className="h-4 w-4" />
           </button>
         </div>
       )}
 
       {/* Workspace Sub-Navigation Tabs */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E2E8F0] pb-3">
-        <div className="flex items-center gap-1.5">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#D5D7DE] pb-3">
+        <div className="inline-flex flex-wrap items-center gap-1 rounded-[10px] border border-[#D5D7DE] bg-[#EBEBEB] p-1">
           <button
             type="button"
             onClick={() => setActiveTab('screens')}
-            className={`inline-flex h-10 items-center gap-2 rounded-lg px-4 text-sm font-medium transition-colors ${
+            className={`inline-flex h-9 items-center gap-2 rounded-lg px-3.5 text-xs font-semibold transition-colors ${
               activeTab === 'screens'
-                ? 'bg-[#2563EB] text-white'
-                : 'bg-white text-[#64748B] border border-[#E2E8F0] hover:text-[#172033]'
+                ? 'bg-[#141414] text-white'
+                : 'text-[#5C6063] hover:text-[#141414]'
             }`}
           >
-            <Monitor className="h-4 w-4" aria-hidden="true" />
+            <Monitor className={`h-3.5 w-3.5 ${activeTab === 'screens' ? 'text-[#FF6041]' : ''}`} aria-hidden="true" />
             <span>Screens ({screens.length}/{MAX_SIGNAGE_SCREENS})</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('media')}
-            className={`inline-flex h-10 items-center gap-2 rounded-lg px-4 text-sm font-medium transition-colors ${
+            className={`inline-flex h-9 items-center gap-2 rounded-lg px-3.5 text-xs font-semibold transition-colors ${
               activeTab === 'media'
-                ? 'bg-[#2563EB] text-white'
-                : 'bg-white text-[#64748B] border border-[#E2E8F0] hover:text-[#172033]'
+                ? 'bg-[#141414] text-white'
+                : 'text-[#5C6063] hover:text-[#141414]'
             }`}
           >
-            <Film className="h-4 w-4" aria-hidden="true" />
+            <Film className={`h-3.5 w-3.5 ${activeTab === 'media' ? 'text-[#FF6041]' : ''}`} aria-hidden="true" />
             <span>Media Library ({media.length})</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('playlists')}
-            className={`inline-flex h-10 items-center gap-2 rounded-lg px-4 text-sm font-medium transition-colors ${
+            className={`inline-flex h-9 items-center gap-2 rounded-lg px-3.5 text-xs font-semibold transition-colors ${
               activeTab === 'playlists'
-                ? 'bg-[#2563EB] text-white'
-                : 'bg-white text-[#64748B] border border-[#E2E8F0] hover:text-[#172033]'
+                ? 'bg-[#141414] text-white'
+                : 'text-[#5C6063] hover:text-[#141414]'
             }`}
           >
-            <ListVideo className="h-4 w-4" aria-hidden="true" />
+            <ListVideo className={`h-3.5 w-3.5 ${activeTab === 'playlists' ? 'text-[#FF6041]' : ''}`} aria-hidden="true" />
             <span>Playlists ({playlists.length})</span>
           </button>
         </div>
@@ -822,7 +836,7 @@ export function DigitalSignageView({
           <button
             type="button"
             onClick={() => void refreshWorkspaceData(hostToken)}
-            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#475569] hover:bg-[#F8FAFC]"
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-3 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414]"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" />
             <span>Refresh Sync</span>
@@ -834,13 +848,13 @@ export function DigitalSignageView({
       {activeTab === 'screens' && (
         <div className="space-y-5">
           {/* Register Screen & Connected Room Import Bar */}
-          <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
+          <div className="castora-card p-5 space-y-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
-                <h2 className="text-sm font-semibold text-[#172033]">
+                <h2 className="font-display text-sm font-semibold text-[#141414]">
                   Register Displays (Up to {MAX_SIGNAGE_SCREENS} Screens)
                 </h2>
-                <p className="text-xs text-[#64748B]">
+                <p className="text-xs text-[#5C6063]">
                   Each screen gets a 6-character pairing code. Open TV Player mode on your Haier Google TV and enter the code once to cache playlists locally.
                 </p>
               </div>
@@ -857,12 +871,12 @@ export function DigitalSignageView({
                   value={newScreenName}
                   onChange={(e) => setNewScreenName(e.target.value)}
                   placeholder={`Screen ${screens.length + 1} (e.g., Lobby Haier TV)`}
-                  className="h-10 w-60 rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-xs text-[#172033] focus:border-[#2563EB] focus:bg-white focus:outline-none"
+                  className="h-10 w-60 rounded-[10px] border border-[#D5D7DE] bg-[#FAFAFA] px-3 text-xs text-[#141414] placeholder:text-[#797D82] focus:border-[#FF6041] focus:bg-white focus:outline-none"
                 />
                 <button
                   type="submit"
                   disabled={screens.length >= MAX_SIGNAGE_SCREENS || screenActionBusy === 'create'}
-                  className="inline-flex h-10 items-center gap-1.5 rounded-[10px] bg-[#2563EB] px-4 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                  className="inline-flex h-10 items-center gap-1.5 rounded-[10px] bg-[#141414] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#FF6041] disabled:opacity-50"
                 >
                   <Plus className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>Add Screen</span>
@@ -871,8 +885,8 @@ export function DigitalSignageView({
             </div>
 
             {roomEnrolCandidates.length > 0 && screens.length < MAX_SIGNAGE_SCREENS && (
-              <div className="flex flex-wrap items-center gap-2 border-t border-[#E2E8F0] pt-3">
-                <span className="text-xs font-medium text-[#64748B]">
+              <div className="flex flex-wrap items-center gap-2 border-t border-[#D5D7DE] pt-3">
+                <span className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
                   Enroll from active room:
                 </span>
                 {roomEnrolCandidates.map((rx) => (
@@ -888,9 +902,9 @@ export function DigitalSignageView({
                         pairedFromRoomId: activeRoom?.roomId,
                       })
                     }
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-xs font-medium text-[#172033] hover:bg-[#EFF6FF] hover:border-[#2563EB]/40"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-3 text-xs font-medium text-[#141414] transition-colors hover:border-[#FF6041] hover:bg-[#FFF4F1]"
                   >
-                    <Plus className="h-3 w-3 text-[#2563EB]" />
+                    <Plus className="h-3 w-3 text-[#FF6041]" />
                     <span>{rx.deviceName}</span>
                   </button>
                 ))}
@@ -900,18 +914,18 @@ export function DigitalSignageView({
 
           {/* Bulk Selection & Assignment Controls */}
           {screens.length > 0 && (
-            <div className="flex flex-col gap-3 rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-col gap-3 castora-card p-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
                   onClick={handleToggleSelectAll}
-                  className="inline-flex h-9 items-center gap-2 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-xs font-medium text-[#172033] hover:bg-[#F1F5F9]"
+                  className="inline-flex h-9 items-center gap-2 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-3 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] hover:bg-white"
                 >
                   <span>
                     {selectedScreenIds.size === screens.length ? 'Deselect All' : `Select All (${screens.length})`}
                   </span>
                 </button>
-                <span className="text-xs text-[#64748B] tabular-metrics">
+                <span className="font-mono text-[11px] text-[#797D82] tabular-metrics">
                   {selectedScreenIds.size} selected
                 </span>
               </div>
@@ -921,7 +935,7 @@ export function DigitalSignageView({
                   aria-label="Select playlist for bulk assignment"
                   value={bulkPlaylistId}
                   onChange={(e) => setBulkPlaylistId(e.target.value)}
-                  className="h-9 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-xs text-[#172033]"
+                  className="h-9 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-3 text-xs text-[#141414] focus:border-[#FF6041] focus:outline-none"
                 >
                   <option value="">Choose playlist...</option>
                   {playlists.map((pl) => (
@@ -937,7 +951,7 @@ export function DigitalSignageView({
                   onClick={() =>
                     void handleAssignToTargets(Array.from(selectedScreenIds), bulkPlaylistId)
                   }
-                  className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#2563EB] px-3.5 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-45"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#141414] px-3.5 text-xs font-semibold text-white transition-colors hover:bg-[#FF6041] disabled:opacity-45"
                 >
                   <span>Assign to Selected</span>
                 </button>
@@ -951,7 +965,7 @@ export function DigitalSignageView({
                       bulkPlaylistId
                     )
                   }
-                  className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#2563EB]/30 bg-[#EFF6FF] px-3.5 text-xs font-semibold text-[#2563EB] hover:bg-[#DBEAFE] disabled:opacity-45"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#FF6041]/35 bg-[#FFF4F1] px-3.5 text-xs font-semibold text-[#FF6041] transition-colors hover:bg-[#FF6041] hover:text-white disabled:opacity-45"
                 >
                   <span>Assign to All ({screens.length})</span>
                 </button>
@@ -963,7 +977,7 @@ export function DigitalSignageView({
                       onClick={() =>
                         void handleControlTargets(Array.from(selectedScreenIds), 'play')
                       }
-                      className="inline-flex h-9 items-center gap-1 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#16A34A] hover:bg-[#F0FDF4]"
+                      className="inline-flex h-9 items-center gap-1 rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#15803D] hover:bg-[#F0FDF4]"
                     >
                       <Play className="h-3.5 w-3.5" />
                       <span>Play</span>
@@ -973,7 +987,7 @@ export function DigitalSignageView({
                       onClick={() =>
                         void handleControlTargets(Array.from(selectedScreenIds), 'pause')
                       }
-                      className="inline-flex h-9 items-center gap-1 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#D97706] hover:bg-[#FFFBEB]"
+                      className="inline-flex h-9 items-center gap-1 rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#D97706] hover:bg-[#FFFBEB]"
                     >
                       <Pause className="h-3.5 w-3.5" />
                       <span>Pause</span>
@@ -983,7 +997,7 @@ export function DigitalSignageView({
                       onClick={() =>
                         void handleControlTargets(Array.from(selectedScreenIds), 'stop')
                       }
-                      className="inline-flex h-9 items-center gap-1 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#DC2626] hover:bg-[#FEF2F2]"
+                      className="inline-flex h-9 items-center gap-1 rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#DC2626] hover:bg-[#FEF2F2]"
                     >
                       <Square className="h-3.5 w-3.5" />
                       <span>Stop</span>
@@ -995,9 +1009,9 @@ export function DigitalSignageView({
           )}
 
           {/* 15-Slot Overview Strip & Filter Controls */}
-          <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-3">
+          <div className="castora-card p-4 space-y-3">
             <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1 rounded-[10px] border border-[#D5D7DE] bg-[#EBEBEB] p-1">
                 {(
                   [
                     { id: 'all', label: `All ${MAX_SIGNAGE_SCREENS} Slots` },
@@ -1012,15 +1026,15 @@ export function DigitalSignageView({
                     onClick={() => setSlotFilter(item.id)}
                     className={`inline-flex h-8 items-center rounded-lg px-2.5 text-xs font-medium transition-colors ${
                       slotFilter === item.id
-                        ? 'bg-[#172033] text-white'
-                        : 'border border-[#E2E8F0] bg-[#F8FAFC] text-[#475569] hover:text-[#172033]'
+                        ? 'bg-[#141414] text-white'
+                        : 'text-[#5C6063] hover:text-[#141414]'
                     }`}
                   >
                     {item.label}
                   </button>
                 ))}
               </div>
-              <span className="font-mono text-[11px] text-[#64748B] tabular-metrics">
+              <span className="font-mono text-[11px] text-[#797D82] tabular-metrics">
                 {screens.length}/{MAX_SIGNAGE_SCREENS} active · {slotMetrics.playingCount} playing ·{' '}
                 {slotMetrics.availableSlots} free
               </span>
@@ -1055,10 +1069,10 @@ export function DigitalSignageView({
                     }}
                     className={`flex items-center justify-between rounded-md border px-2 py-1 text-[11px] font-mono tabular-metrics transition-colors ${
                       isSelected
-                        ? 'border-[#2563EB] bg-[#EFF6FF] text-[#1D4ED8]'
+                        ? 'border-[#FF6041] bg-[#FFF4F1] text-[#FF6041]'
                         : screen
-                          ? 'border-[#CBD5E1] bg-white text-[#172033] hover:border-[#94A3B8]'
-                          : 'border-dashed border-[#CBD5E1] bg-[#F8FAFC] text-[#64748B] hover:border-[#2563EB] hover:text-[#2563EB]'
+                          ? 'border-[#D5D7DE] bg-white text-[#141414] hover:border-[#141414]'
+                          : 'border-dashed border-[#D5D7DE] bg-[#FAFAFA] text-[#797D82] hover:border-[#FF6041] hover:text-[#FF6041]'
                     }`}
                   >
                     <span>S{slotNumber}</span>
@@ -1067,10 +1081,10 @@ export function DigitalSignageView({
                         isPlaying
                           ? 'bg-[#16A34A]'
                           : isOnline
-                            ? 'bg-[#2563EB]'
+                            ? 'bg-[#FF6041]'
                             : screen
-                              ? 'bg-[#94A3B8]'
-                              : 'bg-[#CBD5E1]'
+                              ? 'bg-[#797D82]'
+                              : 'bg-[#D5D7DE]'
                       }`}
                     />
                   </button>
@@ -1081,15 +1095,15 @@ export function DigitalSignageView({
 
           {/* 15-Screen Responsive Grid */}
           {visibleScreenSlots.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-[#CBD5E1] bg-white p-8 text-center">
-              <Tv className="mx-auto h-7 w-7 text-[#94A3B8]" aria-hidden="true" />
-              <p className="mt-2.5 text-sm font-semibold text-[#172033]">
+            <div className="rounded-xl border border-dashed border-[#D5D7DE] bg-white p-8 text-center">
+              <Tv className="mx-auto h-7 w-7 text-[#797D82]" aria-hidden="true" />
+              <p className="mt-2.5 text-sm font-semibold text-[#141414]">
                 No screen slots match this filter
               </p>
               <button
                 type="button"
                 onClick={() => setSlotFilter('all')}
-                className="mt-3 inline-flex h-8 items-center rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-xs font-medium text-[#172033] hover:bg-[#F1F5F9]"
+                className="mt-3 inline-flex h-8 items-center rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-3 text-xs font-medium text-[#141414] hover:border-[#141414]"
               >
                 Show All {MAX_SIGNAGE_SCREENS} Slots
               </button>
@@ -1102,21 +1116,21 @@ export function DigitalSignageView({
                   return (
                     <div
                       key={`empty-slot-${slotNumber}`}
-                      className="rounded-xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC]/80 p-4 flex flex-col justify-between gap-4 min-h-[220px]"
+                      className="rounded-xl border border-dashed border-[#D5D7DE] bg-[#FAFAFA] p-4 flex flex-col justify-between gap-4 min-h-[220px]"
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2">
-                          <span className="font-mono text-[11px] font-semibold text-[#64748B] tabular-metrics">
+                          <span className="font-mono text-[11px] font-semibold text-[#797D82] tabular-metrics">
                             S{slotNumber}
                           </span>
-                          <h3 className="text-sm font-semibold text-[#475569]">
+                          <h3 className="text-sm font-semibold text-[#5C6063]">
                             Screen Slot {slotNumber}
                           </h3>
                         </div>
                         <SignalBadge label="Available" tone="standby" />
                       </div>
 
-                      <div className="rounded-lg border border-[#E2E8F0]/80 bg-white/70 p-3 text-xs text-[#64748B]">
+                      <div className="rounded-lg border border-[#D5D7DE] bg-white p-3 text-xs text-[#5C6063]">
                         <p>
                           Empty signage slot ready for a TV pairing code, independent playlist, and unattended local cache playback.
                         </p>
@@ -1126,7 +1140,7 @@ export function DigitalSignageView({
                         type="button"
                         disabled={Boolean(screenActionBusy)}
                         onClick={() => void handleCreateScreen({ slotNumber })}
-                        className="inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-[10px] border border-[#2563EB]/30 bg-white px-3 text-xs font-semibold text-[#2563EB] hover:bg-[#EFF6FF] disabled:opacity-50"
+                        className="inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-[10px] border border-[#FF6041]/35 bg-white px-3 text-xs font-semibold text-[#FF6041] transition-colors hover:bg-[#FF6041] hover:text-white disabled:opacity-50"
                       >
                         <Plus className="h-3.5 w-3.5" aria-hidden="true" />
                         <span>{busyThisSlot ? `Registering S${slotNumber}...` : `Register Slot S${slotNumber}`}</span>
@@ -1140,8 +1154,8 @@ export function DigitalSignageView({
                 return (
                   <div
                     key={screen.id}
-                    className={`rounded-xl border bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] flex flex-col justify-between gap-4 transition-colors ${
-                      isSelected ? 'border-[#2563EB]' : 'border-[#E2E8F0]'
+                    className={`castora-card p-4 flex flex-col justify-between gap-4 transition-colors ${
+                      isSelected ? 'border-[#FF6041]' : ''
                     }`}
                   >
                     {/* Card Header */}
@@ -1160,7 +1174,7 @@ export function DigitalSignageView({
                                 return next;
                               });
                             }}
-                            className="mt-1 h-4 w-4 rounded border-[#CBD5E1] text-[#2563EB]"
+                            className="mt-1 h-4 w-4 rounded border-[#D5D7DE] accent-[#FF6041]"
                           />
                           <div className="min-w-0">
                             {editingScreenId === screen.id ? (
@@ -1183,21 +1197,21 @@ export function DigitalSignageView({
                                   type="text"
                                   value={editingScreenName}
                                   onChange={(e) => setEditingScreenName(e.target.value)}
-                                  className="h-7 w-36 rounded border border-[#2563EB] px-2 text-xs"
+                                  className="h-7 w-36 rounded border border-[#FF6041] px-2 text-xs text-[#141414] focus:outline-none"
                                 />
                                 <button
                                   type="submit"
-                                  className="rounded bg-[#2563EB] px-2 py-1 text-[11px] font-semibold text-white"
+                                  className="rounded bg-[#141414] px-2 py-1 text-[11px] font-semibold text-white hover:bg-[#FF6041]"
                                 >
                                   Save
                                 </button>
                               </form>
                             ) : (
                               <div className="flex items-center gap-1.5">
-                                <span className="font-mono text-[11px] font-semibold text-[#64748B] tabular-metrics">
+                                <span className="font-mono text-[11px] font-semibold text-[#797D82] tabular-metrics">
                                   S{screen.slotNumber}
                                 </span>
-                                <h3 className="truncate text-sm font-semibold text-[#172033]">
+                                <h3 className="truncate text-sm font-semibold text-[#141414]">
                                   {screen.name}
                                 </h3>
                                 <button
@@ -1207,20 +1221,20 @@ export function DigitalSignageView({
                                     setEditingScreenId(screen.id);
                                     setEditingScreenName(screen.name);
                                   }}
-                                  className="text-[#94A3B8] hover:text-[#172033]"
+                                  className="text-[#797D82] hover:text-[#141414]"
                                 >
                                   <Edit3 className="h-3 w-3" />
                                 </button>
                               </div>
                             )}
-                            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[#64748B]">
-                              <span className="font-mono font-semibold text-[#172033] tabular-metrics">
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[#5C6063]">
+                              <span className="font-mono font-semibold text-[#141414] tabular-metrics">
                                 Code: {screen.screenCode}
                               </span>
                               <button
                                 type="button"
                                 onClick={() => void handleCopyPlayerLink(screen)}
-                                className="inline-flex items-center gap-1 text-[#2563EB] hover:underline"
+                                className="inline-flex items-center gap-1 text-[#FF6041] hover:underline"
                               >
                                 {copiedId === screen.id ? (
                                   <>
@@ -1246,10 +1260,10 @@ export function DigitalSignageView({
                       </div>
 
                       {/* Sync & Cache Metrics */}
-                      <div className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3 space-y-2 text-xs">
+                      <div className="rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] p-3 space-y-2 text-xs">
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-[#64748B]">Connection</span>
-                          <span className="font-medium text-[#172033]">
+                          <span className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Connection</span>
+                          <span className="font-medium text-[#141414]">
                             {screen.claimed
                               ? screen.onlineStatus === 'online'
                                 ? 'Connected'
@@ -1258,42 +1272,42 @@ export function DigitalSignageView({
                           </span>
                         </div>
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-[#64748B]">Playlist</span>
-                          <span className="font-medium text-[#172033] truncate max-w-[180px]">
+                          <span className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Playlist</span>
+                          <span className="font-medium text-[#141414] truncate max-w-[180px]">
                             {screen.assignedPlaylistName ?? 'Unassigned'}
                           </span>
                         </div>
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-[#64748B]">Now Playing</span>
-                          <span className="font-medium text-[#172033] truncate max-w-[180px]">
+                          <span className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Now Playing</span>
+                          <span className="font-medium text-[#141414] truncate max-w-[180px]">
                             {screen.currentMediaName ?? '—'}
                           </span>
                         </div>
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-[#64748B]">Playback Duration</span>
-                          <span className="font-mono text-[#172033] tabular-metrics">
+                          <span className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Playback Duration</span>
+                          <span className="font-mono text-[#141414] tabular-metrics">
                             {formatDuration(screen.totalPlaybackSec)}
                           </span>
                         </div>
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-[#64748B]">Last Sync</span>
-                          <span className="text-[#475569]">{formatRelativeTime(screen.lastSyncAt)}</span>
+                          <span className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Last Sync</span>
+                          <span className="text-[#5C6063]">{formatRelativeTime(screen.lastSyncAt)}</span>
                         </div>
 
                         {screen.assignedPlaylistId && (
                           <div className="pt-1 space-y-1">
                             <div className="flex items-center justify-between text-[11px]">
-                              <span className="text-[#64748B]">
+                              <span className="text-[#5C6063]">
                                 Local Cache ({screen.cachedMediaCount}/{screen.totalMediaCount} files)
                               </span>
-                              <span className="font-mono font-semibold text-[#172033] tabular-metrics">
+                              <span className="font-mono font-semibold text-[#141414] tabular-metrics">
                                 {screen.cacheProgressPct}% ({formatBytes(screen.cachedBytes)} / {formatBytes(screen.totalBytes)})
                               </span>
                             </div>
-                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#E2E8F0]">
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#EBEBEB]">
                               <div
                                 className={`h-full transition-all ${
-                                  screen.cacheProgressPct >= 100 ? 'bg-[#16A34A]' : 'bg-[#2563EB]'
+                                  screen.cacheProgressPct >= 100 ? 'bg-[#16A34A]' : 'bg-[#FF6041]'
                                 }`}
                                 style={{ width: `${Math.min(100, Math.max(0, screen.cacheProgressPct))}%` }}
                               />
@@ -1308,7 +1322,7 @@ export function DigitalSignageView({
                     </div>
 
                     {/* Individual Assignment & Playback Controls */}
-                    <div className="space-y-2.5 border-t border-[#E2E8F0] pt-3">
+                    <div className="space-y-2.5 border-t border-[#D5D7DE] pt-3">
                       <div className="flex items-center gap-2">
                         <select
                           aria-label={`Assign playlist to ${screen.name}`}
@@ -1319,7 +1333,7 @@ export function DigitalSignageView({
                               e.target.value ? e.target.value : null
                             )
                           }
-                          className="h-9 flex-1 min-w-0 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 text-xs text-[#172033]"
+                          className="h-9 flex-1 min-w-0 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-2.5 text-xs text-[#141414] focus:border-[#FF6041] focus:outline-none"
                         >
                           <option value="">Unassigned (Stop)</option>
                           {playlists.map((pl) => (
@@ -1332,9 +1346,9 @@ export function DigitalSignageView({
                           type="button"
                           onClick={() => onOpenLocalPlayer(screen.screenCode)}
                           title="Open this screen in local TV Player view"
-                          className="inline-flex h-9 shrink-0 items-center gap-1 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#172033] hover:bg-[#F8FAFC]"
+                          className="inline-flex h-9 shrink-0 items-center gap-1 rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414]"
                         >
-                          <Tv className="h-3.5 w-3.5 text-[#2563EB]" />
+                          <Tv className="h-3.5 w-3.5 text-[#FF6041]" />
                           <span>Preview</span>
                         </button>
                       </div>
@@ -1345,7 +1359,7 @@ export function DigitalSignageView({
                             type="button"
                             disabled={!screen.assignedPlaylistId}
                             onClick={() => void handleControlTargets([screen.id], 'play')}
-                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#16A34A] hover:bg-[#F0FDF4] disabled:opacity-40"
+                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#15803D] hover:bg-[#F0FDF4] disabled:opacity-40"
                           >
                             <Play className="h-3 w-3" />
                             <span>Play</span>
@@ -1354,7 +1368,7 @@ export function DigitalSignageView({
                             type="button"
                             disabled={!screen.assignedPlaylistId}
                             onClick={() => void handleControlTargets([screen.id], 'pause')}
-                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#D97706] hover:bg-[#FFFBEB] disabled:opacity-40"
+                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#D97706] hover:bg-[#FFFBEB] disabled:opacity-40"
                           >
                             <Pause className="h-3 w-3" />
                             <span>Pause</span>
@@ -1363,7 +1377,7 @@ export function DigitalSignageView({
                             type="button"
                             disabled={!screen.assignedPlaylistId}
                             onClick={() => void handleControlTargets([screen.id], 'stop')}
-                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#DC2626] hover:bg-[#FEF2F2] disabled:opacity-40"
+                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#DC2626] hover:bg-[#FEF2F2] disabled:opacity-40"
                           >
                             <Square className="h-3 w-3" />
                             <span>Stop</span>
@@ -1382,7 +1396,7 @@ export function DigitalSignageView({
                                 regenerateCode: true,
                               }).then(() => refreshWorkspaceData(hostToken));
                             }}
-                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2E8F0] text-[#64748B] hover:bg-[#F8FAFC] hover:text-[#172033]"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#D5D7DE] text-[#5C6063] hover:border-[#141414] hover:text-[#141414]"
                           >
                             <RotateCcw className="h-3.5 w-3.5" />
                           </button>
@@ -1400,7 +1414,7 @@ export function DigitalSignageView({
                                 return refreshWorkspaceData(hostToken);
                               });
                             }}
-                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2E8F0] text-[#DC2626] hover:bg-[#FEF2F2]"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#D5D7DE] text-[#DC2626] hover:bg-[#FEF2F2]"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
@@ -1433,15 +1447,15 @@ export function DigitalSignageView({
             }}
             className={`rounded-xl border-2 border-dashed p-6 text-center transition-colors ${
               dragActive
-                ? 'border-[#2563EB] bg-[#EFF6FF]'
-                : 'border-[#CBD5E1] bg-white hover:border-[#94A3B8]'
+                ? 'border-[#FF6041] bg-[#FFF4F1]'
+                : 'border-[#D5D7DE] bg-white hover:border-[#141414]'
             }`}
           >
-            <Upload className="mx-auto h-7 w-7 text-[#2563EB]" aria-hidden="true" />
-            <p className="mt-2 text-sm font-semibold text-[#172033]">
+            <Upload className="mx-auto h-7 w-7 text-[#FF6041]" aria-hidden="true" />
+            <p className="mt-2 font-display text-sm font-semibold text-[#141414]">
               Upload Signage Images &amp; Videos
             </p>
-            <p className="mt-1 text-xs text-[#64748B]">
+            <p className="mt-1 text-xs text-[#5C6063]">
               Drag and drop multiple files or browse. Supported: JPG, JPEG, PNG, WebP, GIF, MP4, WebM, MOV (up to{' '}
               {formatBytes(storageStatus?.maxFileSizeBytes ?? 250 * 1024 * 1024)} each).
             </p>
@@ -1461,7 +1475,7 @@ export function DigitalSignageView({
               type="button"
               disabled={uploadPct !== null}
               onClick={() => fileInputRef.current?.click()}
-              className="mt-4 inline-flex h-10 items-center gap-2 rounded-[10px] bg-[#2563EB] px-4 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+              className="mt-4 inline-flex h-10 items-center gap-2 rounded-[10px] bg-[#141414] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#FF6041] disabled:opacity-50"
             >
               <Upload className="h-3.5 w-3.5" aria-hidden="true" />
               <span>{uploadPct !== null ? `Uploading ${uploadPct}%...` : 'Select Media Files'}</span>
@@ -1469,13 +1483,13 @@ export function DigitalSignageView({
 
             {uploadPct !== null && (
               <div className="mx-auto mt-4 max-w-md space-y-1.5 text-left">
-                <div className="flex items-center justify-between text-xs text-[#475569]">
+                <div className="flex items-center justify-between text-xs text-[#5C6063]">
                   <span className="truncate">{uploadingFilesLabel}</span>
-                  <span className="font-mono tabular-metrics">{uploadPct}%</span>
+                  <span className="font-mono tabular-metrics text-[#141414]">{uploadPct}%</span>
                 </div>
-                <div className="h-2 w-full overflow-hidden rounded-full bg-[#E2E8F0]">
+                <div className="h-2 w-full overflow-hidden rounded-full bg-[#EBEBEB]">
                   <div
-                    className="h-full bg-[#2563EB] transition-all"
+                    className="h-full bg-[#FF6041] transition-all"
                     style={{ width: `${uploadPct}%` }}
                   />
                 </div>
@@ -1484,10 +1498,10 @@ export function DigitalSignageView({
           </div>
 
           {media.length === 0 ? (
-            <div className="rounded-xl border border-[#E2E8F0] bg-white p-10 text-center">
-              <ImageIcon className="mx-auto h-8 w-8 text-[#94A3B8]" />
-              <p className="mt-3 text-sm font-semibold text-[#172033]">Media Library is empty</p>
-              <p className="mt-1 text-xs text-[#64748B]">
+            <div className="castora-card p-10 text-center">
+              <ImageIcon className="mx-auto h-8 w-8 text-[#797D82]" />
+              <p className="mt-3 font-display text-sm font-semibold text-[#141414]">Media Library is empty</p>
+              <p className="mt-1 text-xs text-[#5C6063]">
                 Upload images or MP4 videos above to start building signage playlists.
               </p>
             </div>
@@ -1498,12 +1512,12 @@ export function DigitalSignageView({
                 return (
                   <div
                     key={asset.id}
-                    className="overflow-hidden rounded-xl border border-[#E2E8F0] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] flex flex-col"
+                    className="castora-card overflow-hidden flex flex-col"
                   >
                     <button
                       type="button"
                       onClick={() => setPreviewMedia(asset)}
-                      className="relative aspect-video w-full bg-[#0F172A] overflow-hidden text-left group"
+                      className="relative aspect-video w-full bg-[#141414] overflow-hidden text-left group"
                     >
                       {asset.mediaKind === 'image' ? (
                         <img
@@ -1521,7 +1535,7 @@ export function DigitalSignageView({
                           className="h-full w-full object-contain"
                         />
                       )}
-                      <span className="absolute bottom-2 right-2 rounded bg-black/75 px-2 py-0.5 font-mono text-[10px] font-semibold text-white">
+                      <span className="absolute bottom-2 right-2 rounded bg-[#141414]/85 px-2 py-0.5 font-mono text-[10px] font-semibold text-white">
                         {asset.format}
                         {asset.durationSec ? ` · ${formatDuration(asset.durationSec)}` : ''}
                       </span>
@@ -1541,21 +1555,21 @@ export function DigitalSignageView({
                               type="text"
                               value={renamingMediaDraft}
                               onChange={(e) => setRenamingMediaDraft(e.target.value)}
-                              className="h-8 flex-1 rounded border border-[#2563EB] px-2 text-xs"
+                              className="h-8 flex-1 rounded border border-[#FF6041] px-2 text-xs text-[#141414] focus:outline-none"
                             />
                             <button
                               type="submit"
-                              className="h-8 rounded bg-[#2563EB] px-2.5 text-xs font-semibold text-white"
+                              className="h-8 rounded bg-[#141414] px-2.5 text-xs font-semibold text-white hover:bg-[#FF6041]"
                             >
                               Save
                             </button>
                           </form>
                         ) : (
-                          <h3 className="truncate text-sm font-semibold text-[#172033]">
+                          <h3 className="truncate text-sm font-semibold text-[#141414]">
                             {asset.displayName}
                           </h3>
                         )}
-                        <p className="mt-1 font-mono text-[11px] text-[#64748B] tabular-metrics">
+                        <p className="mt-1 font-mono text-[11px] text-[#797D82] tabular-metrics">
                           {formatBytes(asset.sizeBytes)}
                           {asset.width && asset.height ? ` · ${asset.width}×${asset.height}` : ''}
                           {' · '}
@@ -1563,7 +1577,7 @@ export function DigitalSignageView({
                         </p>
                       </div>
 
-                      <div className="flex items-center justify-between gap-2 border-t border-[#E2E8F0] pt-2.5">
+                      <div className="flex items-center justify-between gap-2 border-t border-[#D5D7DE] pt-2.5">
                         <div className="flex items-center gap-1">
                           <button
                             type="button"
@@ -1571,7 +1585,7 @@ export function DigitalSignageView({
                               setRenamingMediaId(asset.id);
                               setRenamingMediaDraft(asset.displayName);
                             }}
-                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#E2E8F0] px-2.5 text-xs font-medium text-[#475569] hover:bg-[#F8FAFC]"
+                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-2.5 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] hover:bg-white"
                           >
                             <Edit3 className="h-3 w-3" />
                             <span>Rename</span>
@@ -1583,7 +1597,7 @@ export function DigitalSignageView({
                               setActiveTab('playlists');
                               setStatusNotice(`Added "${asset.displayName}" to playlist builder.`);
                             }}
-                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#E2E8F0] px-2.5 text-xs font-medium text-[#2563EB] hover:bg-[#EFF6FF]"
+                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#FF6041]/35 bg-[#FFF4F1] px-2.5 text-xs font-medium text-[#FF6041] transition-colors hover:bg-[#FF6041] hover:text-white"
                           >
                             <Plus className="h-3 w-3" />
                             <span>Queue</span>
@@ -1593,7 +1607,7 @@ export function DigitalSignageView({
                           type="button"
                           aria-label={`Delete ${asset.displayName}`}
                           onClick={() => void handleDeleteMedia(asset)}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2E8F0] text-[#DC2626] hover:bg-[#FEF2F2]"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#D5D7DE] text-[#DC2626] hover:bg-[#FEF2F2]"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
@@ -1612,13 +1626,13 @@ export function DigitalSignageView({
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           {/* Left: Saved Playlists */}
           <div className="lg:col-span-4 space-y-3">
-            <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-3">
+            <div className="castora-card p-4 space-y-3">
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-[#172033]">Saved Playlists</h2>
+                <h2 className="font-display text-sm font-semibold text-[#141414]">Saved Playlists</h2>
                 <button
                   type="button"
                   onClick={resetBuilderNew}
-                  className="inline-flex h-8 items-center gap-1 rounded-lg bg-[#2563EB] px-3 text-xs font-semibold text-white hover:bg-[#1D4ED8]"
+                  className="inline-flex h-8 items-center gap-1 rounded-lg bg-[#141414] px-3 text-xs font-semibold text-white transition-colors hover:bg-[#FF6041]"
                 >
                   <Plus className="h-3.5 w-3.5" />
                   <span>New</span>
@@ -1626,7 +1640,7 @@ export function DigitalSignageView({
               </div>
 
               {playlists.length === 0 ? (
-                <p className="py-4 text-center text-xs text-[#64748B]">
+                <p className="py-4 text-center text-xs text-[#5C6063]">
                   No playlists saved yet. Build one on the right.
                 </p>
               ) : (
@@ -1638,8 +1652,8 @@ export function DigitalSignageView({
                         key={pl.id}
                         className={`flex items-center justify-between gap-2 rounded-lg border p-3 transition-colors ${
                           active
-                            ? 'border-[#2563EB] bg-[#EFF6FF]'
-                            : 'border-[#E2E8F0] bg-[#F8FAFC] hover:bg-white'
+                            ? 'border-[#FF6041] bg-[#FFF4F1]'
+                            : 'border-[#D5D7DE] bg-[#FAFAFA] hover:bg-white'
                         }`}
                       >
                         <button
@@ -1647,8 +1661,8 @@ export function DigitalSignageView({
                           onClick={() => loadPlaylistIntoBuilder(pl)}
                           className="min-w-0 flex-1 text-left"
                         >
-                          <p className="truncate text-xs font-semibold text-[#172033]">{pl.name}</p>
-                          <p className="mt-0.5 text-[11px] text-[#64748B] tabular-metrics">
+                          <p className="truncate text-xs font-semibold text-[#141414]">{pl.name}</p>
+                          <p className="mt-0.5 text-[11px] text-[#5C6063] tabular-metrics">
                             {pl.items.length} item{pl.items.length === 1 ? '' : 's'} ·{' '}
                             {pl.loopPlaylist ? 'Loops continuously' : 'Single pass'}
                           </p>
@@ -1669,12 +1683,12 @@ export function DigitalSignageView({
             </div>
 
             {/* Quick Media Adder */}
-            <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-3">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-[#64748B]">
+            <div className="castora-card p-4 space-y-3">
+              <h3 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#797D82]">
                 Add from Media Library
               </h3>
               {media.length === 0 ? (
-                <p className="text-xs text-[#64748B]">
+                <p className="text-xs text-[#5C6063]">
                   Upload images or videos in Media Library first.
                 </p>
               ) : (
@@ -1684,12 +1698,12 @@ export function DigitalSignageView({
                       key={asset.id}
                       type="button"
                       onClick={() => handleAddMediaToBuilder(asset)}
-                      className="flex w-full items-center justify-between gap-2 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-left text-xs hover:border-[#2563EB]/40 hover:bg-[#EFF6FF]"
+                      className="flex w-full items-center justify-between gap-2 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-3 py-2 text-left text-xs transition-colors hover:border-[#FF6041] hover:bg-[#FFF4F1]"
                     >
-                      <span className="truncate font-medium text-[#172033]">
+                      <span className="truncate font-medium text-[#141414]">
                         {asset.displayName}
                       </span>
-                      <span className="shrink-0 font-mono text-[10px] text-[#2563EB]">
+                      <span className="shrink-0 font-mono text-[10px] font-semibold text-[#FF6041]">
                         + Add ({asset.format})
                       </span>
                     </button>
@@ -1702,16 +1716,16 @@ export function DigitalSignageView({
           {/* Right: Playlist Editor & Drag-and-Drop Queue */}
           <form
             onSubmit={handleSavePlaylist}
-            className="lg:col-span-8 rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4"
+            className="lg:col-span-8 castora-card p-5 space-y-4"
           >
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E2E8F0] pb-3">
-              <h2 className="text-sm font-semibold text-[#172033]">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#D5D7DE] pb-3">
+              <h2 className="font-display text-sm font-semibold text-[#141414]">
                 {editingPlaylistId ? 'Edit Playlist' : 'Create New Playlist'}
               </h2>
               <button
                 type="submit"
                 disabled={savingPlaylist}
-                className="inline-flex h-10 items-center gap-1.5 rounded-[10px] bg-[#2563EB] px-4 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                className="inline-flex h-10 items-center gap-1.5 rounded-[10px] bg-[#141414] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#FF6041] disabled:opacity-50"
               >
                 <span>{savingPlaylist ? 'Saving...' : editingPlaylistId ? 'Save Changes' : 'Create Playlist'}</span>
               </button>
@@ -1719,7 +1733,7 @@ export function DigitalSignageView({
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
-                <label htmlFor="pl-name" className="block text-xs font-medium text-[#64748B]">
+                <label htmlFor="pl-name" className="block font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
                   Playlist Name
                 </label>
                 <input
@@ -1729,11 +1743,11 @@ export function DigitalSignageView({
                   value={plName}
                   onChange={(e) => setPlName(e.target.value)}
                   placeholder="Lobby Morning Loop"
-                  className="mt-1 h-10 w-full rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-sm text-[#172033] focus:border-[#2563EB] focus:bg-white focus:outline-none"
+                  className="mt-1 h-10 w-full rounded-[10px] border border-[#D5D7DE] bg-[#FAFAFA] px-3 text-sm text-[#141414] placeholder:text-[#797D82] focus:border-[#FF6041] focus:bg-white focus:outline-none"
                 />
               </div>
               <div>
-                <label htmlFor="pl-desc" className="block text-xs font-medium text-[#64748B]">
+                <label htmlFor="pl-desc" className="block font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
                   Notes (optional)
                 </label>
                 <input
@@ -1743,29 +1757,29 @@ export function DigitalSignageView({
                   value={plDescription}
                   onChange={(e) => setPlDescription(e.target.value)}
                   placeholder="Continuous 7-hour reception signage"
-                  className="mt-1 h-10 w-full rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-sm text-[#172033] focus:border-[#2563EB] focus:bg-white focus:outline-none"
+                  className="mt-1 h-10 w-full rounded-[10px] border border-[#D5D7DE] bg-[#FAFAFA] px-3 text-sm text-[#141414] placeholder:text-[#797D82] focus:border-[#FF6041] focus:bg-white focus:outline-none"
                 />
               </div>
             </div>
 
-            <label className="flex items-center gap-2.5 text-xs font-medium text-[#172033]">
+            <label className="flex items-center gap-2.5 text-xs font-medium text-[#141414]">
               <input
                 type="checkbox"
                 checked={plLoop}
                 onChange={(e) => setPlLoop(e.target.checked)}
-                className="h-4 w-4 rounded border-[#CBD5E1] text-[#2563EB]"
+                className="h-4 w-4 rounded border-[#D5D7DE] accent-[#FF6041]"
               />
               <span>Loop whole playlist continuously (required for 6–7+ hour unattended signage)</span>
             </label>
 
             <div className="space-y-2 pt-2">
-              <div className="flex items-center justify-between text-xs text-[#64748B]">
+              <div className="flex items-center justify-between text-xs text-[#5C6063]">
                 <span>Playlist Order (drag rows or use arrows to reorder)</span>
-                <span className="font-mono tabular-metrics">{plItems.length} item(s)</span>
+                <span className="font-mono tabular-metrics text-[#797D82]">{plItems.length} item(s)</span>
               </div>
 
               {plItems.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-8 text-center text-xs text-[#64748B]">
+                <div className="rounded-xl border border-dashed border-[#D5D7DE] bg-[#FAFAFA] p-8 text-center text-xs text-[#5C6063]">
                   Click items from the Media Library panel on the left to add images or videos to this playlist.
                 </div>
               ) : (
@@ -1785,18 +1799,18 @@ export function DigitalSignageView({
                           }
                           setDragIndex(null);
                         }}
-                        className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3"
+                        className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] p-3"
                       >
                         <div className="flex items-center gap-2.5 min-w-0">
-                          <GripVertical className="h-4 w-4 shrink-0 text-[#94A3B8] cursor-grab" />
-                          <span className="font-mono text-xs font-semibold text-[#64748B] tabular-metrics">
+                          <GripVertical className="h-4 w-4 shrink-0 text-[#797D82] cursor-grab" />
+                          <span className="font-mono text-xs font-semibold text-[#797D82] tabular-metrics">
                             #{idx + 1}
                           </span>
                           <div className="min-w-0">
-                            <p className="truncate text-xs font-semibold text-[#172033]">
+                            <p className="truncate text-xs font-semibold text-[#141414]">
                               {asset?.displayName ?? 'Missing media'}
                             </p>
-                            <p className="font-mono text-[11px] text-[#64748B]">
+                            <p className="font-mono text-[11px] text-[#797D82]">
                               {asset?.format ?? 'UNKNOWN'}
                               {asset?.durationSec ? ` · ${formatDuration(asset.durationSec)}` : ''}
                             </p>
@@ -1805,7 +1819,7 @@ export function DigitalSignageView({
 
                         <div className="flex flex-wrap items-center gap-2">
                           {isImage ? (
-                            <label className="flex items-center gap-1.5 text-[11px] text-[#475569]">
+                            <label className="flex items-center gap-1.5 text-[11px] text-[#5C6063]">
                               <span>Duration (s)</span>
                               <input
                                 type="number"
@@ -1820,16 +1834,16 @@ export function DigitalSignageView({
                                     )
                                   );
                                 }}
-                                className="h-8 w-16 rounded border border-[#E2E8F0] bg-white px-2 font-mono text-xs tabular-metrics"
+                                className="h-8 w-16 rounded border border-[#D5D7DE] bg-white px-2 font-mono text-xs text-[#141414] tabular-metrics focus:border-[#FF6041] focus:outline-none"
                               />
                             </label>
                           ) : (
-                            <span className="rounded border border-[#E2E8F0] bg-white px-2 py-1 text-[11px] text-[#475569]">
+                            <span className="rounded border border-[#D5D7DE] bg-white px-2 py-1 text-[11px] text-[#5C6063]">
                               Play to completion
                             </span>
                           )}
 
-                          <label className="flex items-center gap-1.5 text-[11px] text-[#475569]">
+                          <label className="flex items-center gap-1.5 text-[11px] text-[#5C6063]">
                             <span>Repeat ×</span>
                             <input
                               type="number"
@@ -1842,7 +1856,7 @@ export function DigitalSignageView({
                                   prev.map((p, i) => (i === idx ? { ...p, repeatCount: val } : p))
                                 );
                               }}
-                              className="h-8 w-14 rounded border border-[#E2E8F0] bg-white px-2 font-mono text-xs tabular-metrics"
+                              className="h-8 w-14 rounded border border-[#D5D7DE] bg-white px-2 font-mono text-xs text-[#141414] tabular-metrics focus:border-[#FF6041] focus:outline-none"
                             />
                           </label>
 
@@ -1851,7 +1865,7 @@ export function DigitalSignageView({
                             disabled={idx === 0}
                             aria-label="Move item up"
                             onClick={() => handleMovePlaylistItem(idx, idx - 1)}
-                            className="inline-flex h-8 w-8 items-center justify-center rounded border border-[#E2E8F0] bg-white text-[#475569] disabled:opacity-35"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded border border-[#D5D7DE] bg-white text-[#5C6063] hover:border-[#141414] hover:text-[#141414] disabled:opacity-35"
                           >
                             <ArrowUp className="h-3.5 w-3.5" />
                           </button>
@@ -1860,7 +1874,7 @@ export function DigitalSignageView({
                             disabled={idx === plItems.length - 1}
                             aria-label="Move item down"
                             onClick={() => handleMovePlaylistItem(idx, idx + 1)}
-                            className="inline-flex h-8 w-8 items-center justify-center rounded border border-[#E2E8F0] bg-white text-[#475569] disabled:opacity-35"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded border border-[#D5D7DE] bg-white text-[#5C6063] hover:border-[#141414] hover:text-[#141414] disabled:opacity-35"
                           >
                             <ArrowDown className="h-3.5 w-3.5" />
                           </button>
@@ -1870,7 +1884,7 @@ export function DigitalSignageView({
                             onClick={() =>
                               setPlItems((prev) => prev.filter((_, i) => i !== idx))
                             }
-                            className="inline-flex h-8 w-8 items-center justify-center rounded border border-[#E2E8F0] bg-white text-[#DC2626] hover:bg-[#FEF2F2]"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded border border-[#D5D7DE] bg-white text-[#DC2626] hover:bg-[#FEF2F2]"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
@@ -1888,19 +1902,19 @@ export function DigitalSignageView({
       {/* Media Preview Modal */}
       {previewMedia && hostToken && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#141414]/80 p-4 backdrop-blur-xs"
           onClick={() => setPreviewMedia(null)}
         >
           <div
-            className="w-full max-w-4xl overflow-hidden rounded-xl bg-white shadow-2xl"
+            className="w-full max-w-4xl overflow-hidden rounded-xl border border-[#D5D7DE] bg-white castora-stage-shadow"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-[#E2E8F0] px-4 py-3">
+            <div className="flex items-center justify-between border-b border-[#D5D7DE] px-4 py-3">
               <div>
-                <h3 className="text-sm font-semibold text-[#172033]">
+                <h3 className="font-display text-sm font-semibold text-[#141414]">
                   {previewMedia.displayName}
                 </h3>
-                <p className="font-mono text-[11px] text-[#64748B] tabular-metrics">
+                <p className="font-mono text-[11px] text-[#797D82] tabular-metrics">
                   {previewMedia.format} · {formatBytes(previewMedia.sizeBytes)}
                   {previewMedia.durationSec ? ` · ${formatDuration(previewMedia.durationSec)}` : ''}
                 </p>
@@ -1908,12 +1922,12 @@ export function DigitalSignageView({
               <button
                 type="button"
                 onClick={() => setPreviewMedia(null)}
-                className="rounded-lg p-1.5 text-[#64748B] hover:bg-[#F1F5F9]"
+                className="rounded-lg p-1.5 text-[#5C6063] hover:bg-[#FAFAFA] hover:text-[#141414]"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="bg-black flex items-center justify-center max-h-[75vh]">
+            <div className="bg-[#141414] flex items-center justify-center max-h-[75vh]">
               {previewMedia.mediaKind === 'image' ? (
                 <img
                   src={buildAuthenticatedMediaUrl(previewMedia.id, hostToken)}
@@ -1935,52 +1949,52 @@ export function DigitalSignageView({
 
       {/* Workspace Recovery / Key Modal */}
       {showWorkspaceModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-xl border border-[#E2E8F0] bg-white p-6 shadow-xl space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#141414]/60 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-md rounded-xl border border-[#D5D7DE] bg-white p-6 castora-stage-shadow space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="font-display text-base font-semibold text-[#172033]">
+              <h3 className="font-display text-base font-semibold text-[#141414]">
                 Signage Studio Workspace
               </h3>
-              <button type="button" onClick={() => setShowWorkspaceModal(false)}>
-                <X className="h-4 w-4 text-[#64748B]" />
+              <button type="button" onClick={() => setShowWorkspaceModal(false)} className="text-[#5C6063] hover:text-[#141414]">
+                <X className="h-4 w-4" />
               </button>
             </div>
 
-            <div className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3 text-xs space-y-1.5">
+            <div className="rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] p-3 text-xs space-y-1.5">
               <p>
-                <span className="text-[#64748B]">Workspace ID:</span>{' '}
-                <span className="font-mono font-semibold text-[#172033]">{workspaceId ?? '—'}</span>
+                <span className="text-[#5C6063]">Workspace ID:</span>{' '}
+                <span className="font-mono font-semibold text-[#141414]">{workspaceId ?? '—'}</span>
               </p>
               {recoveryCode && (
                 <p>
-                  <span className="text-[#64748B]">Recovery Key:</span>{' '}
-                  <span className="font-mono font-semibold text-[#2563EB]">{recoveryCode}</span>
+                  <span className="text-[#5C6063]">Recovery Key:</span>{' '}
+                  <span className="font-mono font-semibold text-[#FF6041]">{recoveryCode}</span>
                 </p>
               )}
-              <p className="text-[11px] text-[#64748B]">
+              <p className="text-[11px] text-[#5C6063]">
                 Save these credentials if you switch browsers or clear site data. TVs remain cached and playing independently either way.
               </p>
             </div>
 
-            <form onSubmit={handleRecoverSubmit} className="space-y-2.5 border-t border-[#E2E8F0] pt-3">
-              <p className="text-xs font-semibold text-[#172033]">Switch / Restore Another Workspace</p>
+            <form onSubmit={handleRecoverSubmit} className="space-y-2.5 border-t border-[#D5D7DE] pt-3">
+              <p className="text-xs font-semibold text-[#141414]">Switch / Restore Another Workspace</p>
               <input
                 type="text"
                 value={recoverWsId}
                 onChange={(e) => setRecoverWsId(e.target.value)}
                 placeholder="Workspace ID (e.g., ws-...)"
-                className="h-9 w-full rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 text-xs"
+                className="h-9 w-full rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-3 text-xs text-[#141414] focus:border-[#FF6041] focus:bg-white focus:outline-none"
               />
               <input
                 type="text"
                 value={recoverKey}
                 onChange={(e) => setRecoverKey(e.target.value)}
                 placeholder="Recovery Key (XXXXXX-XXXXXX)"
-                className="h-9 w-full rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 font-mono text-xs uppercase"
+                className="h-9 w-full rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-3 font-mono text-xs uppercase text-[#141414] focus:border-[#FF6041] focus:bg-white focus:outline-none"
               />
               <button
                 type="submit"
-                className="h-9 w-full rounded-lg bg-[#2563EB] text-xs font-semibold text-white hover:bg-[#1D4ED8]"
+                className="h-9 w-full rounded-lg bg-[#141414] text-xs font-semibold text-white transition-colors hover:bg-[#FF6041]"
               >
                 Restore Workspace
               </button>

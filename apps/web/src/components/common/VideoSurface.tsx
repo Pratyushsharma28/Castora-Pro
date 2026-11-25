@@ -488,8 +488,8 @@ export function VideoSurface({
 
   return (
     <div
-      className={`castora-surface-card flex min-w-0 flex-col overflow-hidden rounded-xl border bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] ${
-        highlight ? 'border-[#2563EB]/50 ring-1 ring-[#2563EB]/15' : 'border-[#E2E8F0]'
+      className={`castora-surface-card flex min-w-0 flex-col overflow-hidden rounded-xl border bg-white castora-stage-shadow transition-colors ${
+        highlight ? 'border-[#FF6041]/70 ring-1 ring-[#FF6041]/20' : 'border-[#D5D7DE]'
       }`}
     >
       <div
@@ -497,17 +497,17 @@ export function VideoSurface({
         className={
           isFullscreen
             ? 'hidden'
-            : 'flex shrink-0 items-center justify-between gap-3 border-b border-[#E2E8F0] bg-white px-4 py-2.5'
+            : 'flex shrink-0 items-center justify-between gap-3 border-b border-[#D5D7DE] bg-white px-4 py-2.5'
         }
       >
         <div className="min-w-0 flex items-center gap-2.5">
-          <span className="font-mono text-[11px] font-medium tabular-metrics shrink-0 text-[#64748B]">
+          <span className="font-mono text-[11px] font-normal tabular-metrics shrink-0 text-[#5C6063] bg-[#EBEBEB] px-1.5 py-0.5 rounded-[4px]">
             {slotLabel}
           </span>
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold text-[#172033]">{title}</div>
+            <div className="truncate text-sm font-semibold text-[#141414]">{title}</div>
             {subtitle && (
-              <div className="truncate text-[11px] text-[#64748B]">{subtitle}</div>
+              <div className="truncate text-[11px] text-[#5C6063]">{subtitle}</div>
             )}
           </div>
         </div>
@@ -523,7 +523,7 @@ export function VideoSurface({
               aria-label={
                 isFullscreen ? `Exit fullscreen for ${title}` : `Fullscreen ${title}`
               }
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 text-xs font-medium text-[#172033] transition-colors hover:border-[#2563EB] hover:text-[#2563EB] whitespace-nowrap"
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-2.5 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] hover:bg-[#141414] hover:text-white whitespace-nowrap"
             >
               {isFullscreen ? (
                 <Minimize2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
@@ -547,8 +547,8 @@ export function VideoSurface({
             ? 'castora-video-fs fixed inset-0 h-screen w-screen overflow-hidden bg-black p-0 m-0 border-0 rounded-none shadow-none'
             : `castora-video-fs relative w-full overflow-hidden ${
                 stream
-                  ? `bg-[#0F172A] aspect-video ${large ? 'max-h-[78vh]' : 'max-h-[72vh]'}`
-                  : 'bg-[#F8FAFC] aspect-video max-h-[56vh]'
+                  ? `bg-[#000000] aspect-video ${large ? 'max-h-[78vh]' : 'max-h-[72vh]'}`
+                  : 'bg-[#FAFAFA] aspect-video max-h-[56vh]'
               }`
         }
       >
@@ -565,7 +565,7 @@ export function VideoSurface({
               className={
                 isFullscreen
                   ? 'h-screen w-screen bg-black object-contain block m-0 p-0 rounded-none'
-                  : 'absolute inset-0 h-full w-full bg-[#0F172A] object-contain'
+                  : 'absolute inset-0 h-full w-full bg-[#000000] object-contain'
               }
             />
             {effectiveAutoplayBlocked && !isFullscreen && (
@@ -573,7 +573,7 @@ export function VideoSurface({
                 <button
                   type="button"
                   onClick={() => void handleActivateAudio()}
-                  className="pointer-events-auto inline-flex min-h-[42px] items-center gap-2 rounded-xl border border-white/25 bg-[#172033]/90 px-4 py-2 text-xs font-semibold text-white shadow-lg backdrop-blur-sm transition hover:bg-[#2563EB] focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                  className="pointer-events-auto inline-flex min-h-[42px] items-center gap-2 rounded-lg border border-white/25 bg-[#141414]/90 px-4 py-2 text-xs font-semibold text-white shadow-lg backdrop-blur-sm transition hover:bg-[#FF6041] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#FF6041]"
                 >
                   <Volume2 className="h-4 w-4 shrink-0" aria-hidden="true" />
                   <span>Activate Audio</span>
@@ -583,11 +583,11 @@ export function VideoSurface({
           </>
         ) : (
           <div className="flex h-full w-full flex-col items-center justify-center px-6 py-8 text-center">
-            <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#E2E8F0] bg-white text-[#64748B] shadow-xs">
+            <div className="flex h-11 w-11 items-center justify-center rounded-lg border border-[#D5D7DE] bg-white text-[#5C6063]">
               <Monitor className="h-5 w-5" aria-hidden="true" />
             </div>
-            <p className="mt-3 text-sm font-semibold text-[#172033]">Waiting for screen signal</p>
-            <p className="mt-1 max-w-md text-xs leading-relaxed text-[#64748B]">
+            <p className="mt-3 text-sm font-semibold text-[#141414]">Waiting for screen signal</p>
+            <p className="mt-1 max-w-md text-xs leading-relaxed text-[#5C6063]">
               {standbyReason}
             </p>
             {actions && (
@@ -605,7 +605,7 @@ export function VideoSurface({
           className={
             isFullscreen
               ? 'hidden'
-              : 'shrink-0 border-t border-[#E2E8F0] bg-[#F8FAFC] px-4 py-2.5'
+              : 'shrink-0 border-t border-[#D5D7DE] bg-[#FAFAFA] px-4 py-2.5'
           }
         >
           {footerMeta}

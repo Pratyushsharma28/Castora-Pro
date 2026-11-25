@@ -1647,7 +1647,7 @@ export function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#F5F7FB] text-[#172033] flex flex-col">
+    <div className="min-h-screen bg-[#F2F2F2] text-[#141414] flex flex-col">
       <TopControlBar
         activeDestination={destination}
         onSelectDestination={setDestination}
@@ -1657,19 +1657,19 @@ export function App() {
         onPrimaryAction={handleTopBarPrimaryAction}
       />
 
-      <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 pb-24 sm:px-6 md:pb-8">
+      <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 pb-24 sm:px-6 md:pb-10">
         {activeRoom?.hostTransfer && activeRoom.hostTransfer.targetDeviceId === deviceId && (
           <div
             data-castora-chrome
             role="status"
-            className="mb-6 flex flex-col gap-3 rounded-xl border border-[#2563EB]/40 bg-[#EFF6FF] px-5 py-4 sm:flex-row sm:items-center sm:justify-between"
+            className="mb-6 flex flex-col gap-3 rounded-xl border border-[#FF6041]/45 bg-[#141414] px-5 py-4 text-white sm:flex-row sm:items-center sm:justify-between"
           >
             <div>
-              <p className="text-sm font-semibold text-[#172033]">
+              <p className="text-sm font-semibold text-white">
                 {activeRoom.hostDeviceName} invited you to become the host of{' '}
                 {activeRoom.roomName || `Room ${activeRoom.roomId}`}
               </p>
-              <p className="text-xs text-[#64748B]">
+              <p className="text-xs text-[#A3A8AE]">
                 Accepting transfers room ownership and host controls immediately while keeping active WebRTC streams live.
               </p>
             </div>
@@ -1680,7 +1680,7 @@ export function App() {
                 onClick={() => {
                   void handleRespondHostTransfer(true);
                 }}
-                className="inline-flex h-9 items-center rounded-lg bg-[#2563EB] px-4 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                className="inline-flex h-9 items-center rounded-lg bg-[#FF6041] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#E85032] disabled:opacity-50"
               >
                 {transferActionBusy ? 'Updating...' : 'Accept Host Role'}
               </button>
@@ -1690,7 +1690,7 @@ export function App() {
                 onClick={() => {
                   void handleRespondHostTransfer(false);
                 }}
-                className="inline-flex h-9 items-center rounded-lg border border-[#E2E8F0] bg-white px-3.5 text-xs font-medium text-[#172033] hover:bg-[#F8FAFC] disabled:opacity-50"
+                className="inline-flex h-9 items-center rounded-lg border border-white/20 bg-white/10 px-3.5 text-xs font-medium text-white transition-colors hover:bg-white/20 disabled:opacity-50"
               >
                 Decline
               </button>
@@ -1698,6 +1698,7 @@ export function App() {
           </div>
         )}
 
+        <div key={destination} className="castora-view-enter">
         {destination === 'control-room' && (
           <ControlRoomView
             deviceId={deviceId}
@@ -1940,6 +1941,7 @@ export function App() {
             onLogEvent={logEvent}
           />
         )}
+        </div>
       </main>
 
       <MobileReceiverBar

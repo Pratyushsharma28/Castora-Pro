@@ -547,43 +547,43 @@ export function MultiViewView({
         }
         footerMeta={
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs tabular-metrics">
-            <div className="flex flex-wrap items-center gap-3 text-[#64748B]">
+            <div className="flex flex-wrap items-center gap-3 text-[#5C6063]">
               <span>
                 FPS:{' '}
-                <strong className="font-semibold text-[#172033]">
+                <strong className="font-semibold text-[#141414]">
                   {measuredFps !== null ? measuredFps.toFixed(1) : '—'}
                 </strong>
               </span>
               <span>
                 Bitrate:{' '}
-                <strong className="font-semibold text-[#172033]">
+                <strong className="font-semibold text-[#141414]">
                   {formatBitrate(slot.telemetry.bitrateKbps)}
                 </strong>
               </span>
               <span>
                 Res:{' '}
-                <strong className="font-semibold text-[#172033]">
+                <strong className="font-semibold text-[#141414]">
                   {slot.telemetry.resolution ?? '—'}
                 </strong>
               </span>
               {slot.telemetry.codecMimeType && (
                 <span>
                   Codec:{' '}
-                  <strong className="font-semibold text-[#172033]">
+                  <strong className="font-semibold text-[#141414]">
                     {slot.telemetry.codecMimeType}
                   </strong>
                 </span>
               )}
               <span>
                 RTT:{' '}
-                <strong className="font-semibold text-[#172033]">
+                <strong className="font-semibold text-[#141414]">
                   {slot.telemetry.rttMs !== null ? `${slot.telemetry.rttMs.toFixed(1)} ms` : '—'}
                 </strong>
               </span>
               {quality && (
                 <span title={quality.detail}>
                   Quality:{' '}
-                  <strong className="font-semibold text-[#172033]">
+                  <strong className="font-semibold text-[#141414]">
                     {quality.label}
                   </strong>
                 </span>
@@ -612,7 +612,7 @@ export function MultiViewView({
                       `Focused ${slotCode} in Screens spotlight.`
                     );
                   }}
-                  className="rounded-lg border border-[#E2E8F0] bg-white px-2.5 py-1 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                  className="rounded-lg border border-[#D5D7DE] bg-white px-2.5 py-1 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] hover:bg-[#141414] hover:text-white"
                 >
                   Focus
                 </button>
@@ -639,10 +639,10 @@ export function MultiViewView({
                         : 'Mute audio'
                     : 'No audio track'
                 }
-                className={`inline-flex h-7 items-center justify-center gap-1 rounded-lg border px-2 text-xs font-medium disabled:opacity-40 ${
+                className={`inline-flex h-7 items-center justify-center gap-1 rounded-lg border px-2 text-xs font-medium transition-colors disabled:opacity-40 ${
                   slot.autoplayBlocked && isActive && slot.hasAudioTrack
-                    ? 'border-[#D97706] bg-[#FFFBEB] text-[#B45309] hover:bg-[#FEF3C7]'
-                    : 'border-[#E2E8F0] bg-white text-[#64748B] hover:border-[#2563EB] hover:text-[#2563EB]'
+                    ? 'border-[#FF6041] bg-[#FFF4F1] text-[#FF6041] hover:bg-[#FFE4DC]'
+                    : 'border-[#D5D7DE] bg-white text-[#5C6063] hover:border-[#141414] hover:text-[#141414]'
                 }`}
                 aria-label={
                   slot.autoplayBlocked
@@ -653,7 +653,7 @@ export function MultiViewView({
                 {slot.muted || slot.autoplayBlocked ? (
                   <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
                 ) : (
-                  <Volume2 className="h-3.5 w-3.5 text-[#2563EB]" aria-hidden="true" />
+                  <Volume2 className="h-3.5 w-3.5 text-[#FF6041]" aria-hidden="true" />
                 )}
                 {slot.autoplayBlocked && isActive && slot.hasAudioTrack && (
                   <span>Activate Audio</span>
@@ -665,7 +665,7 @@ export function MultiViewView({
                   disabled={!hasRealPeer}
                   onClick={() => onDisconnectSlot(slot.receiverDeviceId)}
                   title={hasRealPeer ? 'Disconnect participant' : 'No active participant'}
-                  className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[#E2E8F0] bg-white text-[#64748B] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-40"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[#D5D7DE] bg-white text-[#5C6063] transition-colors hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-40"
                   aria-label={`Disconnect ${slot.deviceName}`}
                 >
                   <Power className="h-3.5 w-3.5" aria-hidden="true" />
@@ -765,14 +765,17 @@ export function MultiViewView({
               }
             />
           ) : (
-            <div className="flex min-h-[420px] sm:min-h-[480px] flex-col items-center justify-center rounded-xl border border-[#E2E8F0] bg-white px-6 py-12 text-center shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-              <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] text-[#2563EB]">
+            <div className="castora-stage-shadow flex min-h-[400px] sm:min-h-[460px] flex-col items-center justify-center rounded-xl border border-[#262626] bg-[#141414] px-6 py-12 text-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-[#FF6041]">
                 <MonitorPlay className="h-6 w-6" aria-hidden="true" />
               </div>
-              <h2 className="mt-4 font-display text-base font-semibold text-[#172033]">
+              <div className="mt-4 font-mono text-[10px] uppercase tracking-[0.16em] text-[#797D82]">
+                LIVE STAGE · 15 SLOTS MAX
+              </div>
+              <h2 className="mt-1.5 font-display text-xl font-bold tracking-tight text-white">
                 Live Casting Stage Ready
               </h2>
-              <p className="mt-1.5 max-w-md text-sm leading-relaxed text-[#64748B]">
+              <p className="mt-2 max-w-md text-sm leading-relaxed text-[#A1A6AC]">
                 {activeRoom
                   ? 'Share your screen or wait for a room participant to cast. Live video fills this full-width stage automatically.'
                   : 'Create or join a room to connect up to 15 receivers, then share and view live screens in full width.'}
@@ -783,7 +786,7 @@ export function MultiViewView({
                     type="button"
                     disabled={shareBusy}
                     onClick={handleStartLocalShare}
-                    className="inline-flex min-h-[42px] items-center gap-2 rounded-[10px] bg-[#2563EB] px-4 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                    className="inline-flex min-h-[42px] items-center gap-2 rounded-[10px] bg-[#FF6041] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#E85032] disabled:opacity-50"
                   >
                     <MonitorPlay className="h-4 w-4" aria-hidden="true" />
                     <span>{shareBusy ? 'Starting...' : 'Share Your Screen'}</span>
@@ -793,9 +796,9 @@ export function MultiViewView({
                   <button
                     type="button"
                     onClick={() => onNavigate('receivers')}
-                    className="inline-flex min-h-[42px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-semibold text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                    className="inline-flex min-h-[42px] items-center gap-2 rounded-[10px] border border-white/15 bg-white/5 px-4 text-sm font-semibold text-white transition-colors hover:border-white/30 hover:bg-white/10"
                   >
-                    <Users className="h-4 w-4" aria-hidden="true" />
+                    <Users className="h-4 w-4 text-[#FF6041]" aria-hidden="true" />
                     <span>Go to Rooms</span>
                   </button>
                 )}
@@ -832,19 +835,23 @@ export function MultiViewView({
       {/* 2. UNIFIED LIVE CASTING CONTROL BAR — BELOW VIDEO */}
       <div
         data-castora-chrome
-        className="flex flex-col gap-3 rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] lg:flex-row lg:items-center lg:justify-between"
+        className="castora-card flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between"
       >
         <div>
           <div className="flex flex-wrap items-center gap-2.5">
-            <h1 className="font-display text-lg font-semibold tracking-tight text-[#172033]">
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#797D82]">
+              02 · LIVE CASTING
+            </span>
+            <span className="text-[#D5D7DE]" aria-hidden="true">/</span>
+            <h1 className="font-display text-lg font-semibold tracking-tight text-[#141414]">
               Live Casting &amp; Screens
             </h1>
-            <span className="text-xs text-[#64748B] tabular-metrics">
+            <span className="font-mono text-xs text-[#5C6063] tabular-metrics">
               {activeStreamCount} incoming {activeStreamCount === 1 ? 'stream' : 'streams'} live
               {webrtcState?.isSharingLocal ? ' · Sharing your screen' : ''}
             </span>
           </div>
-          <p className="mt-0.5 text-xs text-[#64748B]">
+          <p className="mt-0.5 text-xs text-[#5C6063]">
             Cast to or receive from up to 15 receivers per room. Controls, diagnostics, and device slots sit below the live stage.
           </p>
         </div>
@@ -856,7 +863,7 @@ export function MultiViewView({
                 type="button"
                 disabled={shareBusy || !canCapture || isPendingParticipant}
                 onClick={handleStartLocalShare}
-                className="inline-flex min-h-[38px] items-center gap-2 rounded-[10px] bg-[#2563EB] px-3.5 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                className="inline-flex min-h-[38px] items-center gap-2 rounded-[10px] bg-[#141414] px-3.5 text-xs font-semibold text-white transition-colors hover:bg-[#FF6041] disabled:opacity-50"
               >
                 <MonitorPlay className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>
@@ -887,8 +894,8 @@ export function MultiViewView({
               onClick={() => setShowSharePanel((prev) => !prev)}
               className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-[10px] border px-3 text-xs font-medium transition-colors ${
                 showSharePanel
-                  ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
-                  : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB]'
+                  ? 'border-[#FF6041] bg-[#FFF4F1] text-[#FF6041]'
+                  : 'border-[#D5D7DE] bg-white text-[#141414] hover:border-[#141414]'
               }`}
             >
               <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
@@ -908,8 +915,8 @@ export function MultiViewView({
               onClick={() => setShowDiagnostics((prev) => !prev)}
               className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-[10px] border px-3 text-xs font-medium transition-colors ${
                 showDiagnostics
-                  ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
-                  : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB]'
+                  ? 'border-[#FF6041] bg-[#FFF4F1] text-[#FF6041]'
+                  : 'border-[#D5D7DE] bg-white text-[#141414] hover:border-[#141414]'
               }`}
             >
               <Activity className="h-3.5 w-3.5" aria-hidden="true" />
@@ -920,7 +927,7 @@ export function MultiViewView({
           <div
             role="group"
             aria-label="Screen Grid Layout"
-            className="inline-flex max-w-full overflow-x-auto rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] p-0.5"
+            className="inline-flex max-w-full overflow-x-auto rounded-[10px] border border-[#D5D7DE] bg-[#EBEBEB] p-0.5"
           >
             {LAYOUT_OPTIONS.map((opt) => {
               const active = layout === opt.id;
@@ -934,8 +941,8 @@ export function MultiViewView({
                   }}
                   className={`min-h-[32px] rounded-lg px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
                     active
-                      ? 'bg-white text-[#172033] shadow-xs'
-                      : 'text-[#64748B] hover:text-[#172033]'
+                      ? 'bg-[#141414] text-white'
+                      : 'text-[#5C6063] hover:text-[#141414]'
                   }`}
                 >
                   {opt.label}
@@ -947,7 +954,7 @@ export function MultiViewView({
           <button
             type="button"
             onClick={handleWallFullscreen}
-            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-[10px] border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-[10px] border border-[#D5D7DE] bg-white px-3 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] hover:bg-[#141414] hover:text-white"
           >
             {isWallFullscreen ? (
               <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
@@ -965,12 +972,14 @@ export function MultiViewView({
       <section
         data-castora-chrome
         aria-label="Room and Stream Summary"
-        className="overflow-hidden rounded-xl border border-[#E2E8F0] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+        className="castora-card overflow-hidden"
       >
-        <div className="grid grid-cols-2 divide-x divide-y divide-[#E2E8F0] sm:grid-cols-3 lg:grid-cols-6 lg:divide-y-0 tabular-metrics">
+        <div className="grid grid-cols-2 divide-x divide-y divide-[#D5D7DE] sm:grid-cols-3 lg:grid-cols-6 lg:divide-y-0 tabular-metrics">
           <div className="px-4 py-3">
-            <div className="text-[11px] font-medium text-[#64748B]">Room &amp; Host</div>
-            <div className="mt-1 truncate text-xs font-semibold text-[#172033]">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+              Room &amp; Host
+            </div>
+            <div className="mt-1 truncate text-xs font-semibold text-[#141414]">
               {activeRoom ? (
                 <>
                   <span className="font-mono">{activeRoom.roomId}</span> · {activeRoom.hostDeviceName}
@@ -979,45 +988,53 @@ export function MultiViewView({
                 'No active room'
               )}
             </div>
-            <div className="mt-0.5 truncate text-[11px] text-[#64748B]">
+            <div className="mt-0.5 truncate text-[11px] text-[#5C6063]">
               Device: {deviceName}
             </div>
           </div>
 
           <div className="px-4 py-3">
-            <div className="text-[11px] font-medium text-[#64748B]">Receivers Connected</div>
-            <div className="mt-1 text-xs font-semibold text-[#172033]">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+              Receivers Connected
+            </div>
+            <div className="mt-1 text-xs font-semibold text-[#141414]">
               {activeRoom
                 ? `${activeRoom.pairedReceiverCount} / ${activeRoom.maxReceivers} slots`
                 : '0 / 15 slots'}
             </div>
-            <div className="mt-0.5 text-[11px] text-[#64748B]">
+            <div className="mt-0.5 text-[11px] text-[#5C6063]">
               {activeRoom ? `${activeRoom.activeReceiverCount} online now` : 'Standby'}
             </div>
           </div>
 
           <div className="px-4 py-3">
-            <div className="text-[11px] font-medium text-[#64748B]">Quality &amp; Resolution</div>
-            <div className="mt-1 text-xs font-semibold text-[#172033]">{summaryResolution}</div>
-            <div className="mt-0.5 text-[11px] text-[#64748B]">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+              Quality &amp; Resolution
+            </div>
+            <div className="mt-1 text-xs font-semibold text-[#141414]">{summaryResolution}</div>
+            <div className="mt-0.5 text-[11px] text-[#5C6063]">
               {summaryFps !== null ? `${summaryFps.toFixed(1)} FPS` : 'FPS: Unavailable'}
             </div>
           </div>
 
           <div className="px-4 py-3">
-            <div className="text-[11px] font-medium text-[#64748B]">Bitrate &amp; Loss</div>
-            <div className="mt-1 text-xs font-semibold text-[#172033]">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+              Bitrate &amp; Loss
+            </div>
+            <div className="mt-1 text-xs font-semibold text-[#141414]">
               {summaryBitrateKbps !== null ? formatBitrate(summaryBitrateKbps) : 'Unavailable'}
             </div>
-            <div className="mt-0.5 text-[11px] text-[#64748B]">
+            <div className="mt-0.5 text-[11px] text-[#5C6063]">
               Loss: {summaryPacketLossPct !== null ? `${summaryPacketLossPct.toFixed(1)}%` : 'Unavailable'}
             </div>
           </div>
 
           <div className="px-4 py-3">
-            <div className="text-[11px] font-medium text-[#64748B]">Audio &amp; Codec</div>
-            <div className="mt-1 text-xs font-semibold text-[#172033]">{summaryAudioLabel}</div>
-            <div className="mt-0.5 truncate text-[11px] text-[#64748B]">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+              Audio &amp; Codec
+            </div>
+            <div className="mt-1 text-xs font-semibold text-[#141414]">{summaryAudioLabel}</div>
+            <div className="mt-0.5 truncate text-[11px] text-[#5C6063]">
               Codec:{' '}
               {webrtcState?.outboundTelemetry.negotiatedVideoCodec ??
                 primarySlotWithTelemetry?.telemetry.codecMimeType ??
@@ -1028,8 +1045,10 @@ export function MultiViewView({
 
           <div className="flex flex-col justify-between px-4 py-3">
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">Session Controls</div>
-              <div className="mt-1 text-xs font-semibold text-[#172033]">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Session Controls
+              </div>
+              <div className="mt-1 text-xs font-semibold text-[#141414]">
                 {signalingState === 'connected' ? 'Signaling Online' : `Signaling ${signalingState}`}
               </div>
             </div>
@@ -1038,7 +1057,7 @@ export function MultiViewView({
                 <button
                   type="button"
                   onClick={() => onNavigate('receivers')}
-                  className="text-[11px] font-semibold text-[#2563EB] hover:underline"
+                  className="text-[11px] font-semibold text-[#FF6041] hover:underline"
                 >
                   Rooms
                 </button>
@@ -1136,15 +1155,15 @@ export function MultiViewView({
         return (
           <div
             data-castora-chrome
-            className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-5"
+            className="castora-card p-5 space-y-5"
           >
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
               <div className="space-y-4 lg:col-span-6">
-                <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
-                  <h2 className="text-sm font-semibold text-[#172033]">
+                <div className="flex items-center justify-between border-b border-[#D5D7DE] pb-2.5">
+                  <h2 className="text-sm font-semibold text-[#141414]">
                     Outbound Capture &amp; Quality
                   </h2>
-                  <span className="text-xs text-[#64748B] tabular-metrics">
+                  <span className="font-mono text-xs text-[#5C6063] tabular-metrics">
                     {connectedPeers.length} {connectedPeers.length === 1 ? 'peer' : 'peers'} connected
                   </span>
                 </div>
@@ -1152,12 +1171,14 @@ export function MultiViewView({
                 <div className="space-y-3">
                   <div>
                     <div className="mb-1.5 flex items-center justify-between text-xs">
-                      <span className="font-medium text-[#64748B]">Resolution Preset</span>
-                      <span className="text-[#64748B] tabular-metrics">
+                      <span className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                        Resolution Preset
+                      </span>
+                      <span className="text-[#5C6063] tabular-metrics">
                         {presetSpec.shortDetail} · Suggested {presetSpec.recommendedRangeLabel}
                       </span>
                     </div>
-                    <div className="flex rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5">
+                    <div className="flex rounded-lg border border-[#D5D7DE] bg-[#EBEBEB] p-0.5">
                       {RESOLUTION_OPTIONS.map((opt) => (
                         <button
                           key={opt.id}
@@ -1177,10 +1198,10 @@ export function MultiViewView({
                               maxBitrateKbps: nextBitrate,
                             });
                           }}
-                          className={`flex-1 rounded-md py-1.5 text-xs font-medium whitespace-nowrap ${
+                          className={`flex-1 rounded-md py-1.5 text-xs font-medium whitespace-nowrap transition-colors ${
                             preferences.resolution === opt.id
-                              ? 'bg-white text-[#172033] shadow-xs'
-                              : 'text-[#64748B] hover:text-[#172033]'
+                              ? 'bg-[#141414] text-white'
+                              : 'text-[#5C6063] hover:text-[#141414]'
                           }`}
                         >
                           {opt.label}
@@ -1191,8 +1212,10 @@ export function MultiViewView({
 
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div>
-                      <div className="mb-1.5 text-xs font-medium text-[#64748B]">Frame Rate</div>
-                      <div className="flex rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5">
+                      <div className="mb-1.5 font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                        Frame Rate
+                      </div>
+                      <div className="flex rounded-lg border border-[#D5D7DE] bg-[#EBEBEB] p-0.5">
                         {FPS_OPTIONS.map((opt) => (
                           <button
                             key={opt.value}
@@ -1211,10 +1234,10 @@ export function MultiViewView({
                                 ),
                               })
                             }
-                            className={`flex-1 rounded-md py-1.5 text-xs font-medium tabular-metrics ${
+                            className={`flex-1 rounded-md py-1.5 text-xs font-medium tabular-metrics transition-colors ${
                               preferences.targetFps === opt.value
-                                ? 'bg-white text-[#172033] shadow-xs'
-                                : 'text-[#64748B] hover:text-[#172033]'
+                                ? 'bg-[#141414] text-white'
+                                : 'text-[#5C6063] hover:text-[#141414]'
                             }`}
                           >
                             {opt.label}
@@ -1224,9 +1247,11 @@ export function MultiViewView({
                     </div>
 
                     <div>
-                      <div className="mb-1.5 text-xs font-medium text-[#64748B]">Codec &amp; Audio</div>
+                      <div className="mb-1.5 font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                        Codec &amp; Audio
+                      </div>
                       <div className="flex gap-1.5">
-                        <div className="flex flex-1 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-0.5">
+                        <div className="flex flex-1 rounded-lg border border-[#D5D7DE] bg-[#EBEBEB] p-0.5">
                           {CODEC_OPTIONS.map((opt) => (
                             <button
                               key={opt.value}
@@ -1234,10 +1259,10 @@ export function MultiViewView({
                               onClick={() =>
                                 onUpdatePreferences({ ...preferences, codecPreference: opt.value })
                               }
-                              className={`flex-1 rounded-md py-1.5 text-xs font-medium ${
+                              className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
                                 preferences.codecPreference === opt.value
-                                  ? 'bg-white text-[#172033] shadow-xs'
-                                  : 'text-[#64748B] hover:text-[#172033]'
+                                  ? 'bg-[#141414] text-white'
+                                  : 'text-[#5C6063] hover:text-[#141414]'
                               }`}
                             >
                               {opt.label}
@@ -1253,10 +1278,10 @@ export function MultiViewView({
                             })
                           }
                           title="Include system or tab audio"
-                          className={`inline-flex items-center gap-1 rounded-lg border px-2.5 text-xs font-medium whitespace-nowrap ${
+                          className={`inline-flex items-center gap-1 rounded-lg border px-2.5 text-xs font-medium whitespace-nowrap transition-colors ${
                             preferences.includeAudio
-                              ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
-                              : 'border-[#E2E8F0] bg-white text-[#64748B]'
+                              ? 'border-[#FF6041] bg-[#FFF4F1] text-[#FF6041]'
+                              : 'border-[#D5D7DE] bg-white text-[#5C6063]'
                           }`}
                         >
                           {preferences.includeAudio ? (
@@ -1271,13 +1296,13 @@ export function MultiViewView({
                   </div>
 
                   {/* Configurable Video Bitrate & Adaptive Bitrate Control */}
-                  <div className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3 space-y-2.5">
+                  <div className="rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] p-3 space-y-2.5">
                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                      <label htmlFor="mv-bitrate-range" className="font-medium text-[#172033]">
+                      <label htmlFor="mv-bitrate-range" className="font-medium text-[#141414]">
                         Target Max Bitrate
                       </label>
                       <div className="flex items-center gap-2.5 tabular-metrics">
-                        <span className="font-mono font-semibold text-[#2563EB]">
+                        <span className="font-mono font-semibold text-[#FF6041]">
                           {(resolvedQuality.configuredMaxBitrateKbps / 1000).toFixed(1)} Mbps
                         </span>
                         <button
@@ -1290,8 +1315,8 @@ export function MultiViewView({
                           }
                           className={`rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${
                             adaptiveEnabled
-                              ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
-                              : 'border-[#E2E8F0] bg-white text-[#64748B]'
+                              ? 'border-[#FF6041] bg-[#FFF4F1] text-[#FF6041]'
+                              : 'border-[#D5D7DE] bg-white text-[#5C6063]'
                           }`}
                         >
                           {adaptiveEnabled ? 'Mode: Auto' : 'Mode: Manual'}
@@ -1311,9 +1336,9 @@ export function MultiViewView({
                           maxBitrateKbps: Number(e.target.value),
                         })
                       }
-                      className="h-1.5 w-full cursor-pointer accent-[#2563EB]"
+                      className="h-1.5 w-full cursor-pointer accent-[#FF6041]"
                     />
-                    <div className="flex items-center justify-between text-[11px] text-[#64748B] tabular-metrics">
+                    <div className="flex items-center justify-between text-[11px] text-[#5C6063] tabular-metrics">
                       <span>{(presetSpec.minBitrateKbps / 1000).toFixed(1)} Mbps</span>
                       <span>
                         1080p60: 8–12M · 1440p60: 15–25M · 4K60: 30–50M
@@ -1326,12 +1351,14 @@ export function MultiViewView({
                 {/* Target Participant Selection */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="font-medium text-[#64748B]">Share Target</span>
+                    <span className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                      Share Target
+                    </span>
                     {onNavigate && (
                       <button
                         type="button"
                         onClick={() => onNavigate('receivers')}
-                        className="font-medium text-[#2563EB] hover:underline"
+                        className="font-medium text-[#FF6041] hover:underline"
                       >
                         Manage Room
                       </button>
@@ -1339,13 +1366,13 @@ export function MultiViewView({
                   </div>
 
                   {!activeRoom || !isApprovedInRoom ? (
-                    <p className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs text-[#64748B]">
+                    <p className="rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-3 py-2.5 text-xs text-[#5C6063]">
                       Join or create a room in Rooms to share with participants.
                     </p>
                   ) : connectedPeers.length === 0 ? (
-                    <p className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs text-[#64748B]">
+                    <p className="rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-3 py-2.5 text-xs text-[#5C6063]">
                       Waiting for other approved participants in room{' '}
-                      <span className="font-mono font-semibold text-[#172033]">{activeRoom.roomId}</span>.
+                      <span className="font-mono font-semibold text-[#141414]">{activeRoom.roomId}</span>.
                     </p>
                   ) : (
                     <div className="flex flex-wrap gap-2">
@@ -1353,10 +1380,10 @@ export function MultiViewView({
                         <button
                           type="button"
                           onClick={() => setSelectedTarget('ALL')}
-                          className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border px-3 text-xs font-medium ${
+                          className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border px-3 text-xs font-medium transition-colors ${
                             selectedTarget === 'ALL'
-                              ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
-                              : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB]'
+                              ? 'border-[#FF6041] bg-[#FFF4F1] text-[#FF6041]'
+                              : 'border-[#D5D7DE] bg-white text-[#141414] hover:border-[#141414]'
                           }`}
                         >
                           <Users className="h-3.5 w-3.5" aria-hidden="true" />
@@ -1370,10 +1397,10 @@ export function MultiViewView({
                             key={peer.deviceId}
                             type="button"
                             onClick={() => setSelectedTarget(peer.deviceId)}
-                            className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border px-3 text-xs font-medium ${
+                            className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border px-3 text-xs font-medium transition-colors ${
                               active
-                                ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
-                                : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB]'
+                                ? 'border-[#FF6041] bg-[#FFF4F1] text-[#FF6041]'
+                                : 'border-[#D5D7DE] bg-white text-[#141414] hover:border-[#141414]'
                             }`}
                           >
                             <span>{peer.deviceName}</span>
@@ -1403,10 +1430,10 @@ export function MultiViewView({
                   {/* Per-Outgoing Stream Diagnostics & Independent Bitrate Control */}
                   {activeOutboundTargets.length > 0 && onSetPeerQualityOverride && (
                     <div className="pt-2 space-y-1.5">
-                      <div className="text-xs font-medium text-[#64748B]">
+                      <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
                         Per-Stream Quality (Independent per Peer)
                       </div>
-                      <div className="divide-y divide-[#E2E8F0] rounded-lg border border-[#E2E8F0] bg-[#F8FAFC]">
+                      <div className="divide-y divide-[#D5D7DE] rounded-lg border border-[#D5D7DE] bg-[#FAFAFA]">
                         {activeOutboundTargets.map((out) => {
                           const overrideCap = out.qualityOverride?.maxBitrateKbps ?? null;
                           const outQuality = evaluateConnectionQuality({
@@ -1426,16 +1453,16 @@ export function MultiViewView({
                               className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs"
                             >
                               <div className="min-w-0">
-                                <div className="flex items-center gap-2 truncate font-medium text-[#172033]">
+                                <div className="flex items-center gap-2 truncate font-medium text-[#141414]">
                                   <span>{out.targetName}</span>
                                   <span
                                     title={outQuality.detail}
-                                    className="text-[11px] font-normal text-[#64748B]"
+                                    className="text-[11px] font-normal text-[#5C6063]"
                                   >
                                     ({outQuality.label})
                                   </span>
                                 </div>
-                                <div className="text-[11px] text-[#64748B] tabular-metrics">
+                                <div className="text-[11px] text-[#5C6063] tabular-metrics">
                                   {out.telemetry.resolution ?? 'Negotiating'} ·{' '}
                                   {formatBitrate(out.telemetry.bitrateKbps)} /{' '}
                                   {formatBitrate(out.telemetry.targetBitrateKbps ?? null)}
@@ -1470,10 +1497,10 @@ export function MultiViewView({
                                           opt.kbps === null ? null : { maxBitrateKbps: opt.kbps }
                                         )
                                       }
-                                      className={`rounded-md border px-2 py-0.5 text-[11px] font-medium tabular-metrics ${
+                                      className={`rounded-md border px-2 py-0.5 text-[11px] font-medium tabular-metrics transition-colors ${
                                         isActive
-                                          ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
-                                          : 'border-[#E2E8F0] bg-white text-[#64748B] hover:text-[#172033]'
+                                          ? 'border-[#FF6041] bg-[#FFF4F1] text-[#FF6041]'
+                                          : 'border-[#D5D7DE] bg-white text-[#5C6063] hover:text-[#141414]'
                                       }`}
                                     >
                                       {opt.label}
@@ -1534,11 +1561,11 @@ export function MultiViewView({
       {webrtcState?.isSharingLocal && !showSharePanel && (
         <div
           data-castora-chrome
-          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#2563EB]/30 bg-[#EFF6FF] px-4 py-3"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#FF6041]/40 bg-[#FFF4F1] px-4 py-3"
         >
           <div className="flex items-center gap-3 text-sm">
             <SignalBadge label="Sharing your screen" tone="active" />
-            <span className="text-xs text-[#64748B]">
+            <span className="text-xs text-[#5C6063]">
               {activeOutboundTargets.length > 0
                 ? `Streaming to ${activeOutboundTargets.map((o) => o.targetName).join(', ')}`
                 : 'Local capture active — waiting for connected peers'}
@@ -1548,7 +1575,7 @@ export function MultiViewView({
             <button
               type="button"
               onClick={() => setShowSharePanel(true)}
-              className="rounded-lg border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+              className="rounded-lg border border-[#D5D7DE] bg-white px-3 py-1.5 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] hover:bg-[#141414] hover:text-white"
             >
               Show Self-Preview
             </button>

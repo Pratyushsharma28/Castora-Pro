@@ -81,12 +81,14 @@ export function TelemetryStrip({ telemetry, compact = false }: TelemetryStripPro
     <div
       className={`grid grid-cols-2 ${
         compact ? 'sm:grid-cols-3 lg:grid-cols-6' : 'sm:grid-cols-4 lg:grid-cols-6'
-      } divide-x divide-y divide-[#E2E8F0] overflow-hidden rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC]`}
+      } divide-x divide-y divide-[#D5D7DE] overflow-hidden rounded-xl border border-[#D5D7DE] bg-[#FAFAFA]`}
     >
       {visibleCells.map((cell) => (
-        <div key={cell.label} className="px-3 py-2">
-          <div className="text-[11px] font-medium text-[#64748B]">{cell.label}</div>
-          <div className="mt-0.5 truncate text-sm font-semibold text-[#172033] tabular-metrics">
+        <div key={cell.label} className="px-3.5 py-2.5">
+          <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+            {cell.label}
+          </div>
+          <div className="mt-1 truncate text-sm font-semibold text-[#141414] tabular-metrics">
             {cell.value}
           </div>
         </div>

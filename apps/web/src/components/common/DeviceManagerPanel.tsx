@@ -104,13 +104,13 @@ function latestIso(a?: string | null, bMs?: number | null): string | null {
 function DeviceTypeIcon({ deviceType }: { deviceType: DetectedDeviceType }) {
   switch (deviceType) {
     case 'TV':
-      return <Tv className="h-4 w-4 text-[#64748B]" aria-hidden="true" />;
+      return <Tv className="h-4 w-4 text-[#5C6063]" aria-hidden="true" />;
     case 'iPhone':
     case 'iPad':
     case 'Android':
-      return <Smartphone className="h-4 w-4 text-[#64748B]" aria-hidden="true" />;
+      return <Smartphone className="h-4 w-4 text-[#5C6063]" aria-hidden="true" />;
     default:
-      return <Monitor className="h-4 w-4 text-[#64748B]" aria-hidden="true" />;
+      return <Monitor className="h-4 w-4 text-[#5C6063]" aria-hidden="true" />;
   }
 }
 
@@ -649,15 +649,15 @@ export function DeviceManagerPanel({
       className="space-y-5"
     >
       {/* Top 4-Cell Capacity & Status Strip (zero pills, single level elevation) */}
-      <div className="overflow-hidden rounded-xl border border-[#E2E8F0] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E2E8F0] px-5 py-4">
+      <div className="castora-card overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#D5D7DE] px-5 py-4">
           <div className="flex items-center gap-2.5">
-            <Users className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
+            <Users className="h-4 w-4 text-[#FF6041]" aria-hidden="true" />
             <div>
-              <h2 className="font-display text-base font-semibold text-[#172033]">
+              <h2 className="font-display text-base font-semibold tracking-tight text-[#141414]">
                 Device Manager
               </h2>
-              <p className="text-xs text-[#64748B]">
+              <p className="text-xs text-[#5C6063]">
                 {activeRoom
                   ? `Room ${activeRoom.roomId} · Role: ${isHost ? 'Host (Full Control)' : 'Participant (Self Controls)'}`
                   : 'Standalone device profile — create or join a room to manage connected devices.'}
@@ -671,7 +671,7 @@ export function DeviceManagerPanel({
                 type="button"
                 disabled={refreshBusy || isLoading}
                 onClick={() => void handleRefresh()}
-                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-3 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] disabled:opacity-50"
               >
                 <RefreshCw
                   className={`h-3.5 w-3.5 ${refreshBusy || isLoading ? 'animate-spin' : ''}`}
@@ -684,7 +684,7 @@ export function DeviceManagerPanel({
               <button
                 type="button"
                 onClick={() => onNavigate('receivers')}
-                className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#2563EB] px-3 text-xs font-semibold text-white hover:bg-[#1D4ED8]"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#141414] px-3 text-xs font-semibold text-white transition-colors hover:bg-[#FF6041]"
               >
                 <span>Open Rooms</span>
               </button>
@@ -692,28 +692,28 @@ export function DeviceManagerPanel({
           </div>
         </div>
 
-        <div className="grid grid-cols-2 divide-x divide-y divide-[#E2E8F0] bg-[#F8FAFC] sm:grid-cols-4 sm:divide-y-0">
+        <div className="grid grid-cols-2 divide-x divide-y divide-[#D5D7DE] bg-[#FAFAFA] sm:grid-cols-4 sm:divide-y-0">
           <div className="px-5 py-3.5">
-            <div className="text-xs font-medium text-[#64748B]">Connected Devices</div>
-            <div className="mt-1 text-lg font-semibold text-[#172033] tabular-metrics">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Connected Devices</div>
+            <div className="mt-1 text-lg font-semibold text-[#141414] tabular-metrics">
               {connectedDevicesCount}
             </div>
           </div>
           <div className="px-5 py-3.5">
-            <div className="text-xs font-medium text-[#64748B]">Paired Slots</div>
-            <div className="mt-1 text-lg font-semibold text-[#172033] tabular-metrics">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Paired Slots</div>
+            <div className="mt-1 text-lg font-semibold text-[#141414] tabular-metrics">
               {activeRoom ? `${pairedCount} / ${maxReceivers}` : '0 / 15'}
             </div>
           </div>
           <div className="px-5 py-3.5">
-            <div className="text-xs font-medium text-[#64748B]">Pending Requests</div>
-            <div className="mt-1 text-lg font-semibold text-[#172033] tabular-metrics">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Pending Requests</div>
+            <div className="mt-1 text-lg font-semibold text-[#141414] tabular-metrics">
               {activeRoom ? pendingRequests.length : 0}
             </div>
           </div>
           <div className="px-5 py-3.5">
-            <div className="text-xs font-medium text-[#64748B]">Available Slots</div>
-            <div className="mt-1 text-lg font-semibold text-[#172033] tabular-metrics">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Available Slots</div>
+            <div className="mt-1 text-lg font-semibold text-[#141414] tabular-metrics">
               {activeRoom ? (roomFull ? '0 (Full)' : availableSlots) : 15}
             </div>
           </div>
@@ -726,7 +726,7 @@ export function DeviceManagerPanel({
           className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-xs ${
             feedback.tone === 'error'
               ? 'border-[#DC2626]/30 bg-[#FEF2F2] text-[#B91C1C]'
-              : 'border-[#E2E8F0] bg-white text-[#172033]'
+              : 'border-[#D5D7DE] bg-white text-[#141414]'
           }`}
         >
           <span>{feedback.text}</span>
@@ -734,7 +734,7 @@ export function DeviceManagerPanel({
             type="button"
             onClick={() => setFeedback(null)}
             aria-label="Dismiss notification"
-            className="text-[#64748B] hover:text-[#172033]"
+            className="text-[#5C6063] hover:text-[#141414]"
           >
             <X className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
@@ -743,27 +743,27 @@ export function DeviceManagerPanel({
 
       {/* Host Pending Requests Queue */}
       {activeRoom && (isHost || pendingRequests.length > 0) && (
-        <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3">
+        <div className="castora-card p-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#D5D7DE] pb-3">
             <div className="flex items-center gap-2">
-              <ShieldCheck className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
-              <h3 className="text-sm font-semibold text-[#172033]">
+              <ShieldCheck className="h-4 w-4 text-[#FF6041]" aria-hidden="true" />
+              <h3 className="font-display text-sm font-semibold text-[#141414]">
                 Pending Approval Requests
               </h3>
             </div>
-            <span className="text-xs text-[#64748B] tabular-metrics">
+            <span className="font-mono text-[11px] text-[#797D82] tabular-metrics">
               {pendingRequests.length} waiting · {availableSlots} slots free
             </span>
           </div>
 
           {pendingRequests.length === 0 ? (
-            <p className="mt-3 text-xs leading-relaxed text-[#64748B]">
+            <p className="mt-3 text-xs leading-relaxed text-[#5C6063]">
               No pending join requests. Devices requesting room code{' '}
-              <span className="font-mono font-semibold text-[#172033]">{activeRoom.roomId}</span>{' '}
+              <span className="font-mono font-semibold text-[#141414]">{activeRoom.roomId}</span>{' '}
               appear here for explicit host approval.
             </p>
           ) : (
-            <ul className="mt-3 divide-y divide-[#E2E8F0]">
+            <ul className="mt-3 divide-y divide-[#D5D7DE]">
               {pendingRequests.map((req) => {
                 const isBusy = busyDeviceId === req.deviceId;
                 return (
@@ -773,14 +773,14 @@ export function DeviceManagerPanel({
                   >
                     <div className="min-w-0 space-y-0.5">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="truncate text-sm font-semibold text-[#172033]">
+                        <span className="truncate text-sm font-semibold text-[#141414]">
                           {req.deviceName}
                         </span>
-                        <span className="text-xs text-[#64748B]">
+                        <span className="text-xs text-[#5C6063]">
                           Type: {req.deviceType ?? 'Unknown'}
                         </span>
                       </div>
-                      <div className="text-xs text-[#64748B] tabular-metrics">
+                      <div className="font-mono text-[11px] text-[#797D82] tabular-metrics">
                         {req.deviceId} · Requested {new Date(req.requestedAt).toLocaleTimeString()} ·{' '}
                         {req.connected ? 'Socket active' : 'Socket disconnected'}
                       </div>
@@ -791,7 +791,7 @@ export function DeviceManagerPanel({
                         <button
                           type="button"
                           disabled={isBusy || roomFull}
-                          title={roomFull ? 'Room capacity (6 paired devices) reached' : 'Approve device'}
+                          title={roomFull ? `Room capacity (${maxReceivers} paired devices) reached` : 'Approve device'}
                           onClick={() =>
                             void runAction(
                               req.deviceId,
@@ -818,14 +818,14 @@ export function DeviceManagerPanel({
                               `Rejected join request from ${req.deviceName}.`
                             )
                           }
-                          className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#172033] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-50"
+                          className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-3 text-xs font-medium text-[#141414] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-50"
                         >
                           <X className="h-3.5 w-3.5" aria-hidden="true" />
                           <span>Reject</span>
                         </button>
                       </div>
                     ) : (
-                      <span className="text-xs font-medium text-[#64748B]">
+                      <span className="text-xs font-medium text-[#5C6063]">
                         Host approval required
                       </span>
                     )}
@@ -838,11 +838,11 @@ export function DeviceManagerPanel({
       )}
 
       {/* Search & Filter Toolbar + Device List */}
-      <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
+      <div className="castora-card p-5 space-y-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="relative flex-1 max-w-md">
             <Search
-              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#94A3B8]"
+              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#797D82]"
               aria-hidden="true"
             />
             <label htmlFor="device-manager-search" className="sr-only">
@@ -854,14 +854,14 @@ export function DeviceManagerPanel({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search by device name, ID, or type..."
-              className="h-10 w-full rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] pl-9 pr-8 text-sm text-[#172033] placeholder:text-[#94A3B8] focus:border-[#2563EB] focus:bg-white focus:outline-none"
+              className="h-10 w-full rounded-[10px] border border-[#D5D7DE] bg-[#FAFAFA] pl-9 pr-8 text-sm text-[#141414] placeholder:text-[#797D82] focus:border-[#FF6041] focus:bg-white focus:outline-none"
             />
             {searchQuery && (
               <button
                 type="button"
                 aria-label="Clear search"
                 onClick={() => setSearchQuery('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#64748B] hover:text-[#172033]"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#5C6063] hover:text-[#141414]"
               >
                 <X className="h-3.5 w-3.5" aria-hidden="true" />
               </button>
@@ -871,7 +871,7 @@ export function DeviceManagerPanel({
           <div
             role="group"
             aria-label="Filter devices by connection status"
-            className="flex flex-wrap items-center gap-1 rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] p-1"
+            className="flex flex-wrap items-center gap-1 rounded-[10px] border border-[#D5D7DE] bg-[#EBEBEB] p-1"
           >
             {FILTER_OPTIONS.map((opt) => {
               const active = statusFilter === opt.id;
@@ -882,8 +882,8 @@ export function DeviceManagerPanel({
                   onClick={() => setStatusFilter(opt.id)}
                   className={`min-h-[32px] rounded-lg px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
                     active
-                      ? 'bg-white text-[#172033] shadow-xs'
-                      : 'text-[#64748B] hover:text-[#172033]'
+                      ? 'bg-[#141414] text-white'
+                      : 'text-[#5C6063] hover:text-[#141414]'
                   }`}
                 >
                   {opt.label}
@@ -899,16 +899,16 @@ export function DeviceManagerPanel({
             {[1, 2, 3].map((row) => (
               <div
                 key={row}
-                className="h-20 animate-pulse rounded-lg border border-[#E2E8F0] bg-[#F8FAFC]"
+                className="h-20 animate-pulse rounded-lg border border-[#D5D7DE] bg-[#FAFAFA]"
               />
             ))}
           </div>
         ) : filteredDevices.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-[#E2E8F0] bg-[#F8FAFC] px-6 py-10 text-center">
-            <p className="text-sm font-semibold text-[#172033]">
+          <div className="rounded-lg border border-dashed border-[#D5D7DE] bg-[#FAFAFA] px-6 py-10 text-center">
+            <p className="text-sm font-semibold text-[#141414]">
               No matching devices found
             </p>
-            <p className="mt-1 text-xs text-[#64748B]">
+            <p className="mt-1 text-xs text-[#5C6063]">
               Try clearing your search term or switching the status filter.
             </p>
             {(searchQuery || statusFilter !== 'all') && (
@@ -918,14 +918,14 @@ export function DeviceManagerPanel({
                   setSearchQuery('');
                   setStatusFilter('all');
                 }}
-                className="mt-4 inline-flex h-8 items-center rounded-lg border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                className="mt-4 inline-flex h-8 items-center rounded-lg border border-[#D5D7DE] bg-white px-3 text-xs font-medium text-[#141414] hover:border-[#141414]"
               >
                 Reset Filters
               </button>
             )}
           </div>
         ) : (
-          <div className="divide-y divide-[#E2E8F0]">
+          <div className="divide-y divide-[#D5D7DE]">
             {filteredDevices.map((rec) => {
               const badge = connectionBadgeForRecord(rec);
               const isEditing = editingDeviceId === rec.deviceId;
@@ -978,13 +978,13 @@ export function DeviceManagerPanel({
                               }}
                               maxLength={48}
                               aria-label={`Rename ${rec.deviceName}`}
-                              className="h-8 rounded-lg border border-[#2563EB] bg-white px-2.5 text-sm font-medium text-[#172033] focus:outline-none"
+                              className="h-8 rounded-lg border border-[#FF6041] bg-white px-2.5 text-sm font-medium text-[#141414] focus:outline-none"
                             />
                             <button
                               type="button"
                               disabled={isBusy}
                               onClick={() => void submitRename(rec.deviceId)}
-                              className="inline-flex h-8 items-center gap-1 rounded-lg bg-[#2563EB] px-2.5 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                              className="inline-flex h-8 items-center gap-1 rounded-lg bg-[#141414] px-2.5 text-xs font-semibold text-white hover:bg-[#FF6041] disabled:opacity-50"
                             >
                               <Check className="h-3.5 w-3.5" aria-hidden="true" />
                               <span>Save</span>
@@ -992,24 +992,24 @@ export function DeviceManagerPanel({
                             <button
                               type="button"
                               onClick={cancelEditingName}
-                              className="inline-flex h-8 items-center rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#64748B] hover:text-[#172033]"
+                              className="inline-flex h-8 items-center rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#5C6063] hover:text-[#141414]"
                             >
                               Cancel
                             </button>
                           </div>
                         ) : (
                           <>
-                            <h3 className="text-sm font-semibold text-[#172033] truncate">
+                            <h3 className="text-sm font-semibold text-[#141414] truncate">
                               {rec.deviceName}
                               {rec.isSelf ? ' (You)' : ''}
                             </h3>
                             <span
-                              className={`text-xs font-semibold ${
+                              className={`font-mono text-[10px] uppercase tracking-wider font-semibold ${
                                 rec.role === 'host'
-                                  ? 'text-[#2563EB]'
+                                  ? 'text-[#FF6041]'
                                   : rec.role === 'pending'
                                     ? 'text-[#D97706]'
-                                    : 'text-[#64748B]'
+                                    : 'text-[#797D82]'
                               }`}
                             >
                               {rec.role === 'host'
@@ -1031,24 +1031,24 @@ export function DeviceManagerPanel({
                         </p>
                       )}
 
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[#64748B] tabular-metrics">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[#5C6063] tabular-metrics">
                         <span>
                           Type:{' '}
-                          <strong className="font-medium text-[#172033]">{rec.deviceType}</strong>
+                          <strong className="font-medium text-[#141414]">{rec.deviceType}</strong>
                         </span>
                         <span aria-hidden="true">·</span>
-                        <span className="font-mono">{rec.deviceId}</span>
+                        <span className="font-mono text-[#797D82]">{rec.deviceId}</span>
                         <span aria-hidden="true">·</span>
                         <span title={rec.connectionQualityDetail}>
                           Quality:{' '}
-                          <strong className="font-medium text-[#172033]">
+                          <strong className="font-medium text-[#141414]">
                             {rec.connectionQualityLabel}
                           </strong>
                         </span>
                         <span aria-hidden="true">·</span>
                         <span>
                           Last activity:{' '}
-                          <strong className="font-medium text-[#172033]">
+                          <strong className="font-medium text-[#141414]">
                             {formatLastActivity(rec.lastActivityAt)}
                           </strong>
                         </span>
@@ -1062,7 +1062,7 @@ export function DeviceManagerPanel({
                           type="button"
                           disabled={isBusy}
                           onClick={() => startEditingName(rec)}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50"
+                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] disabled:opacity-50"
                         >
                           <Edit3 className="h-3.5 w-3.5" aria-hidden="true" />
                           <span>Rename</span>
@@ -1073,7 +1073,7 @@ export function DeviceManagerPanel({
                         <button
                           type="button"
                           onClick={() => onViewStream?.(rec.deviceId)}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#2563EB]/30 bg-[#EFF6FF] px-2.5 text-xs font-semibold text-[#2563EB] hover:bg-[#DBEAFE]"
+                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#FF6041]/35 bg-[#FFF4F1] px-2.5 text-xs font-semibold text-[#FF6041] transition-colors hover:bg-[#FF6041] hover:text-white"
                         >
                           <Eye className="h-3.5 w-3.5" aria-hidden="true" />
                           <span>View Stream</span>
@@ -1084,12 +1084,12 @@ export function DeviceManagerPanel({
                         <button
                           type="button"
                           onClick={() => onToggleMutePeer(rec.deviceId)}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414]"
                         >
                           {rec.incomingMuted ? (
                             <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
                           ) : (
-                            <Volume2 className="h-3.5 w-3.5 text-[#2563EB]" aria-hidden="true" />
+                            <Volume2 className="h-3.5 w-3.5 text-[#FF6041]" aria-hidden="true" />
                           )}
                           <span>{rec.incomingMuted ? 'Unmute' : 'Mute'}</span>
                         </button>
@@ -1160,7 +1160,7 @@ export function DeviceManagerPanel({
                                 : `Retried peer connection with ${rec.deviceName}.`
                             );
                           }}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50"
+                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] disabled:opacity-50"
                         >
                           <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
                           <span>Reconnect</span>
@@ -1186,10 +1186,10 @@ export function DeviceManagerPanel({
                                 : `Unlocked auto quality mode for ${rec.deviceName}.`
                             )
                           }
-                          className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium ${
+                          className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
                             rec.adaptiveLocked
                               ? 'border-[#D97706]/40 bg-[#FFFBEB] text-[#B45309]'
-                              : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]'
+                              : 'border-[#D5D7DE] bg-white text-[#141414] hover:border-[#141414]'
                           }`}
                         >
                           {rec.adaptiveLocked ? (
@@ -1214,7 +1214,7 @@ export function DeviceManagerPanel({
                               `Removed ${rec.deviceName} from room.`
                             )
                           }
-                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-2.5 text-xs font-medium text-[#64748B] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-50"
+                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-2.5 text-xs font-medium text-[#5C6063] hover:border-[#DC2626] hover:text-[#DC2626] disabled:opacity-50"
                         >
                           <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                           <span>Remove</span>
@@ -1224,34 +1224,34 @@ export function DeviceManagerPanel({
                   </div>
 
                   {/* Streaming Telemetry Summary Grid (strictly real measured or announced stats) */}
-                  <dl className="grid grid-cols-2 gap-3 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-xs sm:grid-cols-3 lg:grid-cols-6 tabular-metrics">
+                  <dl className="grid grid-cols-2 gap-3 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-3.5 py-2.5 text-xs sm:grid-cols-3 lg:grid-cols-6 tabular-metrics">
                     <div>
-                      <dt className="text-[#64748B]">Resolution</dt>
-                      <dd className="mt-0.5 font-semibold text-[#172033]">
+                      <dt className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Resolution</dt>
+                      <dd className="mt-0.5 font-semibold text-[#141414]">
                         {rec.resolution ?? 'Unavailable'}
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-[#64748B]">Actual FPS</dt>
-                      <dd className="mt-0.5 font-semibold text-[#172033]">
+                      <dt className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Actual FPS</dt>
+                      <dd className="mt-0.5 font-semibold text-[#141414]">
                         {rec.fps !== null ? `${rec.fps.toFixed(1)} FPS` : 'Unavailable'}
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-[#64748B]">Actual Bitrate</dt>
-                      <dd className="mt-0.5 font-semibold text-[#172033]">
+                      <dt className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Actual Bitrate</dt>
+                      <dd className="mt-0.5 font-semibold text-[#141414]">
                         {formatBitrate(rec.bitrateKbps)}
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-[#64748B]">Packet Loss</dt>
-                      <dd className="mt-0.5 font-semibold text-[#172033]">
+                      <dt className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Packet Loss</dt>
+                      <dd className="mt-0.5 font-semibold text-[#141414]">
                         {rec.packetLossPct !== null ? `${rec.packetLossPct.toFixed(1)}%` : 'Unavailable'}
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-[#64748B]">Video Status</dt>
-                      <dd className="mt-0.5 font-semibold text-[#172033]">
+                      <dt className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Video Status</dt>
+                      <dd className="mt-0.5 font-semibold text-[#141414]">
                         {rec.isOutgoingStreaming && rec.isIncomingStreaming
                           ? 'Sending & Receiving'
                           : rec.isOutgoingStreaming
@@ -1264,8 +1264,8 @@ export function DeviceManagerPanel({
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-[#64748B]">Audio Status</dt>
-                      <dd className="mt-0.5 font-semibold text-[#172033]">{rec.audioStatus}</dd>
+                      <dt className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">Audio Status</dt>
+                      <dd className="mt-0.5 font-semibold text-[#141414]">{rec.audioStatus}</dd>
                     </div>
                   </dl>
                 </article>
@@ -1276,9 +1276,9 @@ export function DeviceManagerPanel({
               pendingRequests.length === 0 &&
               !searchQuery &&
               statusFilter === 'all' && (
-                <div className="pt-4 text-xs text-[#64748B]">
+                <div className="pt-4 text-xs text-[#5C6063]">
                   No paired participants yet. Share room code{' '}
-                  <span className="font-mono font-semibold text-[#172033]">
+                  <span className="font-mono font-semibold text-[#141414]">
                     {activeRoom.roomId}
                   </span>{' '}
                   in Rooms to connect up to {maxReceivers} devices.

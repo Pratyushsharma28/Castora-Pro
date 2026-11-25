@@ -91,11 +91,11 @@ export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
         onClick={() => {
           void install();
         }}
-        className={`inline-flex items-center gap-1.5 rounded-[10px] border border-[#E2E8F0] bg-white font-medium text-[#172033] hover:bg-[#F8FAFC] transition-colors ${
+        className={`inline-flex items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white font-medium text-[#141414] hover:border-[#141414] hover:bg-[#FAFAFA] transition-colors ${
           compact ? 'h-9 px-3 text-xs' : 'h-10 px-3.5 text-sm'
         }`}
       >
-        <Download className="h-3.5 w-3.5 text-[#2563EB]" aria-hidden="true" />
+        <Download className="h-3.5 w-3.5 text-[#FF6041]" aria-hidden="true" />
         <span>Install Player App</span>
       </button>
     );
@@ -107,26 +107,26 @@ export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
         <button
           type="button"
           onClick={() => setShowIosGuide(true)}
-          className="inline-flex h-9 items-center gap-1.5 rounded-[10px] border border-[#E2E8F0] bg-white px-3 text-xs font-medium text-[#172033] hover:bg-[#F8FAFC]"
+          className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-white px-3 text-xs font-medium text-[#141414] hover:border-[#141414] hover:bg-[#FAFAFA]"
         >
-          <Download className="h-3.5 w-3.5 text-[#2563EB]" aria-hidden="true" />
+          <Download className="h-3.5 w-3.5 text-[#FF6041]" aria-hidden="true" />
           <span>Install App</span>
         </button>
 
         {showIosGuide && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-            <div className="w-full max-w-sm rounded-xl border border-[#E2E8F0] bg-white p-6 shadow-xl">
-              <h3 className="font-display text-base font-semibold text-[#172033]">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-xs">
+            <div className="w-full max-w-sm rounded-xl border border-[#D5D7DE] bg-white p-6 shadow-xl">
+              <h3 className="font-display text-base font-semibold text-[#141414]">
                 Install Castora Pro
               </h3>
-              <p className="mt-2 text-xs leading-relaxed text-[#64748B]">
-                Tap the <strong className="text-[#172033]">Share</strong> button in Safari, then choose{' '}
-                <strong className="text-[#172033]">Add to Home Screen</strong> for standalone offline playback.
+              <p className="mt-2 text-xs leading-relaxed text-[#5C6063]">
+                Tap the <strong className="text-[#141414]">Share</strong> button in Safari, then choose{' '}
+                <strong className="text-[#141414]">Add to Home Screen</strong> for standalone offline playback.
               </p>
               <button
                 type="button"
                 onClick={() => setShowIosGuide(false)}
-                className="mt-4 h-10 w-full rounded-[10px] bg-[#2563EB] text-xs font-semibold text-white hover:bg-[#1D4ED8]"
+                className="mt-4 h-10 w-full rounded-lg bg-[#141414] text-xs font-semibold text-white transition-colors hover:bg-[#FF6041]"
               >
                 Close
               </button>

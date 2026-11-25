@@ -57,7 +57,7 @@ function stabilityAccent(status: StreamingStabilityStatus): {
     case 'Connected':
       return { dot: 'bg-[#16A34A]', text: 'text-[#15803D]' };
     case 'Recovering':
-      return { dot: 'bg-[#2563EB]', text: 'text-[#1D4ED8]' };
+      return { dot: 'bg-[#FF6041]', text: 'text-[#FF6041]' };
     case 'Unstable connection':
       return { dot: 'bg-[#D97706]', text: 'text-[#B45309]' };
     case 'Capture ended':
@@ -168,18 +168,18 @@ export function StreamingStabilityPanel({
   return (
     <section
       data-castora-chrome
-      className="rounded-xl border border-[#E2E8F0] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+      className="castora-card overflow-hidden"
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E2E8F0] px-5 py-3.5">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#D5D7DE] px-5 py-3.5">
         <div className="flex flex-wrap items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] text-[#2563EB]">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] text-[#FF6041]">
             <ShieldCheck className="h-4 w-4" aria-hidden="true" />
           </div>
           <div>
-            <h2 className="font-display text-sm font-semibold text-[#172033]">
+            <h2 className="font-display text-sm font-semibold text-[#141414]">
               Long-Duration Streaming Stability
             </h2>
-            <p className="text-xs text-[#64748B]">
+            <p className="text-xs text-[#5C6063]">
               Session continuity, capture health, ICE & signaling recovery telemetry
             </p>
           </div>
@@ -191,7 +191,7 @@ export function StreamingStabilityPanel({
             <span>{effectiveStatus}</span>
           </span>
 
-          <span className="font-mono text-xs font-medium text-[#172033] tabular-metrics">
+          <span className="font-mono text-xs font-medium text-[#141414] tabular-metrics">
             {formatDuration(webrtcState.streamingStartedAt, nowMs)}
           </span>
 
@@ -199,7 +199,7 @@ export function StreamingStabilityPanel({
             <button
               type="button"
               onClick={onRetryConnection}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-2.5 py-1 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] hover:bg-[#141414] hover:text-white"
             >
               <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
               <span>Retry Media</span>
@@ -210,7 +210,7 @@ export function StreamingStabilityPanel({
             <button
               type="button"
               onClick={onReconnectBackend}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-2.5 py-1 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414] hover:bg-[#141414] hover:text-white"
             >
               <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
               <span>Reconnect WS</span>
@@ -220,7 +220,7 @@ export function StreamingStabilityPanel({
           <button
             type="button"
             onClick={() => setExpanded((prev) => !prev)}
-            className="inline-flex items-center gap-1 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1 text-xs font-medium text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+            className="inline-flex items-center gap-1 rounded-lg border border-[#D5D7DE] bg-[#FAFAFA] px-2.5 py-1 text-xs font-medium text-[#141414] transition-colors hover:border-[#141414]"
           >
             <span>{expanded ? 'Hide' : 'Details'}</span>
             {expanded ? (
@@ -233,77 +233,101 @@ export function StreamingStabilityPanel({
       </div>
 
       {expanded && (
-        <div className="divide-y divide-[#F1F5F9]">
+        <div className="divide-y divide-[#D5D7DE]">
           <div className="grid grid-cols-2 gap-x-6 gap-y-4 px-5 py-4 sm:grid-cols-3 lg:grid-cols-6">
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">Streaming Duration</div>
-              <div className="mt-1 font-mono text-sm font-semibold text-[#172033] tabular-metrics">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Streaming Duration
+              </div>
+              <div className="mt-1 font-mono text-sm font-semibold text-[#141414] tabular-metrics">
                 {formatDuration(webrtcState.streamingStartedAt, nowMs)}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">Capture Status</div>
-              <div className="mt-1 text-sm font-semibold text-[#172033]">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Capture Status
+              </div>
+              <div className="mt-1 text-sm font-semibold text-[#141414]">
                 {formatCaptureHealth(webrtcState.captureHealthStatus)}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">ICE State</div>
-              <div className="mt-1 font-mono text-sm font-semibold text-[#172033]">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                ICE State
+              </div>
+              <div className="mt-1 font-mono text-sm font-semibold text-[#141414]">
                 {webrtcState.iceConnectionState ?? 'idle'}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">WebSocket State</div>
-              <div className="mt-1 font-mono text-sm font-semibold text-[#172033] capitalize">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                WebSocket State
+              </div>
+              <div className="mt-1 font-mono text-sm font-semibold text-[#141414] capitalize">
                 {wsStateLabel}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">Current Codec</div>
-              <div className="mt-1 font-mono text-sm font-semibold text-[#172033]">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Current Codec
+              </div>
+              <div className="mt-1 font-mono text-sm font-semibold text-[#141414]">
                 {currentCodec}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">Resolution & FPS</div>
-              <div className="mt-1 font-mono text-sm font-semibold text-[#172033] tabular-metrics">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Resolution &amp; FPS
+              </div>
+              <div className="mt-1 font-mono text-sm font-semibold text-[#141414] tabular-metrics">
                 {resolutionAndFps}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">Current Bitrate</div>
-              <div className="mt-1 font-mono text-sm font-semibold text-[#172033] tabular-metrics">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Current Bitrate
+              </div>
+              <div className="mt-1 font-mono text-sm font-semibold text-[#141414] tabular-metrics">
                 {formatBitrate(tel.bitrateKbps)}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">Packet Loss</div>
-              <div className="mt-1 font-mono text-sm font-semibold text-[#172033] tabular-metrics">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Packet Loss
+              </div>
+              <div className="mt-1 font-mono text-sm font-semibold text-[#141414] tabular-metrics">
                 {packetLossLabel}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">Last Video Frame</div>
-              <div className="mt-1 font-mono text-xs font-medium text-[#172033] tabular-metrics">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Last Video Frame
+              </div>
+              <div className="mt-1 font-mono text-xs font-medium text-[#141414] tabular-metrics">
                 {formatClock(webrtcState.lastSuccessfulVideoFrameAt)}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">Last Heartbeat Ack</div>
-              <div className="mt-1 font-mono text-xs font-medium text-[#172033] tabular-metrics">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Last Heartbeat Ack
+              </div>
+              <div className="mt-1 font-mono text-xs font-medium text-[#141414] tabular-metrics">
                 {formatClock(signalingStability?.lastHeartbeatAckAt ?? null)}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">Last Reconnect Attempt</div>
-              <div className="mt-1 font-mono text-xs font-medium text-[#172033] tabular-metrics">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Last Reconnect Attempt
+              </div>
+              <div className="mt-1 font-mono text-xs font-medium text-[#141414] tabular-metrics">
                 {formatClock(lastReconnectTime)}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-medium text-[#64748B]">Turn Lease Expiry</div>
-              <div className="mt-1 font-mono text-xs font-medium text-[#172033] tabular-metrics">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-[#797D82]">
+                Turn Lease Expiry
+              </div>
+              <div className="mt-1 font-mono text-xs font-medium text-[#141414] tabular-metrics">
                 {signalingStability?.turnExpiresAt
                   ? formatClock(signalingStability.turnExpiresAt)
                   : 'Default STUN'}
@@ -311,10 +335,10 @@ export function StreamingStabilityPanel({
             </div>
           </div>
 
-          <div className="flex flex-col gap-2 px-5 py-3 text-xs sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col gap-2 bg-[#FAFAFA] px-5 py-3 text-xs sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <span className="font-medium text-[#64748B]">Last recovery result: </span>
-              <span className="font-medium text-[#172033]">{lastRecoveryResult}</span>
+              <span className="font-medium text-[#5C6063]">Last recovery result: </span>
+              <span className="font-medium text-[#141414]">{lastRecoveryResult}</span>
             </div>
             {webrtcState.stopReason && (
               <div className="text-[#B91C1C]">

@@ -29,7 +29,7 @@ export function MobileReceiverBar({
     <nav
       data-castora-chrome
       aria-label="Mobile Navigation"
-      className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-7 border-t border-[#E2E8F0] bg-white md:hidden"
+      className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-7 border-t border-[#D5D7DE] bg-white/95 backdrop-blur-md md:hidden"
     >
       {MOBILE_ITEMS.map((item) => {
         const Icon = item.icon;
@@ -40,11 +40,20 @@ export function MobileReceiverBar({
             type="button"
             aria-current={isActive ? 'page' : undefined}
             onClick={() => onSelectDestination(item.id)}
-            className={`flex min-h-[56px] flex-col items-center justify-center gap-1 px-2 text-[11px] font-medium transition-colors ${
-              isActive ? 'text-[#2563EB]' : 'text-[#64748B] hover:text-[#172033]'
+            className={`relative flex min-h-[56px] flex-col items-center justify-center gap-1 px-1.5 text-[11px] font-medium transition-colors ${
+              isActive ? 'text-[#141414]' : 'text-[#5C6063] hover:text-[#141414]'
             }`}
           >
-            <Icon className="h-4 w-4" aria-hidden="true" />
+            {isActive && (
+              <span
+                aria-hidden="true"
+                className="absolute inset-x-3 top-0 h-[2px] bg-[#FF6041]"
+              />
+            )}
+            <Icon
+              className={`h-4 w-4 ${isActive ? 'text-[#FF6041]' : ''}`}
+              aria-hidden="true"
+            />
             <span className="truncate">{item.label}</span>
           </button>
         );

@@ -80,22 +80,22 @@ export function IncomingScreensPanel({
         : 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3';
 
   return (
-    <div className="castora-panel-fs-host rounded-xl border border-[#E2E8F0] bg-white p-4 sm:p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-4">
+    <div className="castora-panel-fs-host castora-card p-4 sm:p-5 space-y-4">
       <div
         data-castora-chrome
-        className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3"
+        className="flex flex-wrap items-center justify-between gap-2 border-b border-[#D5D7DE] pb-3"
       >
         <div className="flex items-center gap-2">
-          <Monitor className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
-          <h2 className="text-sm font-semibold text-[#172033]">Incoming Screens</h2>
+          <Monitor className="h-4 w-4 text-[#FF6041]" aria-hidden="true" />
+          <h2 className="font-display text-sm font-semibold text-[#141414]">Incoming Screens</h2>
         </div>
-        <span className="text-xs text-[#64748B] tabular-metrics">
+        <span className="font-mono text-xs text-[#5C6063] tabular-metrics">
           {streams.filter((s) => s.stream !== null).length} active · {streams.length} total
         </span>
       </div>
 
       {streams.length === 0 ? (
-        <p className="py-2 text-xs leading-relaxed text-[#64748B]">{emptyMessage}</p>
+        <p className="py-2 text-xs leading-relaxed text-[#5C6063]">{emptyMessage}</p>
       ) : (
         <div className={`grid gap-4 ${gridClass}`}>
           {streams.map((entry, idx) => {
@@ -162,12 +162,12 @@ export function IncomingScreensPanel({
                   }
                   footerMeta={
                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-[#64748B] tabular-metrics">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-[#5C6063] tabular-metrics">
                         <span>ICE: {entry.iceConnectionState ?? 'idle'}</span>
                         <span aria-hidden="true">·</span>
                         <span title={quality.detail}>
                           Quality:{' '}
-                          <strong className="font-semibold text-[#172033]">
+                          <strong className="font-semibold text-[#141414]">
                             {quality.label}
                           </strong>
                         </span>
@@ -209,16 +209,16 @@ export function IncomingScreensPanel({
                               }));
                             }
                           }}
-                          className={`inline-flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium disabled:opacity-45 ${
+                          className={`inline-flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors disabled:opacity-45 ${
                             audioBlocked && hasAudio
                               ? 'border-[#D97706] bg-[#FFFBEB] text-[#B45309] hover:bg-[#FEF3C7]'
-                              : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]'
+                              : 'border-[#D5D7DE] bg-white text-[#141414] hover:border-[#141414] hover:bg-[#141414] hover:text-white'
                           }`}
                         >
                           {muted || audioBlocked ? (
                             <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
                           ) : (
-                            <Volume2 className="h-3.5 w-3.5 text-[#2563EB]" aria-hidden="true" />
+                            <Volume2 className="h-3.5 w-3.5 text-[#FF6041]" aria-hidden="true" />
                           )}
                           <span>
                             {!hasAudio

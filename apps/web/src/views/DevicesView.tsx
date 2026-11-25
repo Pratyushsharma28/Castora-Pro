@@ -72,10 +72,13 @@ export function DevicesView({
     <div data-castora-chrome className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="font-display text-xl font-semibold tracking-tight text-[#172033]">
+          <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#797D82]">
+            03 · CONNECTED ENDPOINTS
+          </div>
+          <h1 className="mt-0.5 font-display text-2xl font-bold tracking-[-0.025em] text-[#141414]">
             Device Management
           </h1>
-          <p className="text-sm text-[#64748B]">
+          <p className="text-sm text-[#5C6063]">
             Inspect connected participants, rename devices, manage approvals, and control per-device streaming and quality modes.
           </p>
         </div>

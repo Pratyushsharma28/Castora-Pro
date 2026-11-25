@@ -426,16 +426,19 @@ export function SignagePlayerView({
   // Unpaired TV Enrollment View
   if (!creds) {
     return (
-      <div className="fixed inset-0 z-40 flex flex-col items-center justify-center bg-[#0B1220] p-6 text-white">
-        <div className="w-full max-w-md rounded-2xl border border-white/15 bg-[#111A2E] p-7 shadow-2xl space-y-6">
-          <div className="flex items-center justify-between">
+      <div className="fixed inset-0 z-40 flex flex-col items-center justify-center bg-[#141414] p-6 text-white">
+        <div className="w-full max-w-md rounded-2xl border border-[#262626] bg-[#1B1B1E] p-7 castora-stage-shadow space-y-6">
+          <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-3">
-              <span className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-[#2563EB]">
+              <span className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-[#FF6041]">
                 <Tv className="h-5 w-5 text-white" />
               </span>
               <div>
-                <h1 className="font-display text-lg font-semibold">Castora TV Signage Player</h1>
-                <p className="text-xs text-slate-400">Autonomous offline-cached display</p>
+                <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#9A9FA6]">
+                  SIGNAGE RECEIVER
+                </p>
+                <h1 className="font-display text-lg font-semibold text-white">Castora TV Signage Player</h1>
+                <p className="text-xs text-[#A1A6AE]">Autonomous offline-cached display</p>
               </div>
             </div>
             <PWAInstallButton compact />
@@ -451,7 +454,7 @@ export function SignagePlayerView({
             <div>
               <label
                 htmlFor="tv-screen-code"
-                className="block text-xs font-medium text-slate-300"
+                className="block font-mono text-[10px] uppercase tracking-wider text-[#9A9FA6]"
               >
                 6-Character Screen Code (from Host Digital Signage tab)
               </label>
@@ -464,7 +467,7 @@ export function SignagePlayerView({
                   setCodeInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))
                 }
                 placeholder="ABC123"
-                className="mt-2 h-14 w-full rounded-xl border border-white/20 bg-[#0B1220] px-4 text-center font-mono text-2xl font-bold tracking-[0.28em] text-white focus:border-[#2563EB] focus:outline-none"
+                className="mt-2 h-14 w-full rounded-xl border border-white/15 bg-[#141414] px-4 text-center font-mono text-2xl font-bold tracking-[0.28em] text-white placeholder:text-[#5C6063] focus:border-[#FF6041] focus:outline-none"
               />
             </div>
 
@@ -478,22 +481,22 @@ export function SignagePlayerView({
             <button
               type="submit"
               disabled={pairingBusy || codeInput.length !== 6}
-              className="h-12 w-full rounded-xl bg-[#2563EB] text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+              className="h-12 w-full rounded-xl bg-[#FF6041] text-sm font-semibold text-white transition-colors hover:bg-[#E85032] disabled:opacity-50"
             >
               {pairingBusy ? 'Pairing Display...' : 'Pair Display & Start Caching'}
             </button>
           </form>
 
-          <div className="flex items-center justify-between border-t border-white/10 pt-4 text-xs text-slate-400">
+          <div className="flex items-center justify-between border-t border-white/10 pt-4 text-xs text-[#9A9FA6]">
             <button
               type="button"
               onClick={onExitPlayer}
-              className="inline-flex items-center gap-1.5 text-slate-300 hover:text-white"
+              className="inline-flex items-center gap-1.5 text-white hover:text-[#FF6041] transition-colors"
             >
               <ArrowLeft className="h-3.5 w-3.5" />
               <span>Back to Studio</span>
             </button>
-            <span>No WebRTC or host required</span>
+            <span className="font-mono text-[10px] uppercase tracking-wider">No WebRTC or host required</span>
           </div>
         </div>
       </div>
@@ -561,29 +564,37 @@ export function SignagePlayerView({
           showHud ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 rounded-xl border border-white/15 bg-black/75 px-4 py-2.5 backdrop-blur-md text-xs">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 rounded-xl border border-white/15 bg-[#141414]/90 px-4 py-2.5 backdrop-blur-md text-xs castora-stage-shadow">
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
               onClick={onExitPlayer}
-              className="inline-flex h-8 items-center gap-1 rounded-lg border border-white/20 px-2.5 text-slate-200 hover:bg-white/10"
+              className="inline-flex h-8 items-center gap-1 rounded-lg border border-white/15 px-2.5 text-white hover:border-white/40 hover:bg-white/10"
             >
               <ArrowLeft className="h-3.5 w-3.5" />
               <span>Studio</span>
             </button>
-            <div>
+            <div className="flex items-center gap-2">
+              <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-[#FF6041]">
+                <Tv className="h-3 w-3 text-white" />
+              </span>
               <span className="font-semibold text-white">
                 {manifest?.screen.name ?? `Screen ${creds.screenCode}`}
               </span>
-              <span className="ml-2 font-mono text-slate-400">({creds.screenCode})</span>
+              <span className="font-mono text-[#9A9FA6]">({creds.screenCode})</span>
             </div>
             <span
-              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+              className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider font-medium ${
                 isOnline && !lastSyncError
-                  ? 'bg-emerald-500/20 text-emerald-300'
-                  : 'bg-amber-500/20 text-amber-300'
+                  ? 'border-[#81FF28]/30 bg-[#81FF28]/10 text-[#81FF28]'
+                  : 'border-amber-400/30 bg-amber-500/15 text-amber-300'
               }`}
             >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  isOnline && !lastSyncError ? 'bg-[#81FF28]' : 'bg-amber-400'
+                }`}
+              />
               {isOnline && !lastSyncError ? (
                 <Wifi className="h-3 w-3" />
               ) : (
@@ -593,11 +604,11 @@ export function SignagePlayerView({
             </span>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 font-mono text-[11px] text-slate-300 tabular-metrics">
+          <div className="flex flex-wrap items-center gap-3 font-mono text-[11px] text-[#A1A6AE] tabular-metrics">
             <span>
               Cache: {cachedCount}/{totalCount}
             </span>
-            <span>
+            <span className="text-white">
               {playback.currentItem?.media?.displayName ?? 'Idle'} ·{' '}
               {formatClockDuration(playback.totalPlaybackSec)} (Loops: {playback.loopCount})
             </span>
@@ -608,7 +619,7 @@ export function SignagePlayerView({
                     ? 'Browser persistent storage granted'
                     : 'Best-effort browser storage (native Android TV APK recommended for un-evictable 24/7 storage)'
                 }
-                className="inline-flex items-center gap-1 text-slate-300"
+                className="inline-flex items-center gap-1 text-[#9A9FA6]"
               >
                 <HardDrive className="h-3 w-3" />
                 <span>{storageReport.persisted ? 'Persisted' : 'Best-effort cache'}</span>
@@ -617,7 +628,7 @@ export function SignagePlayerView({
             <button
               type="button"
               onClick={() => void syncWithServer()}
-              className="inline-flex h-8 items-center gap-1 rounded-lg border border-white/20 px-2.5 text-slate-200 hover:bg-white/10"
+              className="inline-flex h-8 items-center gap-1 rounded-lg bg-[#FF6041] px-2.5 font-sans text-xs font-semibold text-white transition-colors hover:bg-[#E85032]"
             >
               <RefreshCw className="h-3 w-3" />
               <span>Sync</span>
@@ -625,7 +636,7 @@ export function SignagePlayerView({
             <button
               type="button"
               onClick={() => void handleToggleFullscreen()}
-              className="inline-flex h-8 items-center gap-1 rounded-lg border border-white/20 px-2.5 text-slate-200 hover:bg-white/10"
+              className="inline-flex h-8 items-center gap-1 rounded-lg border border-white/15 px-2.5 font-sans text-xs text-white hover:bg-white/10"
             >
               {isFullscreen ? (
                 <Minimize2 className="h-3.5 w-3.5" />
@@ -641,7 +652,7 @@ export function SignagePlayerView({
                 setCreds(null);
                 setManifest(null);
               }}
-              className="inline-flex h-8 items-center gap-1 rounded-lg border border-red-500/30 px-2.5 text-red-300 hover:bg-red-500/20"
+              className="inline-flex h-8 items-center gap-1 rounded-lg border border-red-500/30 px-2.5 font-sans text-xs text-red-300 hover:bg-red-500/20"
             >
               <Unplug className="h-3.5 w-3.5" />
               <span>Unpair</span>
@@ -649,7 +660,7 @@ export function SignagePlayerView({
           </div>
         </div>
         {lastSyncAt && (
-          <p className="mx-auto mt-1 max-w-6xl px-2 text-[10px] text-slate-400">
+          <p className="mx-auto mt-1 max-w-6xl px-2 font-mono text-[10px] text-[#9A9FA6]">
             <Info className="mr-1 inline h-3 w-3" />
             Last server sync: {new Date(lastSyncAt).toLocaleTimeString()} · Playback runs locally from IndexedDB cache without host connection.
           </p>
