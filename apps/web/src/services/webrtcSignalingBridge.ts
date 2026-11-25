@@ -2,9 +2,11 @@ import type { CastoraEnvelope, CastoraPlatform, CastoraVideoCodec } from '../typ
 import type {
   AudioCaptureStatus,
   AudioPlaybackStatus,
+  CaptureHealthStatus,
   CapturePreferences,
   NetworkPreferences,
   PeerConnectionRecoveryInfo,
+  StreamingStabilityStatus,
   StreamTelemetrySnapshot,
   WebRtcConnectionPhase,
 } from '../types/studio';
@@ -101,6 +103,14 @@ export interface WebRtcSessionSnapshot {
   incomingStreams: IncomingScreenEntry[];
   outboundPeers: OutboundPeerEntry[];
   peerCount: number;
+  streamingStartedAt: number | null;
+  lastSuccessfulVideoFrameAt: number | null;
+  lastSuccessfulAudioPacketAt: number | null;
+  captureHealthStatus: CaptureHealthStatus;
+  lastRecoveryAttemptAt: number | null;
+  lastRecoveryResult: string | null;
+  stopReason: string | null;
+  stabilityStatus: StreamingStabilityStatus;
 }
 
 export interface SignalingSender {
@@ -162,6 +172,13 @@ export class WebRtcSignalingBridge {
   private disposed = false;
   private statusDetail: string | null = null;
   private errorMessage: string | null = null;
+  private streamingStartedAt: number | null = null;
+  private lastSuccessfulVideoFrameAt: number | null = null;
+  private lastSuccessfulAudioPacketAt: number | null = null;
+  private captureEnded = false;
+  private lastRecoveryAttemptAt: number | null = null;
+  private lastRecoveryResult: string | null = null;
+  private stopReason: string | null = null;
 
   constructor(params: {
     deviceId: string;
@@ -183,11 +200,11 @@ export class WebRtcSignalingBridge {
     this.rtcFactory = params.rtcFactory;
     this.onRefreshIceServers = params.onRefreshIceServers;
     this.reconnectConfig = {
-      maxAttempts: Math.max(1, params.reconnectConfig?.maxAttempts ?? 3),
+      maxAttempts: Math.max(1, params.reconnectConfig?.maxAttempts ?? 6),
       baseDelayMs: Math.max(10, params.reconnectConfig?.baseDelayMs ?? 1000),
-      maxDelayMs: Math.max(20, params.reconnectConfig?.maxDelayMs ?? 8000),
+      maxDelayMs: Math.max(20, params.reconnectConfig?.maxDelayMs ?? 15000),
       iceDisconnectGraceMs: Math.max(0, params.reconnectConfig?.iceDisconnectGraceMs ?? 1500),
-      recoveryVerifyMs: Math.max(50, params.reconnectConfig?.recoveryVerifyMs ?? 3500),
+      recoveryVerifyMs: Math.max(50, params.reconnectConfig?.recoveryVerifyMs ?? 4000),
     };
   }
 
@@ -674,6 +691,61 @@ export class WebRtcSignalingBridge {
     const iceConnectionState =
       primaryOutbound?.iceConnectionState ?? primaryInbound?.iceConnectionState ?? null;
 
+    const captureHealthStatus: CaptureHealthStatus = this.captureSession
+      ? this.captureSession.videoTrack?.readyState === 'ended'
+        ? 'Capture ended'
+        : this.captureSession.videoTrack?.muted || this.captureSession.videoHealth === 'muted'
+          ? 'Paused / Muted'
+          : 'Active'
+      : this.captureEnded
+        ? 'Capture ended'
+        : 'Not capturing';
+
+    const recList = Array.from(this.recoveryMap.values());
+    const anyReconnecting =
+      phase === 'reconnecting' ||
+      outboundPeers.some((o) => o.phase === 'reconnecting') ||
+      incomingStreams.some((i) => i.phase === 'reconnecting') ||
+      recList.some((r) => r.reconnecting);
+    const anyExhaustedOrFailed =
+      phase === 'failed' ||
+      outboundPeers.some((o) => o.phase === 'failed') ||
+      incomingStreams.some((i) => i.phase === 'failed') ||
+      recList.some((r) => r.exhausted);
+    const highLossOrLatency =
+      (telemetry.packetLossPct !== null && telemetry.packetLossPct >= 5) ||
+      (telemetry.rttMs !== null && telemetry.rttMs >= 250);
+
+    const anyPeerDisconnectedUnexpectedly = Boolean(
+      this.captureSession &&
+        this.activeRoom &&
+        this.outboundMap.size === 0 &&
+        this.desiredOutboundTargets.size > 0 &&
+        Array.from(this.desiredOutboundTargets).every((targetId) => {
+          const meta = this.resolveParticipantMeta(targetId);
+          return !meta || !meta.connected;
+        })
+    );
+
+    let stabilityStatus: StreamingStabilityStatus = 'Standby';
+    if (this.captureEnded && !this.captureSession) {
+      stabilityStatus = 'Capture ended';
+    } else if (!this.captureSession && this.incomingMap.size === 0 && this.stopReason) {
+      stabilityStatus = 'Streaming stopped';
+    } else if (anyReconnecting) {
+      stabilityStatus = 'Recovering';
+    } else if (anyPeerDisconnectedUnexpectedly) {
+      stabilityStatus = 'Receiver disconnected';
+    } else if (
+      anyExhaustedOrFailed ||
+      highLossOrLatency ||
+      captureHealthStatus === 'Paused / Muted'
+    ) {
+      stabilityStatus = 'Unstable connection';
+    } else if (phase === 'connected' || this.captureSession || this.incomingMap.size > 0) {
+      stabilityStatus = phase === 'connected' ? 'Connected' : 'Recovering';
+    }
+
     return {
       phase,
       statusDetail: this.statusDetail,
@@ -702,6 +774,16 @@ export class WebRtcSignalingBridge {
       incomingStreams,
       outboundPeers,
       peerCount: this.peers.size,
+      streamingStartedAt: this.streamingStartedAt,
+      lastSuccessfulVideoFrameAt:
+        telemetry.lastSuccessfulVideoFrameAt ?? this.lastSuccessfulVideoFrameAt,
+      lastSuccessfulAudioPacketAt:
+        telemetry.lastSuccessfulAudioPacketAt ?? this.lastSuccessfulAudioPacketAt,
+      captureHealthStatus,
+      lastRecoveryAttemptAt: this.lastRecoveryAttemptAt,
+      lastRecoveryResult: this.lastRecoveryResult,
+      stopReason: this.stopReason,
+      stabilityStatus,
     };
   }
 
@@ -820,6 +902,9 @@ export class WebRtcSignalingBridge {
         },
         onPhaseChange: (phase, detail) => {
           if (phase === 'connected') {
+            if (this.streamingStartedAt === null && (this.captureSession || this.incomingMap.size > 0)) {
+              this.streamingStartedAt = Date.now();
+            }
             this.resetPeerRecovery(peerDeviceId);
           }
           const rec = this.getPeerRecoveryState(peerDeviceId);
@@ -872,6 +957,22 @@ export class WebRtcSignalingBridge {
         },
         onConnectionFailure: (reason) => {
           this.schedulePeerRecovery(peerDeviceId, reason);
+        },
+        onLocalTrackEnded: (reason) => {
+          this.captureEnded = true;
+          this.stopReason = reason;
+          this.callbacks.onLogEvent(
+            'webrtc',
+            'Screen capture track ended',
+            `${reason} Browser requires a user click on Share Screen to restart capture.`
+          );
+          this.stopSharing('capture_revoked');
+        },
+        onRecoveryAttempt: (info) => {
+          this.lastRecoveryAttemptAt = Date.now();
+          this.lastRecoveryResult = info.detail;
+          this.callbacks.onLogEvent('webrtc', `Recovery triggered (${info.kind})`, info.detail);
+          this.emit();
         },
         onCodecFallback: (nextCodec, reason) => {
           this.statusDetail = reason;
@@ -927,6 +1028,30 @@ export class WebRtcSignalingBridge {
         onStats: (dualStats) => {
           const now = Date.now();
           const captureAudioStatus = this.captureSession?.audioCaptureStatus ?? null;
+          if (dualStats.outbound.lastSuccessfulVideoFrameAt) {
+            this.lastSuccessfulVideoFrameAt = Math.max(
+              this.lastSuccessfulVideoFrameAt ?? 0,
+              dualStats.outbound.lastSuccessfulVideoFrameAt
+            );
+          }
+          if (dualStats.outbound.lastSuccessfulAudioPacketAt) {
+            this.lastSuccessfulAudioPacketAt = Math.max(
+              this.lastSuccessfulAudioPacketAt ?? 0,
+              dualStats.outbound.lastSuccessfulAudioPacketAt
+            );
+          }
+          if (dualStats.inbound.lastSuccessfulVideoFrameAt) {
+            this.lastSuccessfulVideoFrameAt = Math.max(
+              this.lastSuccessfulVideoFrameAt ?? 0,
+              dualStats.inbound.lastSuccessfulVideoFrameAt
+            );
+          }
+          if (dualStats.inbound.lastSuccessfulAudioPacketAt) {
+            this.lastSuccessfulAudioPacketAt = Math.max(
+              this.lastSuccessfulAudioPacketAt ?? 0,
+              dualStats.inbound.lastSuccessfulAudioPacketAt
+            );
+          }
           const outEntry = this.outboundMap.get(peerDeviceId);
           if (outEntry) {
             const outAudioStatus = evaluateAudioDiagnosticState({
@@ -1015,6 +1140,7 @@ export class WebRtcSignalingBridge {
     if (!existing || (!existing.reconnecting && !existing.exhausted && existing.attempt === 0)) {
       return;
     }
+    this.lastRecoveryResult = 'Connection recovered automatically';
     const cleared: PeerConnectionRecoveryInfo = {
       attempt: 0,
       maxAttempts: this.reconnectConfig.maxAttempts,
@@ -1102,6 +1228,9 @@ export class WebRtcSignalingBridge {
       };
       this.recoveryMap.set(peerDeviceId, exhaustedRec);
       this.syncRecoveryToEntries(peerDeviceId, exhaustedRec, 'failed', reason);
+      this.lastRecoveryAttemptAt = Date.now();
+      this.lastRecoveryResult = `Recovery exhausted (${prev.maxAttempts} attempts): ${reason}`;
+      this.stopReason = this.lastRecoveryResult;
       this.errorMessage = `Connection to ${meta.deviceName} failed after ${prev.maxAttempts} recovery attempts. Click Retry to reconnect.`;
       this.callbacks.onLogEvent(
         'error',
@@ -1133,6 +1262,8 @@ export class WebRtcSignalingBridge {
       nextRetryAt: Date.now() + delayMs,
     };
     this.recoveryMap.set(peerDeviceId, nextRec);
+    this.lastRecoveryAttemptAt = Date.now();
+    this.lastRecoveryResult = `Attempt ${nextAttempt}/${nextRec.maxAttempts} (${mode})`;
     this.syncRecoveryToEntries(
       peerDeviceId,
       nextRec,
@@ -1408,6 +1539,10 @@ export class WebRtcSignalingBridge {
       this.autoBroadcastToRoom = false;
       this.desiredOutboundTargets.clear();
       this.pendingAutoPublishPeers.clear();
+      this.streamingStartedAt = null;
+      if (!this.stopReason) {
+        this.stopReason = 'Room closed or disconnected.';
+      }
       this.statusDetail = null;
       this.errorMessage = null;
       this.emit();
@@ -1470,25 +1605,125 @@ export class WebRtcSignalingBridge {
             const m = this.resolveParticipantMeta(id);
             return Boolean(m?.connected);
           });
-      for (const peerId of candidates) {
-        if (
-          !this.outboundMap.has(peerId) &&
-          !this.pendingAutoPublishPeers.has(peerId)
-        ) {
-          this.pendingAutoPublishPeers.add(peerId);
-          void this.publishActiveCaptureToPeer(peerId)
+      const pendingToPublish = candidates.filter(
+        (peerId) => !this.outboundMap.has(peerId) && !this.pendingAutoPublishPeers.has(peerId)
+      );
+      const totalProjectedOutbound = Math.max(
+        1,
+        this.outboundMap.size + pendingToPublish.length
+      );
+      pendingToPublish.forEach((peerId, index) => {
+        this.pendingAutoPublishPeers.add(peerId);
+        const batchDelayMs = Math.floor(index / 3) * 20;
+        const launch = () => {
+          if (this.disposed || !this.captureSession || !this.activeRoom) {
+            this.pendingAutoPublishPeers.delete(peerId);
+            return;
+          }
+          void this.publishActiveCaptureToPeer(peerId, totalProjectedOutbound)
             .catch(() => {
               // Ignore transient peer connection failures on auto-broadcast; error logged via peer callback
             })
             .finally(() => {
               this.pendingAutoPublishPeers.delete(peerId);
             });
+        };
+        if (batchDelayMs === 0) {
+          launch();
+        } else {
+          globalThis.setTimeout(launch, batchDelayMs);
         }
-      }
+      });
     }
 
     if (changed) {
       this.emit();
+    }
+  }
+
+  markSessionStopped(reason: string): void {
+    this.stopReason = reason;
+    this.statusDetail = reason;
+    this.errorMessage = reason;
+    this.streamingStartedAt = null;
+    for (const peerId of Array.from(this.peers.keys())) {
+      this.removePeerConnection(peerId, reason);
+    }
+    if (this.captureSession) {
+      this.captureSession.stop();
+      this.captureSession = null;
+    }
+    this.outboundStreamId = null;
+    this.autoBroadcastToRoom = false;
+    this.desiredOutboundTargets.clear();
+    this.pendingAutoPublishPeers.clear();
+    this.emit();
+  }
+
+  reconcileActiveStreamsAfterReconnect(): void {
+    if (this.disposed || !this.activeRoom || !this.isSelfAuthorizedInRoom()) return;
+    if (!this.captureSession || this.captureSession.videoTrack?.readyState === 'ended') return;
+
+    const signaling = this.getSignalingClient();
+    if (!signaling) return;
+
+    const roomId = this.activeRoom.roomId;
+    const serverStreams = Array.isArray(this.activeRoom.activeStreams)
+      ? this.activeRoom.activeStreams
+      : [];
+
+    const candidates = this.autoBroadcastToRoom
+      ? this.resolvePublishTargets('ALL')
+      : Array.from(this.desiredOutboundTargets).filter((id) =>
+          Boolean(this.resolveParticipantMeta(id)?.connected)
+        );
+
+    for (const peerId of candidates) {
+      const existingOut = this.outboundMap.get(peerId);
+      const serverKnowsStream = serverStreams.some(
+        (s) => s.publisherDeviceId === this.deviceId && s.targetDeviceId === peerId
+      );
+      if (existingOut && !serverKnowsStream) {
+        const effectivePrefs = this.getEffectivePreferencesForPeer(peerId);
+        const resolved = resolveQualityTarget(effectivePrefs, {
+          width: this.captureSession.actualWidth,
+          height: this.captureSession.actualHeight,
+        });
+        const peer = this.peers.get(peerId);
+        const codec = peer?.getCodecDiagnostics().outboundCodecHint ?? 'VP8';
+        signaling.sendEnvelope({
+          messageType: 'stream_start',
+          senderDeviceId: this.deviceId,
+          receiverDeviceId: peerId,
+          roomId,
+          payload: {
+            sessionId: existingOut.sessionId,
+            streamId: existingOut.streamId,
+            width: Math.max(
+              320,
+              Math.min(3840, Math.round(this.captureSession.actualWidth ?? resolved.targetWidth))
+            ),
+            height: Math.max(
+              240,
+              Math.min(2160, Math.round(this.captureSession.actualHeight ?? resolved.targetHeight))
+            ),
+            fps: Math.max(
+              1,
+              Math.min(120, Math.round(this.captureSession.actualFrameRate ?? resolved.targetFps))
+            ),
+            codec,
+          },
+        });
+      } else if (!existingOut && !this.pendingAutoPublishPeers.has(peerId)) {
+        this.pendingAutoPublishPeers.add(peerId);
+        void this.publishActiveCaptureToPeer(peerId)
+          .catch(() => {
+            // Transient failure logged by peer callbacks
+          })
+          .finally(() => {
+            this.pendingAutoPublishPeers.delete(peerId);
+          });
+      }
     }
   }
 
@@ -1538,6 +1773,8 @@ export class WebRtcSignalingBridge {
       session = await this.captureFn({
         preferences: this.preferences,
         onNativeEnded: () => {
+          this.captureEnded = true;
+          this.stopReason = 'Screen capture ended via browser controls or OS permission revocation.';
           this.callbacks.onLogEvent(
             'webrtc',
             'Screen sharing ended via browser control',
@@ -1552,6 +1789,25 @@ export class WebRtcSignalingBridge {
             if (notice) {
               this.statusDetail = notice;
               this.callbacks.onLogEvent('webrtc', 'Screen audio track state updated', notice);
+            }
+            this.emit();
+          }
+        },
+        onVideoTrackStateChange: (health) => {
+          if (this.captureSession === session) {
+            this.captureSession.videoHealth = health;
+            if (health === 'muted') {
+              this.callbacks.onLogEvent(
+                'webrtc',
+                'Capture source muted temporarily',
+                'Captured display surface paused frame delivery.'
+              );
+            } else if (health === 'live') {
+              this.callbacks.onLogEvent(
+                'webrtc',
+                'Capture source resumed',
+                'Captured display surface resumed live frame delivery.'
+              );
             }
             this.emit();
           }
@@ -1573,6 +1829,11 @@ export class WebRtcSignalingBridge {
       this.captureSession.stop();
     }
     this.captureSession = session;
+    this.captureEnded = false;
+    this.stopReason = null;
+    if (this.streamingStartedAt === null) {
+      this.streamingStartedAt = Date.now();
+    }
     this.outboundStreamId = createId('stream');
     this.autoBroadcastToRoom = targetSelection === null || targetSelection === 'ALL';
 
@@ -1627,11 +1888,20 @@ export class WebRtcSignalingBridge {
     }
 
     const errors: string[] = [];
-    for (const peerId of targets) {
-      try {
-        await this.publishActiveCaptureToPeer(peerId, targets.length);
-      } catch (err) {
-        errors.push(err instanceof Error ? err.message : `Failed connecting to ${peerId}`);
+    const MESH_PUBLISH_BATCH_SIZE = 3;
+    for (let offset = 0; offset < targets.length; offset += MESH_PUBLISH_BATCH_SIZE) {
+      const batch = targets.slice(offset, offset + MESH_PUBLISH_BATCH_SIZE);
+      await Promise.all(
+        batch.map(async (peerId) => {
+          try {
+            await this.publishActiveCaptureToPeer(peerId, targets.length);
+          } catch (err) {
+            errors.push(err instanceof Error ? err.message : `Failed connecting to ${peerId}`);
+          }
+        })
+      );
+      if (offset + MESH_PUBLISH_BATCH_SIZE < targets.length) {
+        await new Promise((resolve) => globalThis.setTimeout(resolve, 15));
       }
     }
 
@@ -1857,6 +2127,17 @@ export class WebRtcSignalingBridge {
     }
     this.outboundStreamId = null;
     this.errorMessage = null;
+    if (reason === 'capture_revoked') {
+      this.captureEnded = true;
+      if (!this.stopReason) {
+        this.stopReason = 'Screen capture ended by user or browser controls.';
+      }
+    } else if (this.incomingMap.size === 0) {
+      this.stopReason = 'Stopped by local user.';
+    }
+    if (this.incomingMap.size === 0) {
+      this.streamingStartedAt = null;
+    }
     this.statusDetail =
       this.incomingMap.size > 0
         ? 'Stopped your outbound screen share. Incoming streams remain active.'
@@ -1904,10 +2185,23 @@ export class WebRtcSignalingBridge {
         streamId: string;
       };
 
+      const existing = this.incomingMap.get(envelope.senderDeviceId);
+      const existingPeer = this.peers.get(envelope.senderDeviceId);
+      if (
+        !existing &&
+        existingPeer &&
+        !existingPeer.hasInboundStream() &&
+        !existingPeer.hasOutboundStream() &&
+        !this.reconnectingPeers.has(envelope.senderDeviceId)
+      ) {
+        this.removePeerConnection(
+          envelope.senderDeviceId,
+          'Resetting idle peer connection before new inbound stream.'
+        );
+      }
+
       const peer = this.getOrCreatePeer(envelope.senderDeviceId, p.sessionId);
       peer.markInboundStreamExpected(p.streamId, p.fps);
-
-      const existing = this.incomingMap.get(envelope.senderDeviceId);
       const now = Date.now();
       this.incomingMap.set(envelope.senderDeviceId, {
         senderDeviceId: envelope.senderDeviceId,

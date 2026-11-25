@@ -207,7 +207,7 @@ async function main() {
     host: '127.0.0.1',
     enableViteMiddleware: false,
     roomTtlMs: 30_000,
-    rateLimitMaxAttempts: 40,
+    rateLimitMaxAttempts: 120,
     rateLimitWindowMs: 10_000,
   });
 
@@ -535,13 +535,16 @@ async function main() {
     await rx1Ws.close();
     console.log('  [PASS] 8. Host removed paired receiver & freed slot');
 
-    // 10. Six-receiver capacity (+ 7th rejected)
+    // 10. Fifteen-receiver capacity (+ 16th rejected with ROOM_CAPACITY_REACHED)
     const capacityReceivers: Array<{ id: string; token: string; ws: TestWsClient }> = [];
-    for (let i = 1; i <= 6; i += 1) {
-      const id = `cap-rx-0${i}`;
+    for (let i = 1; i <= 15; i += 1) {
+      const id = `cap-rx-${String(i).padStart(2, '0')}`;
       const reqRes = await fetch(`${baseUrl}/api/rooms/${roomId}/pair-requests`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Forwarded-For': `198.51.100.${50 + i}`,
+        },
         body: JSON.stringify({
           receiverDeviceId: id,
           deviceName: `Receiver ${i}`,
@@ -569,21 +572,24 @@ async function main() {
       capacityReceivers.push({ id, token: reqData.memberToken, ws: rWs });
     }
 
-    const seventhRes = await fetch(`${baseUrl}/api/rooms/${roomId}/pair-requests`, {
+    const sixteenthRes = await fetch(`${baseUrl}/api/rooms/${roomId}/pair-requests`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': '198.51.100.70',
+      },
       body: JSON.stringify({
-        receiverDeviceId: 'cap-rx-07',
-        deviceName: 'Seventh Receiver',
+        receiverDeviceId: 'cap-rx-16',
+        deviceName: 'Sixteenth Receiver',
         platform: 'android',
       }),
     });
-    assert.equal(seventhRes.status, 409, '7th receiver must be rejected with HTTP 409 ROOM_FULL');
-    const seventhBody = (await seventhRes.json()) as { error: string };
-    assert.equal(seventhBody.error, 'ROOM_FULL');
-    console.log('  [PASS] 10. Six-receiver capacity enforced (slots 0..5 filled, 7th rejected)');
+    assert.equal(sixteenthRes.status, 409, '16th receiver must be rejected with HTTP 409 ROOM_CAPACITY_REACHED');
+    const sixteenthBody = (await sixteenthRes.json()) as { error: string };
+    assert.equal(sixteenthBody.error, 'ROOM_CAPACITY_REACHED');
+    console.log('  [PASS] 10. Fifteen-receiver capacity enforced (slots 0..14 filled, 16th rejected with ROOM_CAPACITY_REACHED)');
 
-    // 13 & 14. Receiver disconnection (unexpected drop) + authenticated reconnection + Leave Room
+    // 13 & 14. Receiver disconnection (unexpected drop) + authenticated reconnection + Leave Room + slot reuse
     const targetRx = capacityReceivers[0];
     const hostRxDropNotice = hostWs.waitForMessage(
       (m) =>
@@ -595,13 +601,13 @@ async function main() {
     await targetRx.ws.close();
     await hostRxDropNotice;
 
-    // Check activeReceiverCount dropped from 6 to 5
+    // Check activeReceiverCount dropped from 15 to 14
     const afterDropLookup = await fetch(`${baseUrl}/api/rooms/${roomId}`);
     const afterDropJson = (await afterDropLookup.json()) as {
       room: { activeReceiverCount: number; pairedReceiverCount: number };
     };
-    assert.equal(afterDropJson.room.activeReceiverCount, 5);
-    assert.equal(afterDropJson.room.pairedReceiverCount, 6);
+    assert.equal(afterDropJson.room.activeReceiverCount, 14);
+    assert.equal(afterDropJson.room.pairedReceiverCount, 15);
     console.log('  [PASS] 13. Unexpected receiver disconnect decremented activeReceiverCount');
 
     // Attempt reconnect with WRONG token -> must NOT rebind as connected in room
@@ -618,7 +624,7 @@ async function main() {
     const rogueCheck = (await (await fetch(`${baseUrl}/api/rooms/${roomId}`)).json()) as {
       room: { activeReceiverCount: number };
     };
-    assert.equal(rogueCheck.room.activeReceiverCount, 5, 'Invalid token must not restore paired session');
+    assert.equal(rogueCheck.room.activeReceiverCount, 14, 'Invalid token must not restore paired session');
     await rogueWs.close();
 
     // Valid token reconnect restores paired connected=true
@@ -641,7 +647,7 @@ async function main() {
     await targetRx.ws.waitForMessage((m) => m.messageType === 'room_state');
     await hostRxReconnectNotice;
 
-    // Explicit Leave Room frees slot cleanly
+    // Explicit Leave Room frees slot cleanly & allows a new 16th receiver to join freed slot 0
     const leaveRes = await fetch(`${baseUrl}/api/rooms/${roomId}/leave`, {
       method: 'POST',
       headers: {
@@ -654,9 +660,30 @@ async function main() {
     const afterLeaveJson = (await (await fetch(`${baseUrl}/api/rooms/${roomId}`)).json()) as {
       room: { activeReceiverCount: number; pairedReceiverCount: number };
     };
-    assert.equal(afterLeaveJson.room.pairedReceiverCount, 5);
-    assert.equal(afterLeaveJson.room.activeReceiverCount, 5);
-    console.log('  [PASS] 14. Token-authenticated receiver reconnect & explicit Leave Room verified');
+    assert.equal(afterLeaveJson.room.pairedReceiverCount, 14);
+    assert.equal(afterLeaveJson.room.activeReceiverCount, 14);
+
+    const reuseJoinRes = await fetch(`${baseUrl}/api/rooms/${roomId}/pair-requests`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': '198.51.100.71',
+      },
+      body: JSON.stringify({
+        receiverDeviceId: 'cap-rx-16',
+        deviceName: 'Sixteenth Receiver Reused',
+        platform: 'android',
+      }),
+    });
+    assert.equal(reuseJoinRes.status, 200);
+    const reuseApproveRes = await fetch(`${baseUrl}/api/rooms/${roomId}/pair-requests/cap-rx-16/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${hostToken}` },
+    });
+    assert.equal(reuseApproveRes.status, 200);
+    const reuseApproveBody = (await reuseApproveRes.json()) as { assignedSlotIndex: number };
+    assert.equal(reuseApproveBody.assignedSlotIndex, 0, 'Freed slot 0 reused by new receiver');
+    console.log('  [PASS] 14. Token-authenticated receiver reconnect, explicit Leave Room & slot reuse verified');
 
     // 12. Host disconnection & host reconnection
     const survivorRx = capacityReceivers[1];
@@ -4610,7 +4637,7 @@ async function main() {
     });
     console.log('  [PASS] 4G.3. Individual stream stop, reconnect authorization, status updates, name persistence & leave/remove RBAC verified');
 
-    // 4G.4: Simultaneous concurrent join requests, duplicate prevention & 6-device capacity enforcement
+    // 4G.4: Simultaneous concurrent join requests, duplicate prevention & 15-device capacity enforcement
     const capDmRes = await fetch(`${baseUrl}/api/rooms`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -4624,17 +4651,17 @@ async function main() {
     const capDmData = (await capDmRes.json()) as { room: RoomSnapshot; hostToken: string };
     const capDmRoomId = capDmData.room.roomId;
 
-    // Fire 8 concurrent join requests from distinct simulated client IPs:
-    // 6 unique valid devices + 1 duplicate deviceId + 1 duplicate name
+    // Fire 17 concurrent join requests from distinct simulated client IPs:
+    // 15 unique valid devices + 1 duplicate deviceId + 1 duplicate name
     const concurrentRequests = [
-      { receiverDeviceId: 'conc-1', deviceName: 'Node One', platform: 'macos', deviceType: 'Mac' },
-      { receiverDeviceId: 'conc-2', deviceName: 'Node Two', platform: 'macos', deviceType: 'Windows' },
-      { receiverDeviceId: 'conc-3', deviceName: 'Node Three', platform: 'android', deviceType: 'Android' },
-      { receiverDeviceId: 'conc-4', deviceName: 'Node Four', platform: 'macos', deviceType: 'Linux' },
-      { receiverDeviceId: 'conc-5', deviceName: 'Node Five', platform: 'android-tv', deviceType: 'TV' },
-      { receiverDeviceId: 'conc-6', deviceName: 'Node Six', platform: 'macos', deviceType: 'iPad' },
+      ...Array.from({ length: 15 }, (_, idx) => ({
+        receiverDeviceId: `conc-${idx + 1}`,
+        deviceName: `Node Device ${idx + 1}`,
+        platform: idx % 2 === 0 ? 'macos' : 'android-tv',
+        deviceType: idx % 2 === 0 ? 'Mac' : 'TV',
+      })),
       { receiverDeviceId: 'conc-1', deviceName: 'Node One Duplicate ID', platform: 'macos', deviceType: 'Mac' },
-      { receiverDeviceId: 'conc-7', deviceName: 'node two', platform: 'macos', deviceType: 'Windows' },
+      { receiverDeviceId: 'conc-16', deviceName: 'node device 2', platform: 'macos', deviceType: 'Windows' },
     ];
     const joinResponses = await Promise.all(
       concurrentRequests.map((body, idx) =>
@@ -4649,30 +4676,30 @@ async function main() {
       )
     );
     const joinStatuses = joinResponses.map((r) => r.status);
-    assert.equal(joinStatuses.filter((s) => s === 200).length, 6, 'Exactly 6 unique valid concurrent requests accepted');
+    assert.equal(joinStatuses.filter((s) => s === 200).length, 15, 'Exactly 15 unique valid concurrent requests accepted');
     assert.equal(joinStatuses.filter((s) => s === 409).length, 2, 'Duplicate ID and duplicate name rejected with 409');
     const acceptedConcurrentIds = concurrentRequests
       .filter((_req, idx) => joinStatuses[idx] === 200)
       .map((req) => req.receiverDeviceId);
 
-    // Add 7th unique valid pending request while all 6 are pending
-    const seventhJoin = await fetch(`${baseUrl}/api/rooms/${capDmRoomId}/pair-requests`, {
+    // Add 16th unique valid pending request while all 15 are pending
+    const sixteenthJoin = await fetch(`${baseUrl}/api/rooms/${capDmRoomId}/pair-requests`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Forwarded-For': '198.51.100.18',
+        'X-Forwarded-For': '198.51.100.35',
       },
       body: JSON.stringify({
-        receiverDeviceId: 'conc-7-valid',
-        deviceName: 'Node Seven Overflow',
+        receiverDeviceId: 'conc-16-valid',
+        deviceName: 'Node Sixteen Overflow',
         platform: 'macos',
         deviceType: 'Mac',
       }),
     });
-    assert.equal(seventhJoin.status, 200);
+    assert.equal(sixteenthJoin.status, 200);
 
-    // Concurrently approve all 7 pending requests -> exactly 6 succeed (200), 1 receives 409 ROOM_FULL
-    const approveCandidateIds = [...acceptedConcurrentIds, 'conc-7-valid'];
+    // Concurrently approve all 16 pending requests -> exactly 15 succeed (200), 1 receives 409 ROOM_CAPACITY_REACHED
+    const approveCandidateIds = [...acceptedConcurrentIds, 'conc-16-valid'];
     const approveResults = await Promise.all(
       approveCandidateIds.map((id) =>
         fetch(`${baseUrl}/api/rooms/${capDmRoomId}/pair-requests/${id}/approve`, {
@@ -4682,14 +4709,21 @@ async function main() {
       )
     );
     const approveStatuses = approveResults.map((r) => r.status);
-    assert.equal(approveStatuses.filter((s) => s === 200).length, 6, 'Max 6 paired devices enforced under concurrent approvals');
-    assert.equal(approveStatuses.filter((s) => s === 409).length, 1, '7th concurrent approval rejected with 409 ROOM_FULL');
-    const overflowCandidateId = approveCandidateIds.find((_id, idx) => approveStatuses[idx] === 409)!;
+    assert.equal(approveStatuses.filter((s) => s === 200).length, 15, 'Max 15 paired devices enforced under concurrent approvals');
+    assert.equal(approveStatuses.filter((s) => s === 409).length, 1, '16th concurrent approval rejected with 409 ROOM_CAPACITY_REACHED');
+    const overflowIdx = approveStatuses.findIndex((s) => s === 409);
+    const overflowBody = (await approveResults[overflowIdx].json()) as { error: string };
+    assert.equal(overflowBody.error, 'ROOM_CAPACITY_REACHED');
+    const overflowCandidateId = approveCandidateIds[overflowIdx];
 
     const fullSnap = ((await (await fetch(`${baseUrl}/api/rooms/${capDmRoomId}`)).json()) as { room: RoomSnapshot }).room;
-    assert.equal(fullSnap.pairedReceiverCount, 6);
+    assert.equal(fullSnap.pairedReceiverCount, 15);
     const slotIndexes = fullSnap.pairedReceivers.map((r) => r.assignedSlotIndex).sort((a, b) => a - b);
-    assert.deepEqual(slotIndexes, [0, 1, 2, 3, 4, 5], 'All 6 receiver slots uniquely assigned');
+    assert.deepEqual(
+      slotIndexes,
+      Array.from({ length: 15 }, (_, idx) => idx),
+      'All 15 receiver slots uniquely assigned (0..14)'
+    );
 
     // Remove one approved receiver (conc-3), then approve the overflow pending request into the freed slot cleanly
     const removeConc3 = await fetch(`${baseUrl}/api/rooms/${capDmRoomId}/receivers/conc-3`, {
@@ -4697,16 +4731,16 @@ async function main() {
       headers: { Authorization: `Bearer ${capDmData.hostToken}` },
     });
     assert.equal(removeConc3.status, 200);
-    const approveSeventhAfterFree = await fetch(
+    const approveSixteenthAfterFree = await fetch(
       `${baseUrl}/api/rooms/${capDmRoomId}/pair-requests/${overflowCandidateId}/approve`,
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${capDmData.hostToken}` },
       }
     );
-    assert.equal(approveSeventhAfterFree.status, 200);
-    const slotFreedSnap = (await approveSeventhAfterFree.json()) as { room: RoomSnapshot };
-    assert.equal(slotFreedSnap.room.pairedReceiverCount, 6);
+    assert.equal(approveSixteenthAfterFree.status, 200);
+    const slotFreedSnap = (await approveSixteenthAfterFree.json()) as { room: RoomSnapshot };
+    assert.equal(slotFreedSnap.room.pairedReceiverCount, 15);
     assert.equal(
       slotFreedSnap.room.pairedReceivers.some((r) => r.deviceId === overflowCandidateId),
       true
@@ -4716,7 +4750,7 @@ async function main() {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${capDmData.hostToken}` },
     });
-    console.log('  [PASS] 4G.4. Simultaneous concurrent joins, duplicate prevention, 6-device cap & slot reuse verified');
+    console.log('  [PASS] 4G.4. Simultaneous concurrent joins, duplicate prevention, 15-device cap & slot reuse verified');
 
     // 4G.5: Audio mute independence across multiple incoming audio streams + independent outbound stream stop
     const muteRoomRes = await fetch(`${baseUrl}/api/rooms`, {
@@ -5028,7 +5062,7 @@ async function main() {
     };
     assert.equal(goodInvJson.inviteValid, true);
     assert.equal(goodInvJson.canRequestJoin, true);
-    assert.equal(goodInvJson.availableSlots, 6);
+    assert.equal(goodInvJson.availableSlots, 15);
     assert.equal('inviteCode' in goodInvJson.room, false);
 
     // Rotate invitation link (revokes previous link)
@@ -5179,9 +5213,9 @@ async function main() {
     assert.equal(openJoinData.requestStatus, 'paired');
     assert.equal(openJoinData.assignedSlotIndex, 1);
 
-    // Fill slots 3..6 concurrently in Open mode; 7th must fail with 409 ROOM_FULL
+    // Fill slots 3..15 concurrently in Open mode; 16th must fail with 409 ROOM_CAPACITY_REACHED
     const fillOpenResults = await Promise.all(
-      [3, 4, 5, 6].map((idx) =>
+      Array.from({ length: 13 }, (_, idx) => idx + 3).map((idx) =>
         fetch(`${baseUrl}/api/rooms/${s4hRoomId}/pair-requests`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `198.51.100.${91 + idx}` },
@@ -5198,15 +5232,17 @@ async function main() {
     }
     const overflowOpenRes = await fetch(`${baseUrl}/api/rooms/${s4hRoomId}/pair-requests`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.99' },
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.120' },
       body: JSON.stringify({
         receiverDeviceId: 's4h-rx-overflow',
         deviceName: 'Overflow Guest',
         platform: 'macos',
       }),
     });
-    assert.equal(overflowOpenRes.status, 409, 'Open mode must still enforce 6-receiver capacity limit');
-    console.log('  [PASS] 4H.4. Privacy modes (Private / Approval Required / Open) & 6-receiver capacity cap verified');
+    assert.equal(overflowOpenRes.status, 409, 'Open mode must still enforce 15-receiver capacity limit');
+    const overflowOpenBody = (await overflowOpenRes.json()) as { error: string };
+    assert.equal(overflowOpenBody.error, 'ROOM_CAPACITY_REACHED');
+    console.log('  [PASS] 4H.4. Privacy modes (Private / Approval Required / Open) & 15-receiver capacity cap verified');
 
     // 4H.5: Host WS disconnect preserves ownership (no auto-transfer) + Session restore + Reconnect
     const s4hHostWs1 = await connectAndAnnounce({
@@ -5534,10 +5570,12 @@ async function main() {
     await xRx2Ws.close();
     console.log('  [PASS] 4H.6. Atomic host transfer, permission swap, concurrency protection & live WebRTC stream continuity verified');
 
-    // Rate limiting check (exceed 40 window attempts on lookup)
+    // Rate limiting check (exceed 120 window attempts on lookup)
     let hit429 = false;
-    for (let i = 0; i < 45; i += 1) {
-      const res = await fetch(`${baseUrl}/api/rooms/ZZZZ99`);
+    for (let i = 0; i < 125; i += 1) {
+      const res = await fetch(`${baseUrl}/api/rooms/ZZZZ99`, {
+        headers: { 'X-Forwarded-For': '198.51.100.250' },
+      });
       if (res.status === 429) {
         hit429 = true;
         break;
@@ -6283,7 +6321,325 @@ async function main() {
     await iTvWs.close();
     console.log('  [PASS] 4I.5. Audio RTP stats (OPUS + packets/bytes), 5 diagnostic states & video-only guidance verified');
 
-    console.log('\nAll Stage 3 (14) + Stage 4A (10) + Stage 4B (10) + Stage 4C (4) + Stage 4D (3) + Stage 4E (4) + Stage 4F (4) + Stage 4G (5) + Stage 4H (6) + Stage 4I (5) + Production Hardening tests passed!');
+    // Stage 5: 15-Receiver WebRTC Mesh Concurrency, Bitrate Scaling, Peer Failure Isolation & Slot Reuse
+    console.log('Starting Stage 5 — 15-receiver live casting capacity & mesh resilience suite...');
+    const s5Health = (await (await fetch(`${baseUrl}/api/health`)).json()) as {
+      maxReceiversPerRoom: number;
+    };
+    assert.equal(s5Health.maxReceiversPerRoom, 15, 'Health endpoint reports maxReceiversPerRoom=15');
+
+    // Verify 15-peer bitrate concurrency scaling avoids saturation while preserving 1..5 peer math
+    const tenPeerCeiling = computeConcurrencyScaledBitrateKbps(10_000, 10, 2_000);
+    const fifteenPeerCeiling = computeConcurrencyScaledBitrateKbps(20_000, 15, 2_500);
+    assert.equal(tenPeerCeiling, 2_500, '10-peer ceiling scales cleanly to 25%');
+    assert.equal(fifteenPeerCeiling, 3_600, '15-peer ceiling scales to 18% floor cleanly (3.6 Mbps per peer)');
+
+    const s5HostId = 's5-host-mac';
+    const s5Create = (await (
+      await fetch(`${baseUrl}/api/rooms`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hostDeviceId: s5HostId,
+          hostDeviceName: 'Host Mac Studio',
+          hostPlatform: 'macos',
+          privacyMode: 'open',
+        }),
+      })
+    ).json()) as { room: RoomSnapshot; hostToken: string };
+    const s5RoomId = s5Create.room.roomId;
+    assert.equal(s5Create.room.maxReceivers, 15);
+
+    const s5HostWs = await connectAndAnnounce({
+      wsUrl,
+      deviceId: s5HostId,
+      deviceName: 'Host Mac Studio',
+      platform: 'macos',
+      role: 'both',
+      roomId: s5RoomId,
+      token: s5Create.hostToken,
+    });
+    await s5HostWs.waitForMessage((m) => m.messageType === 'room_state');
+    let s5LatestRoom = ((await (await fetch(`${baseUrl}/api/rooms/${s5RoomId}`)).json()) as {
+      room: RoomSnapshot;
+    }).room;
+
+    const s5RxIds: string[] = [];
+    const s5RxWsList: TestWsClient[] = [];
+    const s5RxBridges: WebRtcSignalingBridge[] = [];
+    const s5HostPrefs: CapturePreferences = {
+      resolution: '1440p',
+      targetFps: 60,
+      codecPreference: 'H264',
+      includeAudio: true,
+      maxBitrateKbps: 20_000,
+      adaptiveBitrate: true,
+    };
+
+    for (let i = 1; i <= 15; i += 1) {
+      const rxId = `s5-rx-${String(i).padStart(2, '0')}`;
+      const joinRes = await fetch(`${baseUrl}/api/rooms/${s5RoomId}/pair-requests`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Forwarded-For': `203.0.113.${20 + i}`,
+        },
+        body: JSON.stringify({
+          receiverDeviceId: rxId,
+          deviceName: `Display ${i}`,
+          platform: i % 2 === 0 ? 'android-tv' : 'macos',
+        }),
+      });
+      assert.equal(joinRes.status, 200, `Stage 5 receiver ${i} join failed`);
+      const joinBody = (await joinRes.json()) as { memberToken: string; assignedSlotIndex: number };
+      assert.equal(joinBody.assignedSlotIndex, i - 1);
+      const rxWs = await connectAndAnnounce({
+        wsUrl,
+        deviceId: rxId,
+        deviceName: `Display ${i}`,
+        platform: i % 2 === 0 ? 'android-tv' : 'macos',
+        role: 'both',
+        roomId: s5RoomId,
+        token: joinBody.memberToken,
+      });
+      s5RxIds.push(rxId);
+      s5RxWsList.push(rxWs);
+    }
+
+    s5LatestRoom = ((await (await fetch(`${baseUrl}/api/rooms/${s5RoomId}`)).json()) as { room: RoomSnapshot }).room;
+    assert.equal(s5LatestRoom.pairedReceiverCount, 15);
+    assert.equal(s5LatestRoom.activeReceiverCount, 15);
+
+    // 16th receiver rejected with ROOM_CAPACITY_REACHED
+    const s5OverflowRes = await fetch(`${baseUrl}/api/rooms/${s5RoomId}/pair-requests`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': '203.0.113.99',
+      },
+      body: JSON.stringify({
+        receiverDeviceId: 's5-rx-16',
+        deviceName: 'Display 16 Overflow',
+        platform: 'android-tv',
+      }),
+    });
+    assert.equal(s5OverflowRes.status, 409);
+    assert.equal(((await s5OverflowRes.json()) as { error: string }).error, 'ROOM_CAPACITY_REACHED');
+
+    const s5FakePeers = new Set<CodecFallbackFakePc>();
+    const s5RtcFactory = () => {
+      const pc = new CodecFallbackFakePc();
+      s5FakePeers.add(pc);
+      return pc as unknown as RTCPeerConnection;
+    };
+
+    const s5HostBridge = new WebRtcSignalingBridge({
+      deviceId: s5HostId,
+      preferences: s5HostPrefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(s5HostWs),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('s5-host-cap', {
+        width: 2560,
+        height: 1440,
+        frameRate: 60,
+        includeAudio: true,
+      }),
+      rtcFactory: s5RtcFactory,
+    });
+
+    const attachS5Ws = (
+      wsClient: TestWsClient,
+      bridge: WebRtcSignalingBridge,
+      devId: string,
+      role: 'host' | 'receiver'
+    ) => {
+      wsClient.ws.on('message', (raw, isBinary) => {
+        if (isBinary) return;
+        const msg = JSON.parse(raw.toString('utf8')) as CastoraEnvelope;
+        if (msg.messageType === 'room_state' && msg.roomId === s5RoomId) {
+          s5LatestRoom = { ...s5LatestRoom, ...(msg.payload as Partial<RoomSnapshot>) };
+          bridge.updateContext({
+            deviceId: devId,
+            activeRoom: s5LatestRoom,
+            activeRoomRole: role,
+            preferences: s5HostPrefs,
+            networkPrefs: netPrefs4b,
+          });
+        } else if (
+          msg.messageType === 'stream_start' ||
+          msg.messageType === 'session_offer' ||
+          msg.messageType === 'session_answer' ||
+          msg.messageType === 'ice_candidate' ||
+          msg.messageType === 'stream_stop'
+        ) {
+          void bridge.handleIncomingEnvelope(msg);
+        }
+      });
+    };
+
+    for (let i = 0; i < s5RxIds.length; i += 1) {
+      const rxId = s5RxIds[i];
+      const rxWs = s5RxWsList[i];
+      const rxBridge = new WebRtcSignalingBridge({
+        deviceId: rxId,
+        preferences: s5HostPrefs,
+        networkPrefs: netPrefs4b,
+        getSignalingClient: () => wrapWsSender(rxWs),
+        callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+        captureFn: makeDynamicCapture(`s5-rx-cap-${i}`, {
+          width: 1920,
+          height: 1080,
+          frameRate: 60,
+          includeAudio: false,
+        }),
+        rtcFactory: s5RtcFactory,
+      });
+      attachS5Ws(rxWs, rxBridge, rxId, 'receiver');
+      rxBridge.updateContext({
+        deviceId: rxId,
+        activeRoom: s5LatestRoom,
+        activeRoomRole: 'receiver',
+        preferences: s5HostPrefs,
+        networkPrefs: netPrefs4b,
+      });
+      s5RxBridges.push(rxBridge);
+    }
+
+    attachS5Ws(s5HostWs, s5HostBridge, s5HostId, 'host');
+    s5HostBridge.updateContext({
+      deviceId: s5HostId,
+      activeRoom: s5LatestRoom,
+      activeRoomRole: 'host',
+      preferences: s5HostPrefs,
+      networkPrefs: netPrefs4b,
+    });
+
+    // Host broadcasts to all 15 receivers with batched mesh fan-out
+    await s5HostBridge.startScreenSharing(null);
+    await waitUntil(
+      () =>
+        s5HostBridge.getSnapshot().outboundPeers.length === 15 &&
+        s5RxBridges.every((b) =>
+          b.getSnapshot().incomingStreams.some((s) => s.senderDeviceId === s5HostId && s.stream !== null)
+        ),
+      'All 15 receivers received host live video + audio stream simultaneously'
+    );
+    assert.equal(
+      s5RxBridges.every((b) => (b.getSnapshot().incomingStreams[0]?.stream?.getAudioTracks().length ?? 0) > 0),
+      true,
+      'All 15 receivers have incoming audio track'
+    );
+
+    // Isolate a single receiver removal (receiver 7) -> remaining 14 keep streaming undisturbed, then 16th joins freed slot
+    const droppedIdx = 6;
+    const droppedId = s5RxIds[droppedIdx];
+    const remove7Res = await fetch(`${baseUrl}/api/rooms/${s5RoomId}/receivers/${droppedId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${s5Create.hostToken}` },
+    });
+    assert.equal(remove7Res.status, 200);
+    s5LatestRoom = ((await remove7Res.json()) as { room: RoomSnapshot }).room;
+    s5HostBridge.updateContext({
+      deviceId: s5HostId,
+      activeRoom: s5LatestRoom,
+      activeRoomRole: 'host',
+      preferences: s5HostPrefs,
+      networkPrefs: netPrefs4b,
+    });
+    await waitUntil(
+      () => s5HostBridge.getSnapshot().outboundPeers.length === 14,
+      'Removed receiver 7 closed while 14 other peer streams continued uninterrupted'
+    );
+
+    // Remaining 14 still actively connected
+    for (let i = 0; i < s5RxBridges.length; i += 1) {
+      if (i === droppedIdx) continue;
+      assert.equal(
+        s5RxBridges[i].getSnapshot().incomingStreams.some((s) => s.senderDeviceId === s5HostId && s.stream !== null),
+        true,
+        `Receiver ${i + 1} stream unaffected by receiver 7 removal`
+      );
+    }
+
+    // New receiver (s5-rx-16) joins freed slot 6 and auto-receives active host broadcast
+    const join16Res = await fetch(`${baseUrl}/api/rooms/${s5RoomId}/pair-requests`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': '203.0.113.100',
+      },
+      body: JSON.stringify({
+        receiverDeviceId: 's5-rx-16',
+        deviceName: 'Display 16 Replacement',
+        platform: 'android-tv',
+      }),
+    });
+    assert.equal(join16Res.status, 200);
+    const join16Data = (await join16Res.json()) as { memberToken: string; assignedSlotIndex: number };
+    assert.equal(join16Data.assignedSlotIndex, droppedIdx, '16th receiver reused freed slot index 6');
+    const rx16Ws = await connectAndAnnounce({
+      wsUrl,
+      deviceId: 's5-rx-16',
+      deviceName: 'Display 16 Replacement',
+      platform: 'android-tv',
+      role: 'both',
+      roomId: s5RoomId,
+      token: join16Data.memberToken,
+    });
+    s5LatestRoom = ((await (await fetch(`${baseUrl}/api/rooms/${s5RoomId}`)).json()) as { room: RoomSnapshot }).room;
+    const rx16Bridge = new WebRtcSignalingBridge({
+      deviceId: 's5-rx-16',
+      preferences: s5HostPrefs,
+      networkPrefs: netPrefs4b,
+      getSignalingClient: () => wrapWsSender(rx16Ws),
+      callbacks: { onStateChange: () => {}, onLogEvent: () => {} },
+      captureFn: makeDynamicCapture('s5-rx-cap-16', {
+        width: 1920,
+        height: 1080,
+        frameRate: 60,
+        includeAudio: false,
+      }),
+      rtcFactory: s5RtcFactory,
+    });
+    attachS5Ws(rx16Ws, rx16Bridge, 's5-rx-16', 'receiver');
+    rx16Bridge.updateContext({
+      deviceId: 's5-rx-16',
+      activeRoom: s5LatestRoom,
+      activeRoomRole: 'receiver',
+      preferences: s5HostPrefs,
+      networkPrefs: netPrefs4b,
+    });
+    s5HostBridge.updateContext({
+      deviceId: s5HostId,
+      activeRoom: s5LatestRoom,
+      activeRoomRole: 'host',
+      preferences: s5HostPrefs,
+      networkPrefs: netPrefs4b,
+    });
+    await waitUntil(
+      () =>
+        s5HostBridge.getSnapshot().outboundPeers.length === 15 &&
+        rx16Bridge.getSnapshot().incomingStreams.some((s) => s.senderDeviceId === s5HostId && s.stream !== null),
+      'Replacement 16th receiver auto-connected to active host broadcast'
+    );
+
+    s5HostBridge.dispose();
+    rx16Bridge.dispose();
+    s5RxBridges.forEach((b) => b.dispose());
+    s5FakePeers.forEach((p) => p.close());
+    await s5HostWs.close();
+    await rx16Ws.close();
+    for (const w of s5RxWsList) {
+      await w.close();
+    }
+    await fetch(`${baseUrl}/api/rooms/${s5RoomId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${s5Create.hostToken}` },
+    });
+    console.log('  [PASS] 5.1. 15-receiver WebRTC mesh fan-out, bitrate scaling, isolated peer removal & slot reuse verified');
+
+    console.log('\nAll Stage 3 (14) + Stage 4A (10) + Stage 4B (10) + Stage 4C (4) + Stage 4D (3) + Stage 4E (4) + Stage 4F (4) + Stage 4G (5) + Stage 4H (6) + Stage 4I (5) + Stage 5 (15-Receiver Live Casting) tests passed!');
   } finally {
     await instance.close();
   }

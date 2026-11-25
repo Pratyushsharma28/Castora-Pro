@@ -28,3 +28,21 @@ services:
         sync: false
       - key: CASTORA_TURN_TTL_SECONDS
         value: "3600"
+      - key: CASTORA_DATABASE_URL
+        sync: false
+      - key: CASTORA_S3_BUCKET
+        sync: false
+      - key: CASTORA_S3_REGION
+        value: "auto"
+      - key: CASTORA_S3_ENDPOINT
+        sync: false
+      - key: CASTORA_S3_ACCESS_KEY_ID
+        sync: false
+      - key: CASTORA_S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: CASTORA_SIGNAGE_ACCESS_KEY
+        sync: false
+      - key: CASTORA_SIGNAGE_MAX_CONCURRENT_STREAMS
+        value: "6"
+      - key: CASTORA_PG_POOL_MAX
+        value: "20"

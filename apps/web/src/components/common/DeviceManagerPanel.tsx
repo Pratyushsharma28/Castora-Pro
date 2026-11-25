@@ -181,7 +181,7 @@ export function DeviceManagerPanel({
   const [feedback, setFeedback] = useState<{ tone: 'info' | 'error'; text: string } | null>(null);
 
   const isHost = activeRoomRole === 'host';
-  const maxReceivers = activeRoom?.maxReceivers ?? 6;
+  const maxReceivers = activeRoom?.maxReceivers ?? 15;
   const pairedReceivers = activeRoom?.pairedReceivers ?? [];
   const pendingRequests = activeRoom?.pendingRequests ?? [];
   const pairedCount = pairedReceivers.length;
@@ -243,6 +243,7 @@ export function DeviceManagerPanel({
             (capW && capH ? `${capW}×${capH}` : null),
           fps: webrtcState.outboundTelemetry.encodedFps ?? capFps ?? null,
           bitrateKbps: webrtcState.outboundTelemetry.bitrateKbps,
+          packetLossPct: webrtcState.outboundTelemetry.packetLossPct ?? null,
           audioStatus: webrtcState.isSharingLocal
             ? preferences.includeAudio || webrtcState.localCaptureMeta?.hasAudio
               ? 'Sharing audio'
@@ -342,6 +343,7 @@ export function DeviceManagerPanel({
             primaryServerStream?.fps ??
             null,
           bitrateKbps: webrtcState.outboundTelemetry.bitrateKbps,
+          packetLossPct: webrtcState.outboundTelemetry.packetLossPct ?? null,
           audioStatus: localStreaming ? (selfHasAudio ? 'Sharing audio' : 'Video only') : 'Off',
           hasIncomingAudioTrack: false,
           incomingMuted: true,
@@ -403,6 +405,8 @@ export function DeviceManagerPanel({
         null;
       const bitrateKbps =
         incoming?.telemetry.bitrateKbps ?? outbound?.telemetry.bitrateKbps ?? null;
+      const packetLossPct =
+        incoming?.telemetry.packetLossPct ?? outbound?.telemetry.packetLossPct ?? null;
 
       let audioStatus: ManagedDeviceRecord['audioStatus'] = 'Off';
       if (isIncomingStreaming) {
@@ -457,6 +461,7 @@ export function DeviceManagerPanel({
         resolution,
         fps,
         bitrateKbps,
+        packetLossPct,
         audioStatus,
         hasIncomingAudioTrack,
         incomingMuted,
@@ -697,7 +702,7 @@ export function DeviceManagerPanel({
           <div className="px-5 py-3.5">
             <div className="text-xs font-medium text-[#64748B]">Paired Slots</div>
             <div className="mt-1 text-lg font-semibold text-[#172033] tabular-metrics">
-              {activeRoom ? `${pairedCount} / ${maxReceivers}` : '0 / 6'}
+              {activeRoom ? `${pairedCount} / ${maxReceivers}` : '0 / 15'}
             </div>
           </div>
           <div className="px-5 py-3.5">
@@ -709,7 +714,7 @@ export function DeviceManagerPanel({
           <div className="px-5 py-3.5">
             <div className="text-xs font-medium text-[#64748B]">Available Slots</div>
             <div className="mt-1 text-lg font-semibold text-[#172033] tabular-metrics">
-              {activeRoom ? (roomFull ? '0 (Full)' : availableSlots) : 6}
+              {activeRoom ? (roomFull ? '0 (Full)' : availableSlots) : 15}
             </div>
           </div>
         </div>
@@ -1219,7 +1224,7 @@ export function DeviceManagerPanel({
                   </div>
 
                   {/* Streaming Telemetry Summary Grid (strictly real measured or announced stats) */}
-                  <dl className="grid grid-cols-2 gap-3 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-xs sm:grid-cols-4 tabular-metrics">
+                  <dl className="grid grid-cols-2 gap-3 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-xs sm:grid-cols-3 lg:grid-cols-6 tabular-metrics">
                     <div>
                       <dt className="text-[#64748B]">Resolution</dt>
                       <dd className="mt-0.5 font-semibold text-[#172033]">
@@ -1239,7 +1244,27 @@ export function DeviceManagerPanel({
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-[#64748B]">Audio Sharing</dt>
+                      <dt className="text-[#64748B]">Packet Loss</dt>
+                      <dd className="mt-0.5 font-semibold text-[#172033]">
+                        {rec.packetLossPct !== null ? `${rec.packetLossPct.toFixed(1)}%` : 'Unavailable'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-[#64748B]">Video Status</dt>
+                      <dd className="mt-0.5 font-semibold text-[#172033]">
+                        {rec.isOutgoingStreaming && rec.isIncomingStreaming
+                          ? 'Sending & Receiving'
+                          : rec.isOutgoingStreaming
+                            ? 'Sending'
+                            : rec.isIncomingStreaming
+                              ? 'Receiving'
+                              : rec.connected
+                                ? 'Standby'
+                                : 'Offline'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-[#64748B]">Audio Status</dt>
                       <dd className="mt-0.5 font-semibold text-[#172033]">{rec.audioStatus}</dd>
                     </div>
                   </dl>

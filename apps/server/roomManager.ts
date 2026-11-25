@@ -28,10 +28,14 @@ import type {
   RoomPrivacyMode,
 } from './types.ts';
 
-export const MAX_RECEIVERS_PER_ROOM = 6;
+export const MAX_RECEIVERS_PER_ROOM = 15;
 const DEFAULT_ROOM_TTL_MS = 15 * 60 * 1000;
 const MIN_ROOM_TTL_MS = 200;
 const MAX_ROOM_TTL_MS = 60 * 60 * 1000;
+const ACTIVE_CAST_SLIDING_EXTENSION_MS = 15 * 60 * 1000;
+const MAX_ACTIVE_SESSION_DURATION_MS = 12 * 60 * 60 * 1000;
+const ACTIVE_PARTICIPANT_RECENCY_MS = 5 * 60 * 1000;
+const DEFAULT_DISCONNECT_GRACE_MS = 20_000;
 const HOST_TRANSFER_TTL_MS = 120 * 1000;
 const ALLOWED_PRIVACY_MODES = new Set<RoomPrivacyMode>([
   'private',
@@ -183,7 +187,7 @@ export type RoomOperationErrorCode =
   | 'RECEIVER_DISCONNECTED'
   | 'ROOM_NOT_FOUND'
   | 'ROOM_EXPIRED'
-  | 'ROOM_FULL'
+  | 'ROOM_CAPACITY_REACHED'
   | 'ALREADY_PAIRED'
   | 'DUPLICATE_PAIR_REQUEST'
   | 'REQUEST_NOT_FOUND'
@@ -380,9 +384,14 @@ export class RoomManager {
   private readonly devices = new Map<string, RegisteredDevice>();
   private readonly socketToDeviceId = new Map<WebSocket, string>();
   private readonly rooms = new Map<string, CastoraRoom>();
+  private readonly disconnectGraceTimers = new Map<
+    string,
+    { timer: ReturnType<typeof setTimeout>; socket: WebSocket }
+  >();
   private readonly defaultTtlMs: number;
+  private readonly disconnectGraceMs: number;
 
-  constructor(defaultTtlMs?: number) {
+  constructor(defaultTtlMs?: number, disconnectGraceMs?: number) {
     const envTtl = Number(process.env.CASTORA_ROOM_TTL_MS);
     if (typeof defaultTtlMs === 'number' && Number.isFinite(defaultTtlMs)) {
       this.defaultTtlMs = this.clampTtl(defaultTtlMs);
@@ -390,6 +399,15 @@ export class RoomManager {
       this.defaultTtlMs = this.clampTtl(envTtl);
     } else {
       this.defaultTtlMs = DEFAULT_ROOM_TTL_MS;
+    }
+
+    const envGrace = Number(process.env.CASTORA_DISCONNECT_GRACE_MS);
+    if (typeof disconnectGraceMs === 'number' && Number.isFinite(disconnectGraceMs)) {
+      this.disconnectGraceMs = Math.max(0, Math.round(disconnectGraceMs));
+    } else if (Number.isFinite(envGrace) && envGrace >= 0) {
+      this.disconnectGraceMs = Math.round(envGrace);
+    } else {
+      this.disconnectGraceMs = DEFAULT_DISCONNECT_GRACE_MS;
     }
   }
 
@@ -406,9 +424,84 @@ export class RoomManager {
     return Boolean(dev && this.isSocketOpen(dev.socket));
   }
 
+  private isDeviceConnectedOrInGrace(deviceId: string): boolean {
+    return this.hasOpenSocket(deviceId) || this.disconnectGraceTimers.has(deviceId);
+  }
+
   private getOpenSocket(deviceId: string): WebSocket | null {
     const dev = this.devices.get(deviceId);
     return dev && this.isSocketOpen(dev.socket) ? dev.socket : null;
+  }
+
+  private cancelDisconnectGrace(deviceId: string): void {
+    const entry = this.disconnectGraceTimers.get(deviceId);
+    if (entry) {
+      clearTimeout(entry.timer);
+      this.disconnectGraceTimers.delete(deviceId);
+    }
+  }
+
+  clearAllDisconnectGraceTimers(): void {
+    for (const entry of this.disconnectGraceTimers.values()) {
+      clearTimeout(entry.timer);
+    }
+    this.disconnectGraceTimers.clear();
+  }
+
+  getDisconnectGraceMs(): number {
+    return this.disconnectGraceMs;
+  }
+
+  private extendActiveRoomExpiration(
+    room: CastoraRoom,
+    now: number,
+    trigger: 'stream' | 'heartbeat' | 'sweep'
+  ): boolean {
+    const hardCap = room.createdAt + MAX_ACTIVE_SESSION_DURATION_MS;
+    if (now >= hardCap) {
+      return false;
+    }
+
+    const hasActiveStreams = room.activeStreams.size > 0;
+    const anyParticipantConnected =
+      (room.hostConnected && this.isDeviceConnectedOrInGrace(room.hostDeviceId)) ||
+      Array.from(room.pairedReceivers.values()).some(
+        (member) => member.connected && this.isDeviceConnectedOrInGrace(member.deviceId)
+      );
+
+    let latestSeenAt = room.hostLastSeenAt;
+    for (const member of room.pairedReceivers.values()) {
+      if (member.lastSeenAt > latestSeenAt) {
+        latestSeenAt = member.lastSeenAt;
+      }
+    }
+    const recencyWindow = Math.max(room.ttlMs, ACTIVE_PARTICIPANT_RECENCY_MS);
+    const recentlyActive = now - latestSeenAt <= recencyWindow;
+
+    if (hasActiveStreams && (anyParticipantConnected || recentlyActive || trigger === 'stream')) {
+      const extension =
+        room.ttlMs < 60_000
+          ? Math.max(room.ttlMs, 2_000)
+          : Math.max(room.ttlMs, ACTIVE_CAST_SLIDING_EXTENSION_MS);
+      const nextExpiry = Math.min(hardCap, now + extension);
+      if (nextExpiry > room.expiresAt) {
+        room.expiresAt = nextExpiry;
+        return true;
+      }
+      return false;
+    }
+
+    // Preserve short unit-test TTL expiry semantics when idle (no active streams),
+    // while keeping active real-world rooms (ttlMs >= 60s) alive when connected members heartbeat.
+    if (trigger === 'heartbeat' && room.ttlMs >= 60_000 && anyParticipantConnected) {
+      const nextExpiry = Math.min(hardCap, now + Math.max(room.ttlMs, ACTIVE_CAST_SLIDING_EXTENSION_MS));
+      if (nextExpiry > room.expiresAt) {
+        room.expiresAt = nextExpiry;
+        return true;
+      }
+    }
+
+    return false;
   }
 
   private toPublicSnapshot(
@@ -421,7 +514,9 @@ export class RoomManager {
     }
 
     const hostConnected =
-      status === 'active' && room.hostConnected && this.hasOpenSocket(room.hostDeviceId);
+      status === 'active' &&
+      room.hostConnected &&
+      this.isDeviceConnectedOrInGrace(room.hostDeviceId);
 
     const pendingRequests = Array.from(room.pendingRequests.values()).map((req) => ({
       deviceId: req.deviceId,
@@ -429,7 +524,10 @@ export class RoomManager {
       platform: req.platform,
       deviceType: req.deviceType,
       pairingMethod: req.pairingMethod,
-      connected: status === 'active' && req.connected && this.hasOpenSocket(req.deviceId),
+      connected:
+        status === 'active' &&
+        req.connected &&
+        this.isDeviceConnectedOrInGrace(req.deviceId),
       requestedAt: new Date(req.requestedAt).toISOString(),
       lastSeenAt: new Date(req.lastSeenAt).toISOString(),
       sessionId: req.sessionId,
@@ -442,7 +540,10 @@ export class RoomManager {
         deviceName: member.deviceName,
         platform: member.platform,
         deviceType: member.deviceType,
-        connected: status === 'active' && member.connected && this.hasOpenSocket(member.deviceId),
+        connected:
+          status === 'active' &&
+          member.connected &&
+          this.isDeviceConnectedOrInGrace(member.deviceId),
         assignedSlotIndex: member.assignedSlotIndex,
         pairedAt: new Date(member.pairedAt).toISOString(),
         lastSeenAt: new Date(member.lastSeenAt).toISOString(),
@@ -604,6 +705,7 @@ export class RoomManager {
     authenticatedRole: 'host' | 'pending' | 'paired' | null;
   } {
     const now = Date.now();
+    this.cancelDisconnectGrace(params.deviceId);
     const existing = this.devices.get(params.deviceId);
     const resolvedType = params.deviceType
       ? normalizeDeviceType(params.deviceType)
@@ -793,10 +895,10 @@ export class RoomManager {
     return results;
   }
 
-  touchHeartbeat(socket: WebSocket): RegisteredDevice | undefined {
+  touchHeartbeat(socket: WebSocket, nowOverride?: number): RegisteredDevice | undefined {
     const device = this.getDeviceBySocket(socket);
     if (!device) return undefined;
-    const now = Date.now();
+    const now = typeof nowOverride === 'number' ? nowOverride : Date.now();
     device.lastSeenAt = now;
 
     if (device.roomId) {
@@ -817,6 +919,7 @@ export class RoomManager {
             pending.connected = true;
           }
         }
+        this.extendActiveRoomExpiration(room, now, 'heartbeat');
       }
     }
     return device;
@@ -1065,8 +1168,8 @@ export class RoomManager {
     if (room.pairedReceivers.size >= room.maxReceivers) {
       return {
         ok: false,
-        code: 'ROOM_FULL',
-        message: `Room already has the maximum of ${room.maxReceivers} paired receivers`,
+        code: 'ROOM_CAPACITY_REACHED',
+        message: `Room capacity reached (${room.maxReceivers} paired receivers maximum)`,
       };
     }
 
@@ -1083,7 +1186,7 @@ export class RoomManager {
       if (slotIndex === null) {
         return {
           ok: false,
-          code: 'ROOM_FULL',
+          code: 'ROOM_CAPACITY_REACHED',
           message: `Room capacity reached (${room.maxReceivers} paired receivers maximum)`,
         };
       }
@@ -1189,7 +1292,7 @@ export class RoomManager {
     if (room.pairedReceivers.size >= room.maxReceivers) {
       return {
         ok: false,
-        code: 'ROOM_FULL',
+        code: 'ROOM_CAPACITY_REACHED',
         message: `Room capacity reached (${room.maxReceivers} paired receivers maximum)`,
       };
     }
@@ -1198,7 +1301,7 @@ export class RoomManager {
     if (slotIndex === null) {
       return {
         ok: false,
-        code: 'ROOM_FULL',
+        code: 'ROOM_CAPACITY_REACHED',
         message: `Room capacity reached (${room.maxReceivers} paired receivers maximum)`,
       };
     }
@@ -2284,6 +2387,7 @@ export class RoomManager {
       startedAt: now,
     };
     room.activeStreams.set(linkKey, record);
+    this.extendActiveRoomExpiration(room, now, 'stream');
 
     return {
       ok: true,
@@ -2354,6 +2458,54 @@ export class RoomManager {
     };
   }
 
+  beginDisconnectGrace(
+    socket: WebSocket,
+    onGraceExpired: (cleanup: {
+      disconnectedDeviceId: string | null;
+      updatedRooms: Array<{
+        room: PublicRoomSnapshot;
+        peerSockets: WebSocket[];
+        wasHost: boolean;
+        terminatedStreams: TerminatedStreamNotice[];
+      }>;
+    }) => void
+  ): { deferred: boolean; immediateCleanup?: ReturnType<RoomManager['handleDisconnect']> } {
+    const deviceId = this.socketToDeviceId.get(socket) ?? null;
+    if (!deviceId) {
+      return { deferred: false, immediateCleanup: { disconnectedDeviceId: null, updatedRooms: [] } };
+    }
+
+    const device = this.devices.get(deviceId);
+    const roomId = device?.roomId ?? null;
+    const room = roomId ? this.rooms.get(roomId) : undefined;
+
+    // Only defer cleanup when device is inside an active room (especially with active streams)
+    // and grace window is enabled.
+    if (!room || this.disconnectGraceMs <= 0) {
+      return { deferred: false, immediateCleanup: this.handleDisconnect(socket) };
+    }
+
+    this.socketToDeviceId.delete(socket);
+    this.cancelDisconnectGrace(deviceId);
+
+    const timer = setTimeout(() => {
+      const pending = this.disconnectGraceTimers.get(deviceId);
+      if (!pending || pending.socket !== socket) {
+        return;
+      }
+      this.disconnectGraceTimers.delete(deviceId);
+      const cleanup = this.finalizeDeviceDisconnect(deviceId, socket);
+      if (cleanup.disconnectedDeviceId) {
+        onGraceExpired(cleanup);
+      }
+    }, this.disconnectGraceMs);
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+    this.disconnectGraceTimers.set(deviceId, { timer, socket });
+    return { deferred: true };
+  }
+
   handleDisconnect(socket: WebSocket): {
     disconnectedDeviceId: string | null;
     updatedRooms: Array<{
@@ -2368,10 +2520,28 @@ export class RoomManager {
     if (!deviceId) {
       return { disconnectedDeviceId: null, updatedRooms: [] };
     }
+    this.cancelDisconnectGrace(deviceId);
+    return this.finalizeDeviceDisconnect(deviceId, socket);
+  }
 
+  private finalizeDeviceDisconnect(
+    deviceId: string,
+    socket: WebSocket
+  ): {
+    disconnectedDeviceId: string | null;
+    updatedRooms: Array<{
+      room: PublicRoomSnapshot;
+      peerSockets: WebSocket[];
+      wasHost: boolean;
+      terminatedStreams: TerminatedStreamNotice[];
+    }>;
+  } {
     const device = this.devices.get(deviceId);
     if (device && device.socket === socket) {
       this.devices.delete(deviceId);
+    } else if (device && this.isSocketOpen(device.socket)) {
+      // Device already rebound to a newer live WebSocket; do not mark disconnected
+      return { disconnectedDeviceId: null, updatedRooms: [] };
     }
 
     const now = Date.now();
@@ -2443,8 +2613,19 @@ export class RoomManager {
 
     for (const [roomId, room] of this.rooms.entries()) {
       if (room.expiresAt <= now) {
+        // Active casting rooms must never expire due to inactivity while streams/participants are live.
+        this.extendActiveRoomExpiration(room, now, 'sweep');
+      }
+      if (room.expiresAt <= now) {
         const snapshot = this.toPublicSnapshot(room, 'expired');
         const sockets = this.getAllRoomSockets(room);
+        this.cancelDisconnectGrace(room.hostDeviceId);
+        for (const rx of room.pairedReceivers.values()) {
+          this.cancelDisconnectGrace(rx.deviceId);
+        }
+        for (const pending of room.pendingRequests.values()) {
+          this.cancelDisconnectGrace(pending.deviceId);
+        }
         for (const sock of sockets) {
           const dev = this.getDeviceBySocket(sock);
           if (dev && dev.roomId === roomId) {

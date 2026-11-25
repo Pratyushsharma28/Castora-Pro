@@ -3,6 +3,7 @@ import { MobileReceiverBar } from './components/layout/MobileReceiverBar';
 import { TopControlBar } from './components/layout/TopControlBar';
 import {
   CastoraSignalingClient,
+  RestoreSessionError,
   approveBackendPairRequest,
   cancelBackendHostTransfer,
   closeBackendRoom,
@@ -29,6 +30,7 @@ import {
   type PairingLifecycleStatus,
   type PublicHostTransfer,
   type RoomSnapshot,
+  type SignalingHeartbeatTelemetry,
   type SignalingSocketState,
 } from './services/backendClient';
 import {
@@ -38,6 +40,7 @@ import {
   saveDeviceName,
   validateDeviceDisplayName,
 } from './services/browserCapabilities';
+import { CastoraWakeLockController } from './services/screenCaptureService';
 import { createEmptyTelemetry } from './services/streamStatsService';
 import {
   WebRtcSignalingBridge,
@@ -54,15 +57,18 @@ import type {
   NetworkPreferences,
   RoomPrivacyMode,
   SessionSummaryRecord,
+  SignalingStabilitySnapshot,
   StudioDestination,
 } from './types/studio';
 import { ActivityView } from './views/ActivityView';
 import { ControlRoomView } from './views/ControlRoomView';
 import { DevicesView } from './views/DevicesView';
+import { DigitalSignageView } from './views/DigitalSignageView';
 import { MultiViewView } from './views/MultiViewView';
 import { ReceiversView } from './views/ReceiversView';
 import { SessionView } from './views/SessionView';
 import { SettingsView } from './views/SettingsView';
+import { SignagePlayerView } from './views/SignagePlayerView';
 
 function formatClockTime(date: Date): string {
   return date.toTimeString().slice(0, 8);
@@ -72,9 +78,10 @@ function getInitialRouteState(): {
   destination: StudioDestination;
   roomCode: string;
   inviteCode: string;
+  screenCode: string;
 } {
   if (typeof window === 'undefined') {
-    return { destination: 'control-room', roomCode: '', inviteCode: '' };
+    return { destination: 'control-room', roomCode: '', inviteCode: '', screenCode: '' };
   }
   const params = new URLSearchParams(window.location.search);
   const room = (params.get('room') ?? '')
@@ -82,35 +89,45 @@ function getInitialRouteState(): {
     .replace(/[^A-Z0-9]/g, '')
     .slice(0, 6);
   const inviteCode = (params.get('invite') ?? '').trim().slice(0, 128);
+  const screenCode = (params.get('screen') ?? '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 6);
 
   if (window.location.pathname.includes('/join') || room.length > 0) {
-    return { destination: 'receivers', roomCode: room, inviteCode };
+    return { destination: 'receivers', roomCode: room, inviteCode, screenCode };
   }
 
   const viewParam = (params.get('view') ?? '').toLowerCase();
+  if (viewParam === 'signage-player' || viewParam === 'player' || screenCode.length === 6) {
+    return { destination: 'signage-player', roomCode: '', inviteCode: '', screenCode };
+  }
+  if (viewParam === 'digital-signage' || viewParam === 'signage') {
+    return { destination: 'digital-signage', roomCode: '', inviteCode: '', screenCode };
+  }
   if (viewParam === 'rooms' || viewParam === 'receivers') {
-    return { destination: 'receivers', roomCode: '', inviteCode: '' };
+    return { destination: 'receivers', roomCode: '', inviteCode: '', screenCode: '' };
   }
   if (viewParam === 'sessions' || viewParam === 'session') {
-    return { destination: 'sessions', roomCode: '', inviteCode: '' };
+    return { destination: 'sessions', roomCode: '', inviteCode: '', screenCode: '' };
   }
   if (viewParam === 'devices') {
-    return { destination: 'devices', roomCode: '', inviteCode: '' };
+    return { destination: 'devices', roomCode: '', inviteCode: '', screenCode: '' };
   }
   if (viewParam === 'screens' || viewParam === 'multi-view') {
-    return { destination: 'multi-view', roomCode: '', inviteCode: '' };
+    return { destination: 'multi-view', roomCode: '', inviteCode: '', screenCode: '' };
   }
   if (viewParam === 'cast') {
-    return { destination: 'cast', roomCode: '', inviteCode: '' };
+    return { destination: 'cast', roomCode: '', inviteCode: '', screenCode: '' };
   }
   if (viewParam === 'settings') {
-    return { destination: 'settings', roomCode: '', inviteCode: '' };
+    return { destination: 'settings', roomCode: '', inviteCode: '', screenCode: '' };
   }
   if (viewParam === 'activity') {
-    return { destination: 'activity', roomCode: '', inviteCode: '' };
+    return { destination: 'activity', roomCode: '', inviteCode: '', screenCode: '' };
   }
 
-  return { destination: 'control-room', roomCode: '', inviteCode: '' };
+  return { destination: 'control-room', roomCode: '', inviteCode: '', screenCode: '' };
 }
 
 function toProtocolCapabilities(
@@ -191,7 +208,7 @@ function parseRoomSnapshotFromEnvelope(
     hostLastSeenAt:
       typeof payload.hostLastSeenAt === 'string' ? payload.hostLastSeenAt : undefined,
     expiresAt: String(payload.expiresAt ?? ''),
-    maxReceivers: Number(payload.maxReceivers ?? 6),
+    maxReceivers: Number(payload.maxReceivers ?? 15),
     activeReceiverCount: pairedReceivers.filter((r) => r.connected).length,
     pairedReceiverCount: pairedReceivers.length,
     pendingCount: pendingRequests.length,
@@ -212,6 +229,9 @@ export function App() {
 
   const initialRoute = getInitialRouteState();
   const [destination, setDestination] = useState<StudioDestination>(initialRoute.destination);
+  const [signagePreviewScreenCode, setSignagePreviewScreenCode] = useState<string>(
+    initialRoute.screenCode
+  );
   const [multiViewLayout, setMultiViewLayout] = useState<MultiViewLayout>('auto');
 
   const [preferences, setPreferences] = useState<CapturePreferences>({
@@ -236,6 +256,15 @@ export function App() {
   const [backendHealth, setBackendHealth] = useState<BackendHealthResponse | null>(null);
   const [backendError, setBackendError] = useState<string | null>(null);
   const [signalingState, setSignalingState] = useState<SignalingSocketState>('disconnected');
+  const [signalingTelemetry, setSignalingTelemetry] = useState<SignalingHeartbeatTelemetry>({
+    socketState: 'disconnected',
+    reconnectAttempt: 0,
+    lastReconnectAttemptAt: null,
+    lastReconnectResult: null,
+    lastHeartbeatSentAt: null,
+    lastHeartbeatAckAt: null,
+    consecutiveMissedHeartbeats: 0,
+  });
   const [lastSignalingActivityAt, setLastSignalingActivityAt] = useState<string | null>(null);
   const [focusedStreamDeviceId, setFocusedStreamDeviceId] = useState<string | null>(null);
   const [activeRoom, setActiveRoom] = useState<RoomSnapshot | null>(null);
@@ -252,6 +281,10 @@ export function App() {
   const networkPrefsRef = useRef<NetworkPreferences>(networkPrefs);
   const signalingClientRef = useRef<CastoraSignalingClient | null>(null);
   const bridgeRef = useRef<WebRtcSignalingBridge | null>(null);
+  const wakeLockRef = useRef<CastoraWakeLockController | null>(null);
+  if (!wakeLockRef.current) {
+    wakeLockRef.current = new CastoraWakeLockController();
+  }
   const sessionStartedAtRef = useRef<number | null>(null);
 
   const [webrtcState, setWebrtcState] = useState<WebRtcSessionSnapshot>(() => ({
@@ -273,6 +306,14 @@ export function App() {
     incomingStreams: [],
     outboundPeers: [],
     peerCount: 0,
+    streamingStartedAt: null,
+    lastSuccessfulVideoFrameAt: null,
+    lastSuccessfulAudioPacketAt: null,
+    captureHealthStatus: 'Not capturing',
+    lastRecoveryAttemptAt: null,
+    lastRecoveryResult: null,
+    stopReason: null,
+    stabilityStatus: 'Standby',
   }));
   const [mutedSlots, setMutedSlots] = useState<Record<string, boolean>>({});
   const [recentSessions, setRecentSessions] = useState<SessionSummaryRecord[]>([]);
@@ -525,11 +566,59 @@ export function App() {
     [deviceId, logEvent, refreshIceServerConfig]
   );
 
+  const verifyOrClearLostRoomSession = useCallback(
+    async (roomId: string, token: string): Promise<boolean> => {
+      try {
+        const restored = await restoreBackendSession({ roomId, token });
+        if (restored.role === 'host' && restored.inviteCode) {
+          setHostInviteCode(restored.inviteCode);
+        }
+        syncReceiverLifecycleFromSnapshot(restored.room);
+        bridgeRef.current?.reconcileActiveStreamsAfterReconnect();
+        return true;
+      } catch (err) {
+        if (
+          err instanceof RestoreSessionError &&
+          (err.status === 404 || err.status === 410)
+        ) {
+          const reason =
+            err.code === 'ROOM_EXPIRED' || err.status === 410
+              ? 'Room expired on server.'
+              : 'Backend instance restarted or room no longer exists on server — start a new session.';
+          roomTokenRef.current = null;
+          activeRoomIdRef.current = null;
+          activeRoomRoleRef.current = null;
+          setHostInviteCode(null);
+          setActiveRoom(null);
+          setActiveRoomRole(null);
+          setPairingStatus(err.status === 410 ? 'Expired' : 'Disconnected');
+          setPairingDetail(reason);
+          setNetworkPrefs((prev) => ({
+            ...prev,
+            serverIceServers: undefined,
+            turnExpiresAt: null,
+          }));
+          bridgeRef.current?.markSessionStopped(reason);
+          logEvent('error', 'Server room state lost', reason);
+          return false;
+        }
+        return false;
+      }
+    },
+    [logEvent, syncReceiverLifecycleFromSnapshot]
+  );
+
   const connectSignaling = useCallback(
     (roomId: string | null, token: string | null) => {
       if (!signalingClientRef.current) {
         signalingClientRef.current = new CastoraSignalingClient();
       }
+      const computedHeartbeatRole: 'sender' | 'receiver' =
+        activeRoomRoleRef.current === 'host'
+          ? 'sender'
+          : capabilities.detectedPlatform === 'android-tv'
+            ? 'receiver'
+            : 'sender';
       signalingClientRef.current.connect({
         deviceId,
         deviceName,
@@ -538,7 +627,11 @@ export function App() {
         capabilities: toProtocolCapabilities(capabilities, preferences),
         roomId,
         token,
+        heartbeatRole: computedHeartbeatRole,
         handlers: {
+          onTelemetryChange: (nextTel) => {
+            setSignalingTelemetry(nextTel);
+          },
           onStateChange: (nextState, detail) => {
             setSignalingState(nextState);
             if (nextState === 'connected') {
@@ -547,6 +640,7 @@ export function App() {
               void refreshHealth();
               if (activeRoomIdRef.current && roomTokenRef.current) {
                 void refreshIceServerConfig(activeRoomIdRef.current, roomTokenRef.current);
+                void verifyOrClearLostRoomSession(activeRoomIdRef.current, roomTokenRef.current);
               }
             } else if (nextState === 'error') {
               logEvent('error', 'Signaling socket error', detail ?? 'Unable to connect to /castora.');
@@ -559,15 +653,16 @@ export function App() {
           },
           onReconnectScheduled: (attempt, maxAttempts, delayMs) => {
             setSignalingState('connecting');
+            const maxLabel = Number.isFinite(maxAttempts) ? `/${maxAttempts}` : '';
             setPairingDetail(
-              `Signaling interrupted. Reconnecting (${attempt}/${maxAttempts}) in ${Math.round(
+              `Signaling interrupted. Reconnecting (${attempt}${maxLabel}) in ${Math.round(
                 delayMs / 100
               ) / 10}s...`
             );
             logEvent(
               'signaling',
               'Scheduled signaling reconnect',
-              `Attempt ${attempt}/${maxAttempts} in ${delayMs} ms`
+              `Attempt ${attempt}${maxLabel} in ${delayMs} ms`
             );
           },
           onEnvelope: (envelope) => {
@@ -693,6 +788,7 @@ export function App() {
       refreshHealth,
       refreshIceServerConfig,
       syncReceiverLifecycleFromSnapshot,
+      verifyOrClearLostRoomSession,
     ]
   );
 
@@ -726,12 +822,73 @@ export function App() {
 
     return () => {
       window.clearInterval(healthTimer);
+      void wakeLockRef.current?.release();
       bridgeRef.current?.dispose();
       signalingClientRef.current?.disconnect(false);
     };
     // Initial boot connection on mount; explicit reconnects use handleReconnectBackend
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Wake Lock acquisition during active local sharing or incoming remote stream viewing
+  const isActivelyStreaming =
+    webrtcState.isSharingLocal || webrtcState.incomingStreams.some((s) => s.stream !== null);
+
+  useEffect(() => {
+    const controller = wakeLockRef.current;
+    if (!controller) return;
+    if (isActivelyStreaming) {
+      void controller.acquire();
+    } else {
+      void controller.release();
+    }
+  }, [isActivelyStreaming]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (isActivelyStreaming) {
+        void wakeLockRef.current?.acquire();
+      }
+      if (signalingClientRef.current) {
+        signalingClientRef.current.triggerImmediateReconnect();
+      }
+      if (activeRoomIdRef.current && roomTokenRef.current) {
+        void verifyOrClearLostRoomSession(activeRoomIdRef.current, roomTokenRef.current);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [isActivelyStreaming, verifyOrClearLostRoomSession]);
+
+  // Proactive TURN lease refresh & Render restart / lost-room health guard while in an active room
+  useEffect(() => {
+    if (!activeRoom || typeof window === 'undefined') return;
+    const guardTimer = window.setInterval(() => {
+      const roomId = activeRoomIdRef.current;
+      const token = roomTokenRef.current;
+      if (!roomId || !token) return;
+
+      const expiresIso = networkPrefsRef.current.turnExpiresAt;
+      if (expiresIso) {
+        const expiresMs = Date.parse(expiresIso);
+        if (Number.isFinite(expiresMs) && expiresMs - Date.now() <= 5 * 60 * 1000) {
+          void refreshIceServerConfig(roomId, token);
+        }
+      }
+
+      if (signalingState !== 'connected') {
+        void verifyOrClearLostRoomSession(roomId, token);
+      }
+    }, 30_000);
+
+    return () => {
+      window.clearInterval(guardTimer);
+    };
+  }, [activeRoom, refreshIceServerConfig, signalingState, verifyOrClearLostRoomSession]);
 
   const handleReconnectBackend = useCallback(() => {
     void refreshHealth();
@@ -1477,6 +1634,18 @@ export function App() {
     setDestination('multi-view');
   };
 
+  if (destination === 'signage-player') {
+    return (
+      <SignagePlayerView
+        deviceId={deviceId}
+        deviceName={sessionDeviceName}
+        capabilities={capabilities}
+        initialScreenCode={signagePreviewScreenCode}
+        onExitPlayer={() => setDestination('digital-signage')}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#F5F7FB] text-[#172033] flex flex-col">
       <TopControlBar
@@ -1654,7 +1823,20 @@ export function App() {
           />
         )}
 
-        {(destination === 'multi-view' || destination === 'cast') && (
+        {(destination === 'multi-view' || destination === 'cast') && (() => {
+          const signalingStability: SignalingStabilitySnapshot = {
+            socketState: signalingState,
+            reconnectAttempt: signalingTelemetry.reconnectAttempt,
+            lastReconnectAttemptAt: signalingTelemetry.lastReconnectAttemptAt,
+            lastReconnectResult: signalingTelemetry.lastReconnectResult,
+            lastHeartbeatSentAt: signalingTelemetry.lastHeartbeatSentAt,
+            lastHeartbeatAckAt: signalingTelemetry.lastHeartbeatAckAt,
+            consecutiveMissedHeartbeats: signalingTelemetry.consecutiveMissedHeartbeats,
+            backendAvailable: backendError === null,
+            lastBackendError: backendError,
+            turnExpiresAt: networkPrefs.turnExpiresAt ? Date.parse(networkPrefs.turnExpiresAt) || null : null,
+          };
+          return (
           <MultiViewView
             layout={multiViewLayout}
             onChangeLayout={setMultiViewLayout}
@@ -1674,11 +1856,14 @@ export function App() {
             activeRoomRole={activeRoomRole}
             pairingStatus={pairingStatus}
             webrtcState={webrtcState}
+            signalingState={signalingState}
+            signalingStability={signalingStability}
             onStartSharing={handleStartSharing}
             onConnectReceiver={handleConnectReceiver}
             onStopSharing={handleStopSharing}
             onRetryPeer={handleRetryPeer}
             onRetryAllFailed={handleRetryAllFailed}
+            onReconnectBackend={handleReconnectBackend}
             onNavigate={setDestination}
             defaultShowSharePanel={destination === 'cast'}
             focusedDeviceId={focusedStreamDeviceId}
@@ -1694,8 +1879,34 @@ export function App() {
                   }
                 : undefined
             }
+            mutedByPeerId={mutedSlots}
+            lastSignalingActivityAt={lastSignalingActivityAt}
+            onRenameDevice={handleRenameDevice}
+            onApproveReceiver={handleApproveReceiver}
+            onRejectReceiver={handleRejectReceiver}
+            onRemoveReceiver={handleRemoveReceiver}
+            onStopDeviceStream={handleStopDeviceStream}
+            onReconnectDevice={handleReconnectDevice}
+            onToggleMutePeer={handleToggleMutePeer}
+            onToggleAdaptiveLock={handleToggleAdaptiveLock}
+            onRefreshDevices={handleRefreshDevices}
+            onLeaveRoom={handleLeaveRoom}
+            onCloseRoom={handleCloseRoom}
             onIncomingVideoDimensions={handleIncomingVideoDimensions}
             onIncomingAudioPlayback={handleIncomingAudioPlayback}
+            onLogEvent={logEvent}
+          />
+          );
+        })()}
+
+        {destination === 'digital-signage' && (
+          <DigitalSignageView
+            activeRoom={activeRoom}
+            onNavigate={setDestination}
+            onOpenLocalPlayer={(screenCode) => {
+              setSignagePreviewScreenCode(screenCode ?? '');
+              setDestination('signage-player');
+            }}
             onLogEvent={logEvent}
           />
         )}

@@ -28,6 +28,7 @@ export interface CapturedScreenSession {
   audioRequested?: boolean;
   audioCaptureStatus?: AudioCaptureStatus;
   audioNotice?: string | null;
+  videoHealth?: 'live' | 'muted' | 'ended';
   actualWidth: number | null;
   actualHeight: number | null;
   actualFrameRate: number | null;
@@ -196,6 +197,7 @@ export async function startScreenCapture(params: {
   preferences: CapturePreferences;
   onNativeEnded: () => void;
   onAudioTrackStateChange?: (status: AudioCaptureStatus, notice: string | null) => void;
+  onVideoTrackStateChange?: (state: 'live' | 'muted' | 'ended', notice: string | null) => void;
   env?: {
     isSecureContext?: boolean;
     mediaDevices?: Pick<MediaDevices, 'getDisplayMedia'> | undefined;
@@ -272,8 +274,30 @@ export async function startScreenCapture(params: {
 
   const handleTrackEnded = () => {
     if (intentionallyStopped) return;
+    session.videoHealth = 'ended';
+    params.onVideoTrackStateChange?.(
+      'ended',
+      'Screen capture video track ended by user or browser/OS permission revocation.'
+    );
     stopMediaStreamTracks(stream);
     params.onNativeEnded();
+  };
+
+  const handleVideoMuted = () => {
+    if (intentionallyStopped) return;
+    session.videoHealth = 'muted';
+    params.onVideoTrackStateChange?.(
+      'muted',
+      'Captured screen source paused or minimized temporarily.'
+    );
+  };
+
+  const handleVideoUnmuted = () => {
+    if (intentionallyStopped) return;
+    if (videoTrack.readyState === 'live') {
+      session.videoHealth = 'live';
+      params.onVideoTrackStateChange?.('live', null);
+    }
   };
 
   const handleAudioEnded = () => {
@@ -303,6 +327,10 @@ export async function startScreenCapture(params: {
   };
 
   videoTrack.addEventListener('ended', handleTrackEnded);
+  if (typeof videoTrack.addEventListener === 'function') {
+    videoTrack.addEventListener('mute', handleVideoMuted);
+    videoTrack.addEventListener('unmute', handleVideoUnmuted);
+  }
   if (audioTrack && typeof audioTrack.addEventListener === 'function') {
     audioTrack.addEventListener('ended', handleAudioEnded);
     audioTrack.addEventListener('mute', handleAudioMuted);
@@ -313,6 +341,10 @@ export async function startScreenCapture(params: {
     if (intentionallyStopped) return;
     intentionallyStopped = true;
     videoTrack.removeEventListener('ended', handleTrackEnded);
+    if (typeof videoTrack.removeEventListener === 'function') {
+      videoTrack.removeEventListener('mute', handleVideoMuted);
+      videoTrack.removeEventListener('unmute', handleVideoUnmuted);
+    }
     if (audioTrack && typeof audioTrack.removeEventListener === 'function') {
       audioTrack.removeEventListener('ended', handleAudioEnded);
       audioTrack.removeEventListener('mute', handleAudioMuted);
@@ -329,6 +361,7 @@ export async function startScreenCapture(params: {
     audioRequested,
     audioCaptureStatus,
     audioNotice,
+    videoHealth: videoTrack.readyState === 'ended' ? 'ended' : videoTrack.muted ? 'muted' : 'live',
     actualWidth: typeof settings.width === 'number' ? settings.width : null,
     actualHeight: typeof settings.height === 'number' ? settings.height : null,
     actualFrameRate: typeof settings.frameRate === 'number' ? settings.frameRate : null,
@@ -336,4 +369,50 @@ export async function startScreenCapture(params: {
   };
 
   return session;
+}
+
+export class CastoraWakeLockController {
+  private sentinel: WakeLockSentinel | null = null;
+  private active = false;
+
+  async acquire(): Promise<boolean> {
+    this.active = true;
+    if (typeof navigator === 'undefined') return false;
+    const wakeLockApi = (navigator as Navigator & { wakeLock?: WakeLock }).wakeLock;
+    if (!wakeLockApi || typeof wakeLockApi.request !== 'function') {
+      return false;
+    }
+    if (this.sentinel && !this.sentinel.released) {
+      return true;
+    }
+    try {
+      const sentinel = await wakeLockApi.request('screen');
+      if (!this.active) {
+        await sentinel.release().catch(() => undefined);
+        return false;
+      }
+      this.sentinel = sentinel;
+      sentinel.addEventListener?.('release', () => {
+        if (this.sentinel === sentinel) {
+          this.sentinel = null;
+        }
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async release(): Promise<void> {
+    this.active = false;
+    if (this.sentinel) {
+      const current = this.sentinel;
+      this.sentinel = null;
+      await current.release().catch(() => undefined);
+    }
+  }
+
+  isHeld(): boolean {
+    return Boolean(this.sentinel && !this.sentinel.released);
+  }
 }

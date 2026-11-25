@@ -14,6 +14,9 @@ import {
   emitTerminatedStreams,
   sendJson,
 } from './apps/server/signalingGateway.ts';
+import { createSignageObjectStorage } from './apps/server/objectStorage.ts';
+import { createSignageDatabase } from './apps/server/signageDatabase.ts';
+import { createSignageRouter } from './apps/server/signageRoutes.ts';
 import type {
   BackendHealthStatus,
   CastoraPlatform,
@@ -52,11 +55,15 @@ export interface CastoraServerOptions {
   host?: string;
   enableViteMiddleware?: boolean;
   roomTtlMs?: number;
+  disconnectGraceMs?: number;
   rateLimitMaxAttempts?: number;
   rateLimitWindowMs?: number;
   passwordRateLimitMaxAttempts?: number;
   passwordRateLimitWindowMs?: number;
   allowedOrigins?: string[];
+  signageDbPath?: string;
+  signageStorageDir?: string;
+  maxSignageFileBytes?: number;
 }
 
 function resolveTlsCredentials(): { cert: Buffer; key: Buffer } | null {
@@ -111,7 +118,7 @@ function mapRoomErrorStatus(code?: string): number {
     case 'STREAM_NOT_FOUND':
     case 'TRANSFER_NOT_FOUND':
       return 404;
-    case 'ROOM_FULL':
+    case 'ROOM_CAPACITY_REACHED':
     case 'ALREADY_PAIRED':
     case 'DUPLICATE_PAIR_REQUEST':
     case 'DUPLICATE_DEVICE_NAME':
@@ -142,7 +149,14 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
   const app = express();
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '32kb' }));
+  const json32kb = express.json({ limit: '32kb' });
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.path.startsWith('/api/signage')) {
+      next();
+      return;
+    }
+    json32kb(req, res, next);
+  });
 
   const tlsCredentials = resolveTlsCredentials();
   const httpsEnabled = Boolean(tlsCredentials);
@@ -184,10 +198,12 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
   const server = tlsCredentials
     ? https.createServer(tlsCredentials, app)
     : http.createServer(app);
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
 
-  const roomManager = new RoomManager(options.roomTtlMs);
+  const roomManager = new RoomManager(options.roomTtlMs, options.disconnectGraceMs);
   const roomRateLimiter = new SlidingWindowRateLimiter(
-    options.rateLimitMaxAttempts ?? 10,
+    options.rateLimitMaxAttempts ?? 30,
     options.rateLimitWindowMs ?? 60_000
   );
   const passwordRateLimiter = new SlidingWindowRateLimiter(
@@ -195,7 +211,7 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
     options.passwordRateLimitWindowMs ?? 60_000
   );
 
-  const iceRateLimiter = new SlidingWindowRateLimiter(30, 60_000);
+  const iceRateLimiter = new SlidingWindowRateLimiter(60, 60_000);
 
   const gateway = attachSignalingGateway({
     server,
@@ -205,7 +221,21 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
     allowedOrigins,
   });
 
+  const signageStorage = createSignageObjectStorage({
+    localStorageDir: options.signageStorageDir,
+  });
+  const signageStore = createSignageDatabase({
+    sqlitePath: options.signageDbPath,
+  });
+  await signageStore.init();
+  const signageMount = createSignageRouter({
+    store: signageStore,
+    storage: signageStorage,
+    maxFileSizeBytes: options.maxSignageFileBytes,
+  });
+
   // --- REST API Routes ---
+  app.use('/api/signage', signageMount.router);
   app.get('/api/health', (req: Request, res: Response) => {
     const stats = roomManager.getStats();
     const iceStatus = getIceConfigStatus();
@@ -1374,6 +1404,8 @@ export async function startCastoraServer(options: CastoraServerOptions = {}) {
     close: async () => {
       clearInterval(sweepInterval);
       gateway.shutdown();
+      signageMount.shutdown();
+      await signageStore.close();
       if (viteServer) {
         await viteServer.close();
       }

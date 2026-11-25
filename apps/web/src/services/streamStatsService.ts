@@ -79,6 +79,8 @@ export function createEmptyTelemetry(
     audioPlaybackStatus: null,
     autoplayBlocked: null,
     audioDiagnosticStatus: null,
+    lastSuccessfulVideoFrameAt: null,
+    lastSuccessfulAudioPacketAt: null,
   };
 }
 

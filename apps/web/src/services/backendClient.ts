@@ -246,9 +246,15 @@ export async function submitBackendPairRequest(params: {
       }),
     }
   );
-  const data = (await response.json()) as SubmitPairRequestResponse & { message?: string };
+  const data = (await response.json()) as SubmitPairRequestResponse & {
+    error?: string;
+    message?: string;
+  };
   if (!response.ok) {
-    throw new Error(data.message ?? `Failed to submit pairing request (HTTP ${response.status})`);
+    const baseMsg = data.message ?? `Failed to submit pairing request (HTTP ${response.status})`;
+    throw new Error(
+      data.error === 'ROOM_CAPACITY_REACHED' ? `ROOM_CAPACITY_REACHED: ${baseMsg}` : baseMsg
+    );
   }
   return data;
 }
@@ -267,9 +273,16 @@ export async function approveBackendPairRequest(params: {
       },
     }
   );
-  const data = (await response.json()) as { room?: RoomSnapshot; message?: string };
+  const data = (await response.json()) as {
+    room?: RoomSnapshot;
+    error?: string;
+    message?: string;
+  };
   if (!response.ok || !data.room) {
-    throw new Error(data.message ?? `Approval failed (HTTP ${response.status})`);
+    const baseMsg = data.message ?? `Approval failed (HTTP ${response.status})`;
+    throw new Error(
+      data.error === 'ROOM_CAPACITY_REACHED' ? `ROOM_CAPACITY_REACHED: ${baseMsg}` : baseMsg
+    );
   }
   return data.room;
 }
@@ -477,6 +490,17 @@ export async function validateBackendInvitation(params: {
   return data;
 }
 
+export class RestoreSessionError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = 'RestoreSessionError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
 export async function restoreBackendSession(params: {
   roomId: string;
   token: string;
@@ -489,9 +513,16 @@ export async function restoreBackendSession(params: {
     },
     cache: 'no-store',
   });
-  const data = (await response.json()) as RestoreSessionResponse & { message?: string };
+  const data = (await response.json()) as RestoreSessionResponse & {
+    message?: string;
+    code?: string;
+  };
   if (!response.ok || !data.room) {
-    throw new Error(data.message ?? `Session restore failed (HTTP ${response.status})`);
+    throw new RestoreSessionError(
+      data.message ?? `Session restore failed (HTTP ${response.status})`,
+      response.status,
+      data.code
+    );
   }
   return data;
 }
@@ -644,11 +675,25 @@ export async function requestBackendDeviceReconnect(params: {
   return data.room;
 }
 
+export interface SignalingHeartbeatTelemetry {
+  socketState: SignalingSocketState;
+  reconnectAttempt: number;
+  lastReconnectAttemptAt: number | null;
+  lastReconnectResult: string | null;
+  lastHeartbeatSentAt: number | null;
+  lastHeartbeatAckAt: number | null;
+  consecutiveMissedHeartbeats: number;
+}
+
 export interface SignalingClientHandlers {
   onStateChange: (state: SignalingSocketState, detail?: string) => void;
   onEnvelope: (envelope: CastoraEnvelope) => void;
   onReconnectScheduled?: (attempt: number, maxAttempts: number, delayMs: number) => void;
+  onTelemetryChange?: (telemetry: SignalingHeartbeatTelemetry) => void;
 }
+
+const WS_HEARTBEAT_INTERVAL_MS = 15_000;
+const MAX_CONSECUTIVE_MISSED_HEARTBEATS = 3;
 
 export class CastoraSignalingClient {
   private socket: WebSocket | null = null;
@@ -657,6 +702,16 @@ export class CastoraSignalingClient {
   private reconnectAttempt = 0;
   private manualDisconnect = false;
   private sequence = 0;
+  private pendingHeartbeatSinceAt: number | null = null;
+  private telemetry: SignalingHeartbeatTelemetry = {
+    socketState: 'disconnected',
+    reconnectAttempt: 0,
+    lastReconnectAttemptAt: null,
+    lastReconnectResult: null,
+    lastHeartbeatSentAt: null,
+    lastHeartbeatAckAt: null,
+    consecutiveMissedHeartbeats: 0,
+  };
   private lastConnectParams: {
     deviceId: string;
     deviceName: string;
@@ -665,10 +720,21 @@ export class CastoraSignalingClient {
     capabilities: DeviceCapabilities;
     roomId: string | null;
     token?: string | null;
+    heartbeatRole?: 'sender' | 'receiver';
     handlers: SignalingClientHandlers;
     autoReconnect?: boolean;
     maxReconnectAttempts?: number;
   } | null = null;
+
+  getTelemetry(): SignalingHeartbeatTelemetry {
+    return { ...this.telemetry };
+  }
+
+  private emitTelemetry(handlers?: SignalingClientHandlers): void {
+    (handlers ?? this.lastConnectParams?.handlers)?.onTelemetryChange?.({
+      ...this.telemetry,
+    });
+  }
 
   private clearReconnectTimer(): void {
     if (this.reconnectTimer !== null && typeof window !== 'undefined') {
@@ -685,6 +751,7 @@ export class CastoraSignalingClient {
     capabilities: DeviceCapabilities;
     roomId: string | null;
     token?: string | null;
+    heartbeatRole?: 'sender' | 'receiver';
     handlers: SignalingClientHandlers;
     autoReconnect?: boolean;
     maxReconnectAttempts?: number;
@@ -694,6 +761,11 @@ export class CastoraSignalingClient {
     this.disconnect(false);
     this.manualDisconnect = false;
     this.reconnectAttempt = 0;
+    this.telemetry = {
+      ...this.telemetry,
+      reconnectAttempt: 0,
+      consecutiveMissedHeartbeats: 0,
+    };
     this.openSocket(params);
   }
 
@@ -704,6 +776,14 @@ export class CastoraSignalingClient {
     if (params.deviceType) qs.set('deviceType', params.deviceType);
     const querySuffix = qs.toString() ? `?${qs.toString()}` : '';
     const wsUrl = `${scheme}//${window.location.host}/castora${querySuffix}`;
+
+    this.telemetry = {
+      ...this.telemetry,
+      socketState: 'connecting',
+      reconnectAttempt: this.reconnectAttempt,
+      ...(this.reconnectAttempt > 0 ? { lastReconnectAttemptAt: Date.now() } : {}),
+    };
+    this.emitTelemetry(params.handlers);
 
     params.handlers.onStateChange(
       'connecting',
@@ -717,7 +797,18 @@ export class CastoraSignalingClient {
 
     ws.onopen = () => {
       if (this.socket !== ws) return;
+      const wasReconnect = this.reconnectAttempt > 0;
       this.reconnectAttempt = 0;
+      this.pendingHeartbeatSinceAt = null;
+      this.telemetry = {
+        ...this.telemetry,
+        socketState: 'connected',
+        reconnectAttempt: 0,
+        lastHeartbeatAckAt: Date.now(),
+        consecutiveMissedHeartbeats: 0,
+        ...(wasReconnect ? { lastReconnectResult: 'Reconnected to /castora signaling gateway' } : {}),
+      };
+      this.emitTelemetry(params.handlers);
       params.handlers.onStateChange('connected', 'Connected to /castora');
 
       const wsPort = Number(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
@@ -740,8 +831,35 @@ export class CastoraSignalingClient {
       ws.send(JSON.stringify(announce));
 
       this.heartbeatTimer = window.setInterval(() => {
-        if (ws.readyState !== WebSocket.OPEN) return;
+        if (this.socket !== ws || ws.readyState !== WebSocket.OPEN) return;
+
+        // Watchdog: if previous heartbeat remained unacked through interval, increment missed counter
+        if (this.pendingHeartbeatSinceAt !== null) {
+          this.telemetry = {
+            ...this.telemetry,
+            consecutiveMissedHeartbeats: this.telemetry.consecutiveMissedHeartbeats + 1,
+          };
+          this.emitTelemetry(params.handlers);
+          if (this.telemetry.consecutiveMissedHeartbeats >= MAX_CONSECUTIVE_MISSED_HEARTBEATS) {
+            // Force close with 4000 (abnormal) so reconnect flow replaces dead zombie socket while preserving grace
+            this.telemetry = {
+              ...this.telemetry,
+              lastReconnectResult: 'Heartbeat timeout; cycling WebSocket connection',
+            };
+            ws.close(4000, 'Heartbeat timeout');
+            return;
+          }
+        }
+
+        const now = Date.now();
         this.sequence += 1;
+        this.pendingHeartbeatSinceAt = now;
+        this.telemetry = {
+          ...this.telemetry,
+          lastHeartbeatSentAt: now,
+        };
+        this.emitTelemetry(params.handlers);
+
         const hb: CastoraEnvelope = {
           protocolVersion: CASTORA_PROTOCOL_VERSION,
           messageType: 'heartbeat',
@@ -752,17 +870,25 @@ export class CastoraSignalingClient {
           timestamp: new Date().toISOString(),
           payload: {
             sequence: this.sequence,
-            role: 'sender',
+            role: params.heartbeatRole ?? (params.platform === 'android-tv' ? 'receiver' : 'sender'),
           },
         };
         ws.send(JSON.stringify(hb));
-      }, 20_000);
+      }, WS_HEARTBEAT_INTERVAL_MS);
     };
 
     ws.onmessage = (event) => {
       if (typeof event.data !== 'string') return;
       try {
         const envelope = JSON.parse(event.data) as CastoraEnvelope;
+        const now = Date.now();
+        this.pendingHeartbeatSinceAt = null;
+        this.telemetry = {
+          ...this.telemetry,
+          lastHeartbeatAckAt: now,
+          consecutiveMissedHeartbeats: 0,
+        };
+        this.emitTelemetry(params.handlers);
         params.handlers.onEnvelope(envelope);
       } catch {
         // Ignore non-JSON frames
@@ -771,6 +897,12 @@ export class CastoraSignalingClient {
 
     ws.onerror = () => {
       if (this.socket !== ws) return;
+      this.telemetry = {
+        ...this.telemetry,
+        socketState: 'error',
+        lastReconnectResult: 'WebSocket transport error',
+      };
+      this.emitTelemetry(params.handlers);
       params.handlers.onStateChange('error', 'WebSocket /castora connection error');
     };
 
@@ -781,12 +913,20 @@ export class CastoraSignalingClient {
       }
       if (this.socket === ws) {
         this.socket = null;
+        this.pendingHeartbeatSinceAt = null;
+        this.telemetry = {
+          ...this.telemetry,
+          socketState: 'disconnected',
+        };
+        this.emitTelemetry(params.handlers);
         params.handlers.onStateChange(
           'disconnected',
           evt.reason ? `Closed: ${evt.reason}` : 'Signaling socket closed'
         );
 
-        const maxAttempts = params.maxReconnectAttempts ?? 5;
+        // Sustained bounded exponential backoff: never permanently give up after 5 drops during long sessions
+        // unless caller explicitly supplied a finite maxReconnectAttempts limit.
+        const maxAttempts = params.maxReconnectAttempts ?? Infinity;
         const shouldReconnect =
           !this.manualDisconnect &&
           params.autoReconnect !== false &&
@@ -797,7 +937,14 @@ export class CastoraSignalingClient {
         if (shouldReconnect) {
           this.reconnectAttempt += 1;
           const attempt = this.reconnectAttempt;
-          const delayMs = Math.min(10_000, 1000 * Math.pow(2, attempt - 1));
+          const delayMs = Math.min(20_000, 1000 * Math.pow(2, Math.min(attempt - 1, 5)));
+          this.telemetry = {
+            ...this.telemetry,
+            reconnectAttempt: attempt,
+            lastReconnectAttemptAt: Date.now(),
+            lastReconnectResult: `Scheduled reconnect #${attempt} in ${Math.round(delayMs / 1000)}s`,
+          };
+          this.emitTelemetry(params.handlers);
           params.handlers.onReconnectScheduled?.(attempt, maxAttempts, delayMs);
           this.reconnectTimer = window.setTimeout(() => {
             this.reconnectTimer = null;
@@ -808,6 +955,16 @@ export class CastoraSignalingClient {
         }
       }
     };
+  }
+
+  triggerImmediateReconnect(): boolean {
+    if (this.manualDisconnect || !this.lastConnectParams) return false;
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      return false;
+    }
+    this.clearReconnectTimer();
+    this.openSocket(this.lastConnectParams);
+    return true;
   }
 
   sendEnvelope(params: {
@@ -862,7 +1019,12 @@ export class CastoraSignalingClient {
           })
         );
       }
-      ws.close();
+      ws.close(1000, 'Client manual disconnect');
     }
+    this.telemetry = {
+      ...this.telemetry,
+      socketState: 'disconnected',
+    };
+    this.emitTelemetry();
   }
 }

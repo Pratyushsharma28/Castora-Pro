@@ -252,7 +252,8 @@ export function resolveQualityTarget(
  * Multi-publisher / multi-receiver headroom budgeting:
  * A single peer receives 100% of configured target bitrate. When broadcasting
  * high-bitrate streams to multiple peers concurrently, scale per-stream ceiling
- * smoothly so CPU, GPU hardware encoders, and uplink bandwidth are not saturated.
+ * smoothly up to 15 receivers so CPU, GPU hardware encoders, and uplink bandwidth
+ * are not saturated.
  */
 export function computeConcurrencyScaledBitrateKbps(
   configuredBitrateKbps: number,
@@ -265,7 +266,9 @@ export function computeConcurrencyScaledBitrateKbps(
   const factor =
     activeOutboundPeers === 2
       ? 0.85
-      : Math.max(0.5, Math.min(0.75, 1.35 / activeOutboundPeers));
+      : activeOutboundPeers <= 5
+        ? Math.max(0.5, Math.min(0.75, 1.35 / activeOutboundPeers))
+        : Math.max(0.18, Math.min(0.45, 2.5 / activeOutboundPeers));
   return Math.max(minBitrateKbps, Math.round(configuredBitrateKbps * factor));
 }
 

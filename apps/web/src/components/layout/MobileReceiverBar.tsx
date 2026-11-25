@@ -1,4 +1,4 @@
-import { Home, Laptop, MonitorPlay, Settings, ShieldCheck, Users } from 'lucide-react';
+import { Home, Laptop, MonitorPlay, Settings, ShieldCheck, Tv, Users } from 'lucide-react';
 import type { StudioDestination } from '../../types/studio';
 
 interface MobileReceiverBarProps {
@@ -17,6 +17,7 @@ const MOBILE_ITEMS: {
   { id: 'sessions', label: 'Session', icon: ShieldCheck, matches: ['sessions'] },
   { id: 'devices', label: 'Devices', icon: Laptop, matches: ['devices'] },
   { id: 'multi-view', label: 'Screens', icon: MonitorPlay, matches: ['multi-view', 'cast'] },
+  { id: 'digital-signage', label: 'Signage', icon: Tv, matches: ['digital-signage', 'signage-player'] },
   { id: 'settings', label: 'Settings', icon: Settings, matches: ['settings', 'activity'] },
 ];
 
@@ -28,7 +29,7 @@ export function MobileReceiverBar({
     <nav
       data-castora-chrome
       aria-label="Mobile Navigation"
-      className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-6 border-t border-[#E2E8F0] bg-white md:hidden"
+      className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-7 border-t border-[#E2E8F0] bg-white md:hidden"
     >
       {MOBILE_ITEMS.map((item) => {
         const Icon = item.icon;

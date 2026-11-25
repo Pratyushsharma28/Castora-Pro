@@ -222,14 +222,55 @@ export function VideoSurface({
         }
       };
 
+      const lastPlaybackRecoveryAtRef = { current: 0 };
+      let consecutiveStallRecoveries = 0;
+
       const handleMediaEvent = () => {
+        if (!el.paused && el.readyState >= 2) {
+          consecutiveStallRecoveries = 0;
+        }
         syncAudioState();
+      };
+
+      const attemptPlaybackRecovery = () => {
+        if (cancelled) return;
+        const liveVideoTracks = stream.getVideoTracks?.().filter((t) => t.readyState === 'live') ?? [];
+        if (liveVideoTracks.length === 0) {
+          syncAudioState();
+          return;
+        }
+        const now = Date.now();
+        if (now - lastPlaybackRecoveryAtRef.current < 1500) return;
+        if (consecutiveStallRecoveries >= 3) {
+          syncAudioState();
+          return;
+        }
+        lastPlaybackRecoveryAtRef.current = now;
+        consecutiveStallRecoveries += 1;
+        void attemptPlay();
+      };
+
+      const handleVideoStall = () => {
+        attemptPlaybackRecovery();
+      };
+
+      const handleUnexpectedPause = () => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          syncAudioState();
+          return;
+        }
+        if (el.ended) {
+          syncAudioState();
+          return;
+        }
+        attemptPlaybackRecovery();
       };
 
       stream.addEventListener?.('addtrack', handleTrackChange);
       stream.addEventListener?.('removetrack', handleTrackChange);
       el.addEventListener('playing', handleMediaEvent);
-      el.addEventListener('pause', handleMediaEvent);
+      el.addEventListener('pause', handleUnexpectedPause);
+      el.addEventListener('stalled', handleVideoStall);
       el.addEventListener('waiting', handleMediaEvent);
       el.addEventListener('volumechange', handleMediaEvent);
       el.addEventListener('loadedmetadata', handleMediaEvent);
@@ -239,7 +280,8 @@ export function VideoSurface({
         stream.removeEventListener?.('addtrack', handleTrackChange);
         stream.removeEventListener?.('removetrack', handleTrackChange);
         el.removeEventListener('playing', handleMediaEvent);
-        el.removeEventListener('pause', handleMediaEvent);
+        el.removeEventListener('pause', handleUnexpectedPause);
+        el.removeEventListener('stalled', handleVideoStall);
         el.removeEventListener('waiting', handleMediaEvent);
         el.removeEventListener('volumechange', handleMediaEvent);
         el.removeEventListener('loadedmetadata', handleMediaEvent);

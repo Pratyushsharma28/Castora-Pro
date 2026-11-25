@@ -93,6 +93,8 @@ export interface PeerServiceCallbacks {
   onIceConnectionChange: (iceState: RTCIceConnectionState) => void;
   onConnectionFailure?: (reason: string) => void;
   onCodecFallback?: (nextCodec: CastoraVideoCodec, reason: string) => void;
+  onLocalTrackEnded?: (reason: string) => void;
+  onRecoveryAttempt?: (info: { kind: string; detail: string }) => void;
   onStats: (stats: BidirectionalTelemetrySample) => void;
   onError: (message: string) => void;
 }
@@ -105,6 +107,7 @@ export class CastoraWebRtcPeer {
 
   private pc: RTCPeerConnection | null = null;
   private statsTimer: number | null = null;
+  private statsJitterTimer: number | null = null;
   private iceRestartTimer: number | null = null;
   private statsCollector: WebRtcStatsCollector;
   private pendingCandidates: RTCIceCandidateInit[] = [];
@@ -120,6 +123,17 @@ export class CastoraWebRtcPeer {
   private triedVideoCodecs = new Set<CastoraVideoCodec>();
   private outboundZeroFrameSamples = 0;
   private codecStallSampleThreshold = 3;
+  private lastFramesEncoded: number | null = null;
+  private consecutiveEncoderStallSamples = 0;
+  private encoderStallThresholdSamples = 5;
+  private lastFramesDecoded: number | null = null;
+  private consecutiveDecoderStallSamples = 0;
+  private decoderStallThresholdSamples = 6;
+  private lastSuccessfulVideoFrameAt: number | null = null;
+  private lastSuccessfulAudioPacketAt: number | null = null;
+  private lastAudioPacketsSent: number | null = null;
+  private lastAudioPacketsReceived: number | null = null;
+  private localTrackEndedNotified = false;
   private fallbackInFlight = false;
 
   private outboundPreferences: CapturePreferences | null = null;
@@ -168,6 +182,8 @@ export class CastoraWebRtcPeer {
     rtcFactory?: (config: RTCConfiguration) => RTCPeerConnection;
     iceDisconnectGraceMs?: number;
     codecStallSampleThreshold?: number;
+    encoderStallThresholdSamples?: number;
+    decoderStallThresholdSamples?: number;
   }) {
     if (!params.rtcFactory && typeof RTCPeerConnection === 'undefined') {
       throw new Error('RTCPeerConnection is not supported in this browser.');
@@ -187,6 +203,18 @@ export class CastoraWebRtcPeer {
     }
     if (typeof params.codecStallSampleThreshold === 'number' && params.codecStallSampleThreshold >= 1) {
       this.codecStallSampleThreshold = Math.floor(params.codecStallSampleThreshold);
+    }
+    if (
+      typeof params.encoderStallThresholdSamples === 'number' &&
+      params.encoderStallThresholdSamples >= 2
+    ) {
+      this.encoderStallThresholdSamples = Math.floor(params.encoderStallThresholdSamples);
+    }
+    if (
+      typeof params.decoderStallThresholdSamples === 'number' &&
+      params.decoderStallThresholdSamples >= 2
+    ) {
+      this.decoderStallThresholdSamples = Math.floor(params.decoderStallThresholdSamples);
     }
     this.statsCollector = new WebRtcStatsCollector('bidirectional');
 
@@ -216,6 +244,20 @@ export class CastoraWebRtcPeer {
 
   getAdaptiveState() {
     return this.abrController?.getCurrentState() ?? null;
+  }
+
+  getHealthSummary(): {
+    lastSuccessfulVideoFrameAt: number | null;
+    lastSuccessfulAudioPacketAt: number | null;
+    lastFramesEncoded: number | null;
+    lastFramesDecoded: number | null;
+  } {
+    return {
+      lastSuccessfulVideoFrameAt: this.lastSuccessfulVideoFrameAt,
+      lastSuccessfulAudioPacketAt: this.lastSuccessfulAudioPacketAt,
+      lastFramesEncoded: this.lastFramesEncoded,
+      lastFramesDecoded: this.lastFramesDecoded,
+    };
   }
 
   isHealthy(): boolean {
@@ -373,6 +415,9 @@ export class CastoraWebRtcPeer {
   clearInboundStream(reason?: string): void {
     this.inboundStreamId = null;
     this.sawInboundAudioEnded = false;
+    this.lastFramesDecoded = null;
+    this.consecutiveDecoderStallSamples = 0;
+    this.lastAudioPacketsReceived = null;
     this.clearInboundTrackListeners();
     this.statsCollector.resetInbound();
     if (this.inboundStream) {
@@ -578,11 +623,11 @@ export class CastoraWebRtcPeer {
     }, delayMs) as unknown as number;
   }
 
-  async triggerIceRestart(): Promise<boolean> {
+  async triggerIceRestart(force = false): Promise<boolean> {
     if (this.disposed || !this.pc || this.pc.signalingState === 'closed') {
       return false;
     }
-    if (this.isHealthy()) {
+    if (!force && this.isHealthy()) {
       return false;
     }
     if (this.iceRestartInFlight) {
@@ -625,6 +670,20 @@ export class CastoraWebRtcPeer {
       inbound: createEmptyTelemetry(this.inboundTargetFps, this.currentPhase),
     };
     if (this.disposed || !this.pc) return empty;
+
+    const sampleTimeMs = typeof nowMs === 'number' ? nowMs : Date.now();
+
+    if (
+      this.hasOutboundStream() &&
+      this.localVideoTrack &&
+      this.localVideoTrack.readyState === 'ended'
+    ) {
+      if (!this.localTrackEndedNotified) {
+        this.localTrackEndedNotified = true;
+        this.callbacks.onLocalTrackEnded?.('Screen capture video track ended.');
+      }
+      return empty;
+    }
 
     const hasInboundVideo = Boolean(this.inboundStreamId || this.hasInboundStream());
     const hasInboundAudio = Boolean(
@@ -683,6 +742,64 @@ export class CastoraWebRtcPeer {
           snapshot.outbound.negotiatedVideoCodec ?? this.outboundCodecHint;
       }
 
+      const encodedCount = snapshot.outbound.framesEncoded ?? snapshot.outbound.framesSent;
+      if (typeof encodedCount === 'number') {
+        if (
+          encodedCount > 0 &&
+          (this.lastFramesEncoded === null || encodedCount > this.lastFramesEncoded)
+        ) {
+          this.lastSuccessfulVideoFrameAt = sampleTimeMs;
+          this.consecutiveEncoderStallSamples = 0;
+        } else if (
+          this.currentPhase === 'connected' &&
+          this.localVideoTrack?.readyState === 'live' &&
+          !this.localVideoTrack.muted &&
+          this.lastFramesEncoded !== null &&
+          this.lastFramesEncoded > 0 &&
+          encodedCount === this.lastFramesEncoded
+        ) {
+          this.consecutiveEncoderStallSamples += 1;
+          if (this.consecutiveEncoderStallSamples === 2 && this.abrController) {
+            const currentAbr = this.abrController.getCurrentState();
+            void this.applySenderEncodingDecision({
+              changed: true,
+              targetBitrateKbps: Math.max(800, Math.round(currentAbr.targetBitrateKbps * 0.9)),
+              maxFramerate: currentAbr.targetFramerate,
+              scaleResolutionDownBy: currentAbr.scaleResolutionDownBy,
+              degradationPreference: 'maintain-framerate',
+              adaptationStatus: 'recovering',
+              adaptiveMode: currentAbr.adaptiveMode,
+              networkCondition: currentAbr.networkCondition,
+              lastAdjustmentReason: 'Nudging sender encoding parameters after brief frame stall',
+              lastAdjustmentAt: sampleTimeMs,
+              lastAdjustmentAction: 'reduced-bitrate',
+            });
+          } else if (this.consecutiveEncoderStallSamples === this.encoderStallThresholdSamples) {
+            this.callbacks.onRecoveryAttempt?.({
+              kind: 'encoder-stall',
+              detail: 'Video encoder stalled mid-stream; triggering ICE restart to resume frames.',
+            });
+            void this.triggerIceRestart(true);
+          } else if (this.consecutiveEncoderStallSamples >= this.encoderStallThresholdSamples + 2) {
+            this.notifyFailureOnce(
+              'Video encoder stalled mid-stream; recovering peer connection.'
+            );
+          }
+        }
+        this.lastFramesEncoded = encodedCount;
+      }
+
+      const audioSent = snapshot.outbound.audioPacketsSent;
+      if (typeof audioSent === 'number' && audioSent > 0) {
+        if (this.lastAudioPacketsSent === null || audioSent > this.lastAudioPacketsSent) {
+          this.lastSuccessfulAudioPacketAt = sampleTimeMs;
+        }
+        this.lastAudioPacketsSent = audioSent;
+      }
+
+      snapshot.outbound.lastSuccessfulVideoFrameAt = this.lastSuccessfulVideoFrameAt;
+      snapshot.outbound.lastSuccessfulAudioPacketAt = this.lastSuccessfulAudioPacketAt;
+
       // Detect zero-frame encoder stall on H.264 / AV1 and step down cleanly without dropping audio
       if (
         this.currentPhase === 'connected' &&
@@ -717,6 +834,55 @@ export class CastoraWebRtcPeer {
       if (!snapshot.inbound.codecMimeType && snapshot.inbound.negotiatedVideoCodec) {
         snapshot.inbound.codecMimeType = snapshot.inbound.negotiatedVideoCodec;
       }
+
+      const decodedCount = snapshot.inbound.framesDecoded;
+      const inboundVideoTrackLive =
+        this.inboundStream?.getVideoTracks?.().some((t) => t.readyState === 'live' && !t.muted) ??
+        false;
+      if (typeof decodedCount === 'number') {
+        if (
+          decodedCount > 0 &&
+          (this.lastFramesDecoded === null || decodedCount > this.lastFramesDecoded)
+        ) {
+          this.lastSuccessfulVideoFrameAt = sampleTimeMs;
+          this.consecutiveDecoderStallSamples = 0;
+        } else if (
+          this.hasInboundStream() &&
+          this.currentPhase === 'connected' &&
+          inboundVideoTrackLive &&
+          this.lastFramesDecoded !== null &&
+          this.lastFramesDecoded > 0 &&
+          decodedCount === this.lastFramesDecoded
+        ) {
+          this.consecutiveDecoderStallSamples += 1;
+          if (this.consecutiveDecoderStallSamples === this.decoderStallThresholdSamples) {
+            this.callbacks.onRecoveryAttempt?.({
+              kind: 'decoder-stall',
+              detail: 'Video decoder stalled mid-stream; requesting keyframe / recovery offer.',
+            });
+            void this.requestInboundRecoveryOffer();
+          } else if (this.consecutiveDecoderStallSamples >= this.decoderStallThresholdSamples + 2) {
+            this.notifyFailureOnce(
+              'Receiver video decoder stalled mid-stream; recovering peer connection.'
+            );
+          }
+        }
+        this.lastFramesDecoded = decodedCount;
+      }
+
+      const audioReceived = snapshot.inbound.audioPacketsReceived;
+      if (typeof audioReceived === 'number' && audioReceived > 0) {
+        if (
+          this.lastAudioPacketsReceived === null ||
+          audioReceived > this.lastAudioPacketsReceived
+        ) {
+          this.lastSuccessfulAudioPacketAt = sampleTimeMs;
+        }
+        this.lastAudioPacketsReceived = audioReceived;
+      }
+
+      snapshot.inbound.lastSuccessfulVideoFrameAt = this.lastSuccessfulVideoFrameAt;
+      snapshot.inbound.lastSuccessfulAudioPacketAt = this.lastSuccessfulAudioPacketAt;
     }
 
     if (!this.disposed) {
@@ -728,12 +894,28 @@ export class CastoraWebRtcPeer {
   private startStatsPolling(): void {
     this.stopStatsPolling();
     if (typeof window === 'undefined') return;
-    this.statsTimer = window.setInterval(() => {
+    // Deterministic per-peer offset (0..900ms) spreads getStats() calls across frames
+    // when up to 15 concurrent peer connections are active in a mesh room.
+    let hash = 0;
+    for (let i = 0; i < this.peerDeviceId.length; i += 1) {
+      hash = (hash * 31 + this.peerDeviceId.charCodeAt(i)) >>> 0;
+    }
+    const staggerMs = hash % 900;
+    this.statsJitterTimer = window.setTimeout(() => {
+      this.statsJitterTimer = null;
+      if (this.disposed) return;
       void this.sampleAndAdaptStats();
-    }, 2000);
+      this.statsTimer = window.setInterval(() => {
+        void this.sampleAndAdaptStats();
+      }, 2000);
+    }, staggerMs);
   }
 
   private stopStatsPolling(): void {
+    if (this.statsJitterTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.statsJitterTimer);
+      this.statsJitterTimer = null;
+    }
     if (this.statsTimer !== null && typeof window !== 'undefined') {
       window.clearInterval(this.statsTimer);
       this.statsTimer = null;
@@ -1046,6 +1228,10 @@ export class CastoraWebRtcPeer {
       this.triedVideoCodecs.clear();
       this.codecFallbackReason = null;
       this.outboundZeroFrameSamples = 0;
+      this.lastFramesEncoded = null;
+      this.consecutiveEncoderStallSamples = 0;
+      this.lastAudioPacketsSent = null;
+      this.localTrackEndedNotified = false;
       this.statsCollector.resetOutbound();
 
       if (videoTrack) {
@@ -1118,6 +1304,10 @@ export class CastoraWebRtcPeer {
       this.localAudioTrack = null;
       this.abrController = null;
       this.outboundZeroFrameSamples = 0;
+      this.lastFramesEncoded = null;
+      this.consecutiveEncoderStallSamples = 0;
+      this.lastAudioPacketsSent = null;
+      this.localTrackEndedNotified = false;
       this.codecFallbackReason = null;
       this.statsCollector.resetOutbound();
 

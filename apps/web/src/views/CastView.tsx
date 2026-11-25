@@ -211,24 +211,6 @@ export function CastView({
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <div>
-          <h1 className="font-display text-xl font-semibold tracking-tight text-[#172033]">
-            Screen Sharing Controls
-          </h1>
-          <p className="text-sm text-[#64748B]">
-            Configure capture quality, target participants, and preview incoming screens.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <SignalBadge label={badge.label} tone={badge.tone} pulse={badge.pulse} />
-          <SignalBadge
-            label={canCapture ? 'Capture Ready' : 'Capture Restricted'}
-            tone={canCapture ? 'active' : 'warn'}
-          />
-        </div>
-      </div>
-
       {!canCapture && (
         <div
           role="alert"
@@ -259,8 +241,62 @@ export function CastView({
         </div>
       )}
 
+      {/* Primary Live Video Stage FIRST at top */}
+      <section className="min-w-0 space-y-4" aria-label="Live Casting Video Stage">
+        <IncomingScreensPanel
+          streams={webrtcState.incomingStreams}
+          onIncomingVideoDimensions={onIncomingVideoDimensions}
+        />
+
+        <VideoSurface
+          slotLabel="My Screen"
+          title={
+            webrtcState.isSharingLocal
+              ? activeOutboundTargets.length > 0
+                ? `Sharing → ${activeOutboundTargets.map((o) => o.targetName).join(', ')}`
+                : 'Local Outbound Preview'
+              : 'Local Outbound Preview'
+          }
+          stream={webrtcState.localStream}
+          muted
+          large
+          highlight={webrtcState.isSharingLocal && webrtcState.phase === 'connected'}
+          standbyReason="Click Share Screen below to select a display, window, or tab."
+          statusBadge={
+            <SignalBadge
+              label={webrtcState.isSharingLocal ? 'Sharing' : 'Standby'}
+              tone={webrtcState.isSharingLocal ? 'active' : 'standby'}
+            />
+          }
+        />
+      </section>
+
+      {/* Controls, Room Summary & Capture Settings BELOW Video */}
+      <div
+        data-castora-chrome
+        className="flex flex-wrap items-baseline justify-between gap-2 rounded-xl border border-[#E2E8F0] bg-white px-5 py-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+      >
+        <div>
+          <h1 className="font-display text-xl font-semibold tracking-tight text-[#172033]">
+            Screen Sharing Controls
+          </h1>
+          <p className="text-sm text-[#64748B]">
+            Configure capture quality, target participants, and monitor live stream telemetry.
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <SignalBadge label={badge.label} tone={badge.tone} pulse={badge.pulse} />
+          <SignalBadge
+            label={canCapture ? 'Capture Ready' : 'Capture Restricted'}
+            tone={canCapture ? 'active' : 'warn'}
+          />
+        </div>
+      </div>
+
+      <TelemetryStrip telemetry={webrtcState.outboundTelemetry} compact />
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        <section className="min-w-0 space-y-4 lg:col-span-5" aria-label="Capture Parameters">
+        <section className="min-w-0 space-y-4 lg:col-span-7" aria-label="Capture Parameters">
           <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-5">
             <h2 className="border-b border-[#E2E8F0] pb-2.5 text-sm font-semibold text-[#172033]">
               Capture Settings
@@ -503,7 +539,9 @@ export function CastView({
               </div>
             )}
           </div>
+        </section>
 
+        <section className="min-w-0 space-y-4 lg:col-span-5" aria-label="Target Participants">
           <div className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] space-y-3">
             <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
               <h2 className="text-sm font-semibold text-[#172033]">Target Participants</h2>
@@ -564,36 +602,6 @@ export function CastView({
               </div>
             )}
           </div>
-        </section>
-
-        <section className="min-w-0 space-y-4 lg:col-span-7" aria-label="Preview and Incoming">
-          <IncomingScreensPanel
-            streams={webrtcState.incomingStreams}
-            onIncomingVideoDimensions={onIncomingVideoDimensions}
-          />
-
-          <VideoSurface
-            slotLabel="My Screen"
-            title={
-              webrtcState.isSharingLocal
-                ? activeOutboundTargets.length > 0
-                  ? `Sharing → ${activeOutboundTargets.map((o) => o.targetName).join(', ')}`
-                  : 'Local Outbound Preview'
-                : 'Local Outbound Preview'
-            }
-            stream={webrtcState.localStream}
-            muted
-            highlight={webrtcState.isSharingLocal && webrtcState.phase === 'connected'}
-            standbyReason="Click Share Screen to select a display, window, or tab."
-            statusBadge={
-              <SignalBadge
-                label={webrtcState.isSharingLocal ? 'Sharing' : 'Standby'}
-                tone={webrtcState.isSharingLocal ? 'active' : 'standby'}
-              />
-            }
-          />
-
-          <TelemetryStrip telemetry={webrtcState.outboundTelemetry} compact />
         </section>
       </div>
 

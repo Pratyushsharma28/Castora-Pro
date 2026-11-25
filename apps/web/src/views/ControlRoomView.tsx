@@ -68,7 +68,7 @@ interface ControlRoomViewProps {
   ) => void;
 }
 
-const MAX_INITIAL_RECEIVERS = 6;
+const MAX_INITIAL_RECEIVERS = 15;
 const ROOM_CODE_PATTERN = /^[A-Z0-9]{6}$/;
 
 function phaseBadge(phase: WebRtcConnectionPhase): {
@@ -456,7 +456,7 @@ export function ControlRoomView({
                 Create a Room
               </h2>
               <p className="mt-1.5 text-sm leading-relaxed text-[#64748B]">
-                Start a secure room with a 6-character code. Approve up to 6 participants and share screens in any direction.
+                Start a secure room with a 6-character code. Approve up to 15 participants and share screens in any direction.
               </p>
             </div>
             <div className="mt-5">

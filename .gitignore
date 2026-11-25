@@ -41,4 +41,5 @@ dist/
 dist-server/
 .certs/
 coverage/
+.castora-data/
 *.log

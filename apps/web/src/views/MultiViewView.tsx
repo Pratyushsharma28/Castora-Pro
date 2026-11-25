@@ -16,7 +16,11 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import type { PairingLifecycleStatus, RoomSnapshot } from '../services/backendClient';
+import type {
+  PairingLifecycleStatus,
+  RoomSnapshot,
+  SignalingSocketState,
+} from '../services/backendClient';
 import { evaluateConnectionQuality } from '../services/streamingDiagnosticsService';
 import {
   VIDEO_QUALITY_PRESETS,
@@ -34,12 +38,15 @@ import type {
   FrameRateTarget,
   MultiViewLayout,
   ResolutionPresetId,
+  SignalingStabilitySnapshot,
   StreamTelemetrySnapshot,
   StudioDestination,
 } from '../types/studio';
 import { AdaptiveQualityPanel } from '../components/common/AdaptiveQualityPanel';
+import { DeviceManagerPanel } from '../components/common/DeviceManagerPanel';
 import { SignalBadge } from '../components/common/SignalBadge';
 import { StreamingQualityDiagnosticsPanel } from '../components/common/StreamingQualityDiagnosticsPanel';
+import { StreamingStabilityPanel } from '../components/common/StreamingStabilityPanel';
 import { TelemetryStrip } from '../components/common/TelemetryStrip';
 import { VideoSurface } from '../components/common/VideoSurface';
 
@@ -61,17 +68,40 @@ interface MultiViewViewProps {
   activeRoomRole?: 'host' | 'receiver' | null;
   pairingStatus?: PairingLifecycleStatus;
   webrtcState?: WebRtcSessionSnapshot;
+  signalingState?: SignalingSocketState;
+  signalingStability?: SignalingStabilitySnapshot | null;
   onStartSharing?: (targetSelection: string | string[] | null) => Promise<void>;
   onConnectReceiver?: (targetPeerId: string) => Promise<void>;
   onStopSharing?: () => void;
   onRetryPeer?: (peerDeviceId: string) => void;
   onRetryAllFailed?: () => void;
+  onReconnectBackend?: () => void;
   onNavigate?: (destination: StudioDestination) => void;
   defaultShowSharePanel?: boolean;
   focusedDeviceId?: string | null;
   onClearFocusedDevice?: () => void;
   onToggleMute?: (slotIndex: number) => void;
   onDisconnectSlot?: (peerDeviceId: string) => void;
+  mutedByPeerId?: Record<string, boolean>;
+  lastSignalingActivityAt?: string | null;
+  onRenameDevice?: (targetDeviceId: string, newName: string) => Promise<void>;
+  onApproveReceiver?: (receiverDeviceId: string) => Promise<RoomSnapshot>;
+  onRejectReceiver?: (receiverDeviceId: string) => Promise<RoomSnapshot>;
+  onRemoveReceiver?: (receiverDeviceId: string) => Promise<RoomSnapshot>;
+  onStopDeviceStream?: (
+    targetDeviceId: string,
+    mode: 'outbound-to-peer' | 'participant-room-stream'
+  ) => Promise<void>;
+  onReconnectDevice?: (targetDeviceId: string) => Promise<void>;
+  onToggleMutePeer?: (peerDeviceId: string) => void;
+  onToggleAdaptiveLock?: (
+    targetDeviceId: string,
+    isSelf: boolean,
+    nextLocked: boolean
+  ) => Promise<void>;
+  onRefreshDevices?: () => Promise<void> | void;
+  onLeaveRoom?: () => void;
+  onCloseRoom?: () => void;
   onIncomingVideoDimensions?: (
     senderDeviceId: string,
     width: number | null,
@@ -102,7 +132,9 @@ const LAYOUT_OPTIONS: { id: MultiViewLayout; label: string; count: number }[] = 
   { id: '3-up', label: '3-Up', count: 3 },
   { id: '4-up', label: '4-Up', count: 4 },
   { id: '6-up', label: '6-Up', count: 6 },
-  { id: 'spotlight', label: 'Spotlight', count: 6 },
+  { id: '9-up', label: '9-Up', count: 9 },
+  { id: '15-up', label: '15-Up', count: 15 },
+  { id: 'spotlight', label: 'Spotlight', count: 15 },
 ];
 
 const RESOLUTION_OPTIONS: { id: ResolutionPresetId; label: string }[] = [
@@ -158,17 +190,33 @@ export function MultiViewView({
   activeRoom = null,
   activeRoomRole = null,
   webrtcState,
+  signalingState = 'disconnected',
+  signalingStability = null,
   onStartSharing,
   onConnectReceiver,
   onStopSharing,
   onRetryPeer,
   onRetryAllFailed,
+  onReconnectBackend,
   onNavigate,
   defaultShowSharePanel = false,
   focusedDeviceId = null,
   onClearFocusedDevice,
   onToggleMute,
   onDisconnectSlot,
+  mutedByPeerId = {},
+  lastSignalingActivityAt = null,
+  onRenameDevice,
+  onApproveReceiver,
+  onRejectReceiver,
+  onRemoveReceiver,
+  onStopDeviceStream,
+  onReconnectDevice,
+  onToggleMutePeer,
+  onToggleAdaptiveLock,
+  onRefreshDevices,
+  onLeaveRoom,
+  onCloseRoom,
   onIncomingVideoDimensions,
   onIncomingAudioPlayback,
   onLogEvent,
@@ -310,7 +358,7 @@ export function MultiViewView({
   const slotCount =
     layout === 'auto'
       ? slots.length
-      : LAYOUT_OPTIONS.find((opt) => opt.id === layout)?.count ?? 6;
+      : LAYOUT_OPTIONS.find((opt) => opt.id === layout)?.count ?? 15;
 
   const normalizedSlots: ConnectedReceiverSlot[] =
     layout === 'auto'
@@ -379,14 +427,20 @@ export function MultiViewView({
         ? 'grid-cols-1'
         : normalizedSlots.length === 2
           ? 'grid-cols-1 md:grid-cols-2'
-          : 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3'
+          : normalizedSlots.length <= 4
+            ? 'grid-cols-1 sm:grid-cols-2'
+            : normalizedSlots.length <= 9
+              ? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3'
+              : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'
       : layout === '2-up'
         ? 'grid-cols-1 md:grid-cols-2'
         : layout === '3-up'
           ? 'grid-cols-1 md:grid-cols-3'
           : layout === '4-up'
             ? 'grid-cols-1 sm:grid-cols-2'
-            : 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-3';
+            : layout === '6-up' || layout === '9-up'
+              ? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3'
+              : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5';
 
   const renderTile = (slot: ConnectedReceiverSlot, isPrimarySpotlight = false) => {
     const slotCode = `Screen ${slot.slotIndex + 1}`;
@@ -624,9 +678,158 @@ export function MultiViewView({
     );
   };
 
+  const primarySlotWithTelemetry =
+    slots.find((s) => s.stream !== null) ?? slots[0] ?? null;
+  const summaryResolution =
+    webrtcState?.outboundTelemetry.resolution ??
+    primarySlotWithTelemetry?.telemetry.resolution ??
+    'Unavailable';
+  const summaryFps =
+    webrtcState?.outboundTelemetry.encodedFps ??
+    webrtcState?.outboundTelemetry.captureFps ??
+    primarySlotWithTelemetry?.telemetry.decodedFps ??
+    primarySlotWithTelemetry?.telemetry.encodedFps ??
+    null;
+  const summaryBitrateKbps =
+    webrtcState?.outboundTelemetry.bitrateKbps ??
+    primarySlotWithTelemetry?.telemetry.bitrateKbps ??
+    null;
+  const summaryPacketLossPct =
+    webrtcState?.outboundTelemetry.packetLossPct ??
+    primarySlotWithTelemetry?.telemetry.packetLossPct ??
+    null;
+  const summaryAudioLabel = webrtcState?.isSharingLocal
+    ? webrtcState.localCaptureMeta?.hasAudio || preferences?.includeAudio
+      ? 'Sharing audio'
+      : 'Video only'
+    : activeStreamCount > 0
+      ? slots.some((s) => s.hasAudioTrack)
+        ? 'Receiving audio'
+        : 'Video only'
+      : preferences?.includeAudio
+        ? 'Audio enabled (standby)'
+        : 'Video only';
+  const hasDeviceManagerHandlers = Boolean(
+    deviceId &&
+      preferences &&
+      webrtcState &&
+      onRenameDevice &&
+      onApproveReceiver &&
+      onRejectReceiver &&
+      onRemoveReceiver &&
+      onStopDeviceStream &&
+      onReconnectDevice &&
+      onToggleMutePeer &&
+      onToggleAdaptiveLock
+  );
+
   return (
     <div className="space-y-5">
-      {/* Unified Screen-Sharing Control Bar */}
+      {/* 1. PRIMARY LIVE VIDEO STAGE — ALWAYS FIRST & MOST PROMINENT */}
+      <section
+        aria-label="Live Casting Video Stage"
+        ref={wallRef}
+        className={
+          isWallFullscreen
+            ? 'castora-panel-fs-host fixed inset-0 h-screen w-screen overflow-hidden bg-black p-0 m-0'
+            : 'castora-panel-fs-host w-full min-w-0'
+        }
+      >
+        {layout === 'auto' && normalizedSlots.length === 0 ? (
+          webrtcState?.localStream ? (
+            <VideoSurface
+              slotLabel="My Live Cast"
+              title={
+                activeOutboundTargets.length > 0
+                  ? `${deviceName} → ${activeOutboundTargets.map((o) => o.targetName).join(', ')}`
+                  : `${deviceName} (Local Live Preview)`
+              }
+              stream={webrtcState.localStream}
+              muted
+              large
+              highlight
+              standbyReason="Screen capture is active."
+              statusBadge={
+                <SignalBadge
+                  label={
+                    activeOutboundTargets.some((o) => o.phase === 'connected')
+                      ? 'Live'
+                      : 'Preview'
+                  }
+                  tone={
+                    activeOutboundTargets.some((o) => o.phase === 'connected')
+                      ? 'active'
+                      : 'signal'
+                  }
+                />
+              }
+            />
+          ) : (
+            <div className="flex min-h-[420px] sm:min-h-[480px] flex-col items-center justify-center rounded-xl border border-[#E2E8F0] bg-white px-6 py-12 text-center shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] text-[#2563EB]">
+                <MonitorPlay className="h-6 w-6" aria-hidden="true" />
+              </div>
+              <h2 className="mt-4 font-display text-base font-semibold text-[#172033]">
+                Live Casting Stage Ready
+              </h2>
+              <p className="mt-1.5 max-w-md text-sm leading-relaxed text-[#64748B]">
+                {activeRoom
+                  ? 'Share your screen or wait for a room participant to cast. Live video fills this full-width stage automatically.'
+                  : 'Create or join a room to connect up to 15 receivers, then share and view live screens in full width.'}
+              </p>
+              <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+                {onStartSharing && canCapture && !isPendingParticipant && (
+                  <button
+                    type="button"
+                    disabled={shareBusy}
+                    onClick={handleStartLocalShare}
+                    className="inline-flex min-h-[42px] items-center gap-2 rounded-[10px] bg-[#2563EB] px-4 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+                  >
+                    <MonitorPlay className="h-4 w-4" aria-hidden="true" />
+                    <span>{shareBusy ? 'Starting...' : 'Share Your Screen'}</span>
+                  </button>
+                )}
+                {!activeRoom && onNavigate && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('receivers')}
+                    className="inline-flex min-h-[42px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-semibold text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
+                  >
+                    <Users className="h-4 w-4" aria-hidden="true" />
+                    <span>Go to Rooms</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )
+        ) : layout === 'spotlight' ? (
+          <div className={isWallFullscreen ? 'h-full w-full space-y-1 bg-black' : 'space-y-4'}>
+            <div className="min-w-0">
+              {renderTile(
+                normalizedSlots[spotlightIndex] ?? normalizedSlots[0],
+                true
+              )}
+            </div>
+            <div
+              className={
+                isWallFullscreen
+                  ? 'hidden'
+                  : 'grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5'
+              }
+            >
+              {normalizedSlots
+                .filter((_, idx) => idx !== spotlightIndex)
+                .map((slot) => renderTile(slot, false))}
+            </div>
+          </div>
+        ) : (
+          <div className={`grid ${isWallFullscreen ? 'h-full w-full gap-1 bg-black' : 'gap-4'} ${gridClass}`}>
+            {normalizedSlots.map((slot) => renderTile(slot, false))}
+          </div>
+        )}
+      </section>
+
+      {/* 2. UNIFIED LIVE CASTING CONTROL BAR — BELOW VIDEO */}
       <div
         data-castora-chrome
         className="flex flex-col gap-3 rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] lg:flex-row lg:items-center lg:justify-between"
@@ -634,7 +837,7 @@ export function MultiViewView({
         <div>
           <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="font-display text-lg font-semibold tracking-tight text-[#172033]">
-              Screens
+              Live Casting &amp; Screens
             </h1>
             <span className="text-xs text-[#64748B] tabular-metrics">
               {activeStreamCount} incoming {activeStreamCount === 1 ? 'stream' : 'streams'} live
@@ -642,7 +845,7 @@ export function MultiViewView({
             </span>
           </div>
           <p className="mt-0.5 text-xs text-[#64748B]">
-            View shared participant screens in full resolution or broadcast your own display simultaneously.
+            Cast to or receive from up to 15 receivers per room. Controls, diagnostics, and device slots sit below the live stage.
           </p>
         </div>
 
@@ -717,7 +920,7 @@ export function MultiViewView({
           <div
             role="group"
             aria-label="Screen Grid Layout"
-            className="inline-flex overflow-x-auto rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] p-0.5"
+            className="inline-flex max-w-full overflow-x-auto rounded-[10px] border border-[#E2E8F0] bg-[#F8FAFC] p-0.5"
           >
             {LAYOUT_OPTIONS.map((opt) => {
               const active = layout === opt.id;
@@ -758,9 +961,115 @@ export function MultiViewView({
         </div>
       </div>
 
+      {/* 3. ROOM, CONNECTION & LIVE STREAM SUMMARY STRIP — BELOW VIDEO */}
+      <section
+        data-castora-chrome
+        aria-label="Room and Stream Summary"
+        className="overflow-hidden rounded-xl border border-[#E2E8F0] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+      >
+        <div className="grid grid-cols-2 divide-x divide-y divide-[#E2E8F0] sm:grid-cols-3 lg:grid-cols-6 lg:divide-y-0 tabular-metrics">
+          <div className="px-4 py-3">
+            <div className="text-[11px] font-medium text-[#64748B]">Room &amp; Host</div>
+            <div className="mt-1 truncate text-xs font-semibold text-[#172033]">
+              {activeRoom ? (
+                <>
+                  <span className="font-mono">{activeRoom.roomId}</span> · {activeRoom.hostDeviceName}
+                </>
+              ) : (
+                'No active room'
+              )}
+            </div>
+            <div className="mt-0.5 truncate text-[11px] text-[#64748B]">
+              Device: {deviceName}
+            </div>
+          </div>
+
+          <div className="px-4 py-3">
+            <div className="text-[11px] font-medium text-[#64748B]">Receivers Connected</div>
+            <div className="mt-1 text-xs font-semibold text-[#172033]">
+              {activeRoom
+                ? `${activeRoom.pairedReceiverCount} / ${activeRoom.maxReceivers} slots`
+                : '0 / 15 slots'}
+            </div>
+            <div className="mt-0.5 text-[11px] text-[#64748B]">
+              {activeRoom ? `${activeRoom.activeReceiverCount} online now` : 'Standby'}
+            </div>
+          </div>
+
+          <div className="px-4 py-3">
+            <div className="text-[11px] font-medium text-[#64748B]">Quality &amp; Resolution</div>
+            <div className="mt-1 text-xs font-semibold text-[#172033]">{summaryResolution}</div>
+            <div className="mt-0.5 text-[11px] text-[#64748B]">
+              {summaryFps !== null ? `${summaryFps.toFixed(1)} FPS` : 'FPS: Unavailable'}
+            </div>
+          </div>
+
+          <div className="px-4 py-3">
+            <div className="text-[11px] font-medium text-[#64748B]">Bitrate &amp; Loss</div>
+            <div className="mt-1 text-xs font-semibold text-[#172033]">
+              {summaryBitrateKbps !== null ? formatBitrate(summaryBitrateKbps) : 'Unavailable'}
+            </div>
+            <div className="mt-0.5 text-[11px] text-[#64748B]">
+              Loss: {summaryPacketLossPct !== null ? `${summaryPacketLossPct.toFixed(1)}%` : 'Unavailable'}
+            </div>
+          </div>
+
+          <div className="px-4 py-3">
+            <div className="text-[11px] font-medium text-[#64748B]">Audio &amp; Codec</div>
+            <div className="mt-1 text-xs font-semibold text-[#172033]">{summaryAudioLabel}</div>
+            <div className="mt-0.5 truncate text-[11px] text-[#64748B]">
+              Codec:{' '}
+              {webrtcState?.outboundTelemetry.negotiatedVideoCodec ??
+                primarySlotWithTelemetry?.telemetry.codecMimeType ??
+                preferences?.codecPreference ??
+                'H264'}
+            </div>
+          </div>
+
+          <div className="flex flex-col justify-between px-4 py-3">
+            <div>
+              <div className="text-[11px] font-medium text-[#64748B]">Session Controls</div>
+              <div className="mt-1 text-xs font-semibold text-[#172033]">
+                {signalingState === 'connected' ? 'Signaling Online' : `Signaling ${signalingState}`}
+              </div>
+            </div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              {onNavigate && (
+                <button
+                  type="button"
+                  onClick={() => onNavigate('receivers')}
+                  className="text-[11px] font-semibold text-[#2563EB] hover:underline"
+                >
+                  Rooms
+                </button>
+              )}
+              {activeRoom && activeRoomRole === 'receiver' && onLeaveRoom && (
+                <button
+                  type="button"
+                  onClick={onLeaveRoom}
+                  className="text-[11px] font-semibold text-[#B45309] hover:underline"
+                >
+                  Leave Room
+                </button>
+              )}
+              {activeRoom && activeRoomRole === 'host' && onCloseRoom && (
+                <button
+                  type="button"
+                  onClick={onCloseRoom}
+                  className="text-[11px] font-semibold text-[#DC2626] hover:underline"
+                >
+                  Close Room
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
       {!canCapture && (
         <div
           role="alert"
+          data-castora-chrome
           className="flex items-start gap-3 rounded-xl border border-[#F59E0B]/40 bg-[#FFFBEB] px-4 py-3 text-xs text-[#78350F]"
         >
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#B45309]" aria-hidden="true" />
@@ -773,7 +1082,10 @@ export function MultiViewView({
       )}
 
       {isPendingParticipant && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#F59E0B]/40 bg-[#FFFBEB] px-4 py-3 text-xs text-[#78350F]">
+        <div
+          data-castora-chrome
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#F59E0B]/40 bg-[#FFFBEB] px-4 py-3 text-xs text-[#78350F]"
+        >
           <span>
             Waiting for host approval in room{' '}
             <strong className="font-mono">{activeRoom?.roomId}</strong> before sharing or viewing screens.
@@ -812,7 +1124,7 @@ export function MultiViewView({
         </div>
       )}
 
-      {/* Expandable Share Settings & Outbound Preview Drawer */}
+      {/* Expandable Share Settings & Outbound Preview Drawer — BELOW VIDEO */}
       {showSharePanel && preferences && onUpdatePreferences && (() => {
         const resolvedQuality = resolveQualityTarget(preferences, {
           width: webrtcState?.localCaptureMeta?.width,
@@ -1011,300 +1323,214 @@ export function MultiViewView({
                   </div>
                 </div>
 
-              {/* Target Participant Selection */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-medium text-[#64748B]">Share Target</span>
-                  {onNavigate && (
-                    <button
-                      type="button"
-                      onClick={() => onNavigate('receivers')}
-                      className="font-medium text-[#2563EB] hover:underline"
-                    >
-                      Manage Room
-                    </button>
-                  )}
-                </div>
-
-                {!activeRoom || !isApprovedInRoom ? (
-                  <p className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs text-[#64748B]">
-                    Join or create a room in Rooms to share with participants.
-                  </p>
-                ) : connectedPeers.length === 0 ? (
-                  <p className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs text-[#64748B]">
-                    Waiting for other approved participants in room{' '}
-                    <span className="font-mono font-semibold text-[#172033]">{activeRoom.roomId}</span>.
-                  </p>
-                ) : (
-                  <div className="flex flex-wrap gap-2">
-                    {connectedPeers.length > 1 && (
+                {/* Target Participant Selection */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-medium text-[#64748B]">Share Target</span>
+                    {onNavigate && (
                       <button
                         type="button"
-                        onClick={() => setSelectedTarget('ALL')}
-                        className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border px-3 text-xs font-medium ${
-                          selectedTarget === 'ALL'
-                            ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
-                            : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB]'
-                        }`}
+                        onClick={() => onNavigate('receivers')}
+                        className="font-medium text-[#2563EB] hover:underline"
                       >
-                        <Users className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>All Participants ({connectedPeers.length})</span>
+                        Manage Room
                       </button>
                     )}
-                    {connectedPeers.map((peer) => {
-                      const active = selectedTarget === peer.deviceId;
-                      return (
+                  </div>
+
+                  {!activeRoom || !isApprovedInRoom ? (
+                    <p className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs text-[#64748B]">
+                      Join or create a room in Rooms to share with participants.
+                    </p>
+                  ) : connectedPeers.length === 0 ? (
+                    <p className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs text-[#64748B]">
+                      Waiting for other approved participants in room{' '}
+                      <span className="font-mono font-semibold text-[#172033]">{activeRoom.roomId}</span>.
+                    </p>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {connectedPeers.length > 1 && (
                         <button
-                          key={peer.deviceId}
                           type="button"
-                          onClick={() => setSelectedTarget(peer.deviceId)}
+                          onClick={() => setSelectedTarget('ALL')}
                           className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border px-3 text-xs font-medium ${
-                            active
+                            selectedTarget === 'ALL'
                               ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
                               : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB]'
                           }`}
                         >
-                          <span>{peer.deviceName}</span>
-                          <span className="text-[11px] opacity-70">({peer.roleLabel})</span>
+                          <Users className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>All Participants ({connectedPeers.length})</span>
                         </button>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {needsTargetSend && (
-                  <button
-                    type="button"
-                    disabled={shareBusy}
-                    onClick={handleConnectSelected}
-                    className="inline-flex min-h-[38px] items-center gap-2 rounded-[10px] border border-[#16A34A]/40 bg-[#F0FDF4] px-3.5 text-xs font-semibold text-[#15803D] hover:bg-[#DCFCE7]"
-                  >
-                    <Radio className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>
-                      {selectedTarget === 'ALL'
-                        ? 'Send Active Screen to All Participants'
-                        : 'Send Active Screen to Selected Participant'}
-                    </span>
-                  </button>
-                )}
-
-                {/* Per-Outgoing Stream Diagnostics & Independent Bitrate Control */}
-                {activeOutboundTargets.length > 0 && onSetPeerQualityOverride && (
-                  <div className="pt-2 space-y-1.5">
-                    <div className="text-xs font-medium text-[#64748B]">
-                      Per-Stream Quality (Independent per Peer)
-                    </div>
-                    <div className="divide-y divide-[#E2E8F0] rounded-lg border border-[#E2E8F0] bg-[#F8FAFC]">
-                      {activeOutboundTargets.map((out) => {
-                        const overrideCap = out.qualityOverride?.maxBitrateKbps ?? null;
-                        const outQuality = evaluateConnectionQuality({
-                          phase: out.phase,
-                          iceConnectionState: out.iceConnectionState,
-                          telemetry: out.telemetry,
-                          recovery: out.recovery,
-                        });
-                        const canRetryOut =
-                          Boolean(onRetryPeer) &&
-                          (out.phase === 'failed' ||
-                            out.phase === 'disconnected' ||
-                            Boolean(out.recovery?.exhausted));
+                      )}
+                      {connectedPeers.map((peer) => {
+                        const active = selectedTarget === peer.deviceId;
                         return (
-                          <div
-                            key={out.targetDeviceId}
-                            className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs"
+                          <button
+                            key={peer.deviceId}
+                            type="button"
+                            onClick={() => setSelectedTarget(peer.deviceId)}
+                            className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border px-3 text-xs font-medium ${
+                              active
+                                ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                                : 'border-[#E2E8F0] bg-white text-[#172033] hover:border-[#2563EB]'
+                            }`}
                           >
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-2 truncate font-medium text-[#172033]">
-                                <span>{out.targetName}</span>
-                                <span
-                                  title={outQuality.detail}
-                                  className="text-[11px] font-normal text-[#64748B]"
-                                >
-                                  ({outQuality.label})
-                                </span>
-                              </div>
-                              <div className="text-[11px] text-[#64748B] tabular-metrics">
-                                {out.telemetry.resolution ?? 'Negotiating'} ·{' '}
-                                {formatBitrate(out.telemetry.bitrateKbps)} /{' '}
-                                {formatBitrate(out.telemetry.targetBitrateKbps ?? null)}
-                                {out.telemetry.codecMimeType ? ` · ${out.telemetry.codecMimeType}` : ''}
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              {canRetryOut && (
-                                <button
-                                  type="button"
-                                  onClick={() => onRetryPeer?.(out.targetDeviceId)}
-                                  className="mr-1 inline-flex items-center gap-1 rounded-md border border-[#DC2626]/30 bg-[#FEF2F2] px-2 py-0.5 text-[11px] font-semibold text-[#DC2626] hover:bg-[#FEE2E2]"
-                                >
-                                  <RotateCcw className="h-2.5 w-2.5" aria-hidden="true" />
-                                  <span>Retry</span>
-                                </button>
-                              )}
-                              {[
-                                { label: 'Global', kbps: null },
-                                { label: '10M', kbps: 10_000 },
-                                { label: '20M', kbps: 20_000 },
-                                { label: '40M', kbps: 40_000 },
-                              ].map((opt) => {
-                                const isActive = overrideCap === opt.kbps;
-                                return (
-                                  <button
-                                    key={opt.label}
-                                    type="button"
-                                    onClick={() =>
-                                      onSetPeerQualityOverride(
-                                        out.targetDeviceId,
-                                        opt.kbps === null ? null : { maxBitrateKbps: opt.kbps }
-                                      )
-                                    }
-                                    className={`rounded-md border px-2 py-0.5 text-[11px] font-medium tabular-metrics ${
-                                      isActive
-                                        ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
-                                        : 'border-[#E2E8F0] bg-white text-[#64748B] hover:text-[#172033]'
-                                    }`}
-                                  >
-                                    {opt.label}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </div>
+                            <span>{peer.deviceName}</span>
+                            <span className="text-[11px] opacity-70">({peer.roleLabel})</span>
+                          </button>
                         );
                       })}
                     </div>
-                  </div>
-                )}
+                  )}
+
+                  {needsTargetSend && (
+                    <button
+                      type="button"
+                      disabled={shareBusy}
+                      onClick={handleConnectSelected}
+                      className="inline-flex min-h-[38px] items-center gap-2 rounded-[10px] border border-[#16A34A]/40 bg-[#F0FDF4] px-3.5 text-xs font-semibold text-[#15803D] hover:bg-[#DCFCE7]"
+                    >
+                      <Radio className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>
+                        {selectedTarget === 'ALL'
+                          ? 'Send Active Screen to All Participants'
+                          : 'Send Active Screen to Selected Participant'}
+                      </span>
+                    </button>
+                  )}
+
+                  {/* Per-Outgoing Stream Diagnostics & Independent Bitrate Control */}
+                  {activeOutboundTargets.length > 0 && onSetPeerQualityOverride && (
+                    <div className="pt-2 space-y-1.5">
+                      <div className="text-xs font-medium text-[#64748B]">
+                        Per-Stream Quality (Independent per Peer)
+                      </div>
+                      <div className="divide-y divide-[#E2E8F0] rounded-lg border border-[#E2E8F0] bg-[#F8FAFC]">
+                        {activeOutboundTargets.map((out) => {
+                          const overrideCap = out.qualityOverride?.maxBitrateKbps ?? null;
+                          const outQuality = evaluateConnectionQuality({
+                            phase: out.phase,
+                            iceConnectionState: out.iceConnectionState,
+                            telemetry: out.telemetry,
+                            recovery: out.recovery,
+                          });
+                          const canRetryOut =
+                            Boolean(onRetryPeer) &&
+                            (out.phase === 'failed' ||
+                              out.phase === 'disconnected' ||
+                              Boolean(out.recovery?.exhausted));
+                          return (
+                            <div
+                              key={out.targetDeviceId}
+                              className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2 truncate font-medium text-[#172033]">
+                                  <span>{out.targetName}</span>
+                                  <span
+                                    title={outQuality.detail}
+                                    className="text-[11px] font-normal text-[#64748B]"
+                                  >
+                                    ({outQuality.label})
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-[#64748B] tabular-metrics">
+                                  {out.telemetry.resolution ?? 'Negotiating'} ·{' '}
+                                  {formatBitrate(out.telemetry.bitrateKbps)} /{' '}
+                                  {formatBitrate(out.telemetry.targetBitrateKbps ?? null)}
+                                  {out.telemetry.codecMimeType ? ` · ${out.telemetry.codecMimeType}` : ''}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                {canRetryOut && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onRetryPeer?.(out.targetDeviceId)}
+                                    className="mr-1 inline-flex items-center gap-1 rounded-md border border-[#DC2626]/30 bg-[#FEF2F2] px-2 py-0.5 text-[11px] font-semibold text-[#DC2626] hover:bg-[#FEE2E2]"
+                                  >
+                                    <RotateCcw className="h-2.5 w-2.5" aria-hidden="true" />
+                                    <span>Retry</span>
+                                  </button>
+                                )}
+                                {[
+                                  { label: 'Global', kbps: null },
+                                  { label: '10M', kbps: 10_000 },
+                                  { label: '20M', kbps: 20_000 },
+                                  { label: '40M', kbps: 40_000 },
+                                ].map((opt) => {
+                                  const isActive = overrideCap === opt.kbps;
+                                  return (
+                                    <button
+                                      key={opt.label}
+                                      type="button"
+                                      onClick={() =>
+                                        onSetPeerQualityOverride(
+                                          out.targetDeviceId,
+                                          opt.kbps === null ? null : { maxBitrateKbps: opt.kbps }
+                                        )
+                                      }
+                                      className={`rounded-md border px-2 py-0.5 text-[11px] font-medium tabular-metrics ${
+                                        isActive
+                                          ? 'border-[#2563EB] bg-[#EFF6FF] text-[#2563EB]'
+                                          : 'border-[#E2E8F0] bg-white text-[#64748B] hover:text-[#172033]'
+                                      }`}
+                                    >
+                                      {opt.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-3 lg:col-span-6">
+                <VideoSurface
+                  slotLabel="My Screen"
+                  title={
+                    webrtcState?.isSharingLocal
+                      ? activeOutboundTargets.length > 0
+                        ? `${deviceName} → ${activeOutboundTargets.map((o) => o.targetName).join(', ')}`
+                        : `${deviceName} (Local Preview)`
+                      : 'Local Outbound Preview'
+                  }
+                  stream={webrtcState?.localStream ?? null}
+                  muted
+                  highlight={Boolean(webrtcState?.isSharingLocal)}
+                  standbyReason="Click Share Screen to pick a display, window, or browser tab."
+                  statusBadge={
+                    <SignalBadge
+                      label={
+                        webrtcState?.isSharingLocal
+                          ? activeOutboundTargets.some((o) => o.phase === 'connected')
+                            ? 'Live'
+                            : 'Preview'
+                          : 'Idle'
+                      }
+                      tone={
+                        webrtcState?.isSharingLocal
+                          ? activeOutboundTargets.some((o) => o.phase === 'connected')
+                            ? 'active'
+                            : 'signal'
+                          : 'standby'
+                      }
+                    />
+                  }
+                />
+                {webrtcState && <TelemetryStrip telemetry={webrtcState.outboundTelemetry} compact />}
               </div>
             </div>
-
-            <div className="space-y-3 lg:col-span-6">
-              <VideoSurface
-                slotLabel="My Screen"
-                title={
-                  webrtcState?.isSharingLocal
-                    ? activeOutboundTargets.length > 0
-                      ? `${deviceName} → ${activeOutboundTargets.map((o) => o.targetName).join(', ')}`
-                      : `${deviceName} (Local Preview)`
-                    : 'Local Outbound Preview'
-                }
-                stream={webrtcState?.localStream ?? null}
-                muted
-                highlight={Boolean(webrtcState?.isSharingLocal)}
-                standbyReason="Click Share Screen to pick a display, window, or browser tab."
-                statusBadge={
-                  <SignalBadge
-                    label={
-                      webrtcState?.isSharingLocal
-                        ? activeOutboundTargets.some((o) => o.phase === 'connected')
-                          ? 'Live'
-                          : 'Preview'
-                        : 'Idle'
-                    }
-                    tone={
-                      webrtcState?.isSharingLocal
-                        ? activeOutboundTargets.some((o) => o.phase === 'connected')
-                          ? 'active'
-                          : 'signal'
-                        : 'standby'
-                    }
-                  />
-                }
-              />
-              {webrtcState && <TelemetryStrip telemetry={webrtcState.outboundTelemetry} compact />}
-            </div>
           </div>
-        </div>
         );
       })()}
 
-      {/* Primary Received Video Stage */}
-      <div
-        ref={wallRef}
-        className={
-          isWallFullscreen
-            ? 'castora-panel-fs-host h-screen w-screen overflow-y-auto bg-[#F5F7FB] p-4 sm:p-6'
-            : 'castora-panel-fs-host min-w-0'
-        }
-      >
-        {layout === 'auto' && normalizedSlots.length === 0 ? (
-          <div className="flex min-h-[420px] flex-col items-center justify-center rounded-xl border border-[#E2E8F0] bg-white px-6 py-12 text-center shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] text-[#2563EB]">
-              <MonitorPlay className="h-6 w-6" aria-hidden="true" />
-            </div>
-            <h2 className="mt-4 font-display text-base font-semibold text-[#172033]">
-              No incoming screens yet
-            </h2>
-            <p className="mt-1.5 max-w-md text-sm leading-relaxed text-[#64748B]">
-              {activeRoom
-                ? 'When a participant in this room shares their screen, their video fills this stage automatically. You can also share your own screen at any time.'
-                : 'Create or join a room first, then any participant can share and receive screens independently.'}
-            </p>
-            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-              {onStartSharing && canCapture && !isPendingParticipant && (
-                <button
-                  type="button"
-                  disabled={shareBusy}
-                  onClick={handleStartLocalShare}
-                  className="inline-flex min-h-[42px] items-center gap-2 rounded-[10px] bg-[#2563EB] px-4 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50"
-                >
-                  <MonitorPlay className="h-4 w-4" aria-hidden="true" />
-                  <span>{shareBusy ? 'Starting...' : 'Share Your Screen'}</span>
-                </button>
-              )}
-              {!activeRoom && onNavigate && (
-                <button
-                  type="button"
-                  onClick={() => onNavigate('receivers')}
-                  className="inline-flex min-h-[42px] items-center gap-2 rounded-[10px] border border-[#E2E8F0] bg-white px-4 text-sm font-semibold text-[#172033] hover:border-[#2563EB] hover:text-[#2563EB]"
-                >
-                  <Users className="h-4 w-4" aria-hidden="true" />
-                  <span>Go to Rooms</span>
-                </button>
-              )}
-            </div>
-          </div>
-        ) : layout === 'spotlight' ? (
-          <div className="space-y-4">
-            <div className="min-w-0">
-              {renderTile(
-                normalizedSlots[spotlightIndex] ?? normalizedSlots[0],
-                true
-              )}
-            </div>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
-              {normalizedSlots
-                .filter((_, idx) => idx !== spotlightIndex)
-                .map((slot) => renderTile(slot, false))}
-            </div>
-          </div>
-        ) : (
-          <div className={`grid gap-4 ${gridClass}`}>
-            {normalizedSlots.map((slot) => renderTile(slot, false))}
-          </div>
-        )}
-      </div>
-
-      {/* Smart Adaptive Streaming Quality Control & Per-Peer Status */}
-      {preferences && onUpdatePreferences && webrtcState && (
-        <AdaptiveQualityPanel
-          preferences={preferences}
-          onUpdatePreferences={onUpdatePreferences}
-          onSetPeerQualityOverride={onSetPeerQualityOverride}
-          webrtcState={webrtcState}
-        />
-      )}
-
-      {/* Real Streaming Quality Diagnostics Panel (hidden automatically in fullscreen via data-castora-chrome) */}
-      {showDiagnostics && preferences && webrtcState && (
-        <StreamingQualityDiagnosticsPanel
-          preferences={preferences}
-          webrtcState={webrtcState}
-          onRetryPeer={onRetryPeer}
-        />
-      )}
-
-      {/* Compact Outbound Status Strip when sharing & drawer collapsed */}
+      {/* Compact Outbound Status Strip when sharing & drawer collapsed — BELOW VIDEO */}
       {webrtcState?.isSharingLocal && !showSharePanel && (
         <div
           data-castora-chrome
@@ -1337,6 +1563,63 @@ export function MultiViewView({
             )}
           </div>
         </div>
+      )}
+
+      {/* Smart Adaptive Streaming Quality Control & Per-Peer Status — BELOW VIDEO */}
+      {preferences && onUpdatePreferences && webrtcState && (
+        <AdaptiveQualityPanel
+          preferences={preferences}
+          onUpdatePreferences={onUpdatePreferences}
+          onSetPeerQualityOverride={onSetPeerQualityOverride}
+          webrtcState={webrtcState}
+        />
+      )}
+
+      {/* Real Streaming Quality Diagnostics Panel — BELOW VIDEO */}
+      {showDiagnostics && preferences && webrtcState && (
+        <StreamingQualityDiagnosticsPanel
+          preferences={preferences}
+          webrtcState={webrtcState}
+          onRetryPeer={onRetryPeer}
+        />
+      )}
+
+      {/* Long-Duration Session Continuity & Recovery Telemetry — BELOW VIDEO */}
+      {showDiagnostics && webrtcState && (
+        <StreamingStabilityPanel
+          webrtcState={webrtcState}
+          signalingState={signalingState}
+          signalingStability={signalingStability}
+          onRetryConnection={onRetryAllFailed}
+          onReconnectBackend={onReconnectBackend}
+        />
+      )}
+
+      {/* Connected Receivers & Device Manager (Up to 15 Receivers) — BELOW VIDEO */}
+      {hasDeviceManagerHandlers && deviceId && preferences && webrtcState && (
+        <DeviceManagerPanel
+          deviceId={deviceId}
+          deviceName={deviceName}
+          capabilities={capabilities}
+          preferences={preferences}
+          signalingState={signalingState}
+          activeRoom={activeRoom}
+          activeRoomRole={activeRoomRole}
+          webrtcState={webrtcState}
+          mutedByPeerId={mutedByPeerId}
+          lastSignalingActivityAt={lastSignalingActivityAt}
+          onRenameDevice={onRenameDevice!}
+          onApproveReceiver={onApproveReceiver!}
+          onRejectReceiver={onRejectReceiver!}
+          onRemoveReceiver={onRemoveReceiver!}
+          onStopDeviceStream={onStopDeviceStream!}
+          onReconnectDevice={onReconnectDevice!}
+          onToggleMutePeer={onToggleMutePeer!}
+          onToggleAdaptiveLock={onToggleAdaptiveLock!}
+          onRefresh={onRefreshDevices}
+          onReconnectBackend={onReconnectBackend}
+          onNavigate={onNavigate}
+        />
       )}
     </div>
   );

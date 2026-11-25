@@ -7,6 +7,8 @@ export type StudioDestination =
   | 'sessions'
   | 'devices'
   | 'multi-view'
+  | 'digital-signage'
+  | 'signage-player'
   | 'activity'
   | 'settings';
 
@@ -31,7 +33,15 @@ export type DeviceManagerStatusFilter =
   | 'disconnected'
   | 'pending';
 
-export type MultiViewLayout = 'auto' | '2-up' | '3-up' | '4-up' | '6-up' | 'spotlight';
+export type MultiViewLayout =
+  | 'auto'
+  | '2-up'
+  | '3-up'
+  | '4-up'
+  | '6-up'
+  | '9-up'
+  | '15-up'
+  | 'spotlight';
 
 export type WebRtcConnectionPhase =
   | 'idle'
@@ -50,6 +60,34 @@ export type ConnectionQualityLevel =
   | 'failed'
   | 'unknown';
 
+export type StreamingStabilityStatus =
+  | 'Standby'
+  | 'Connected'
+  | 'Unstable connection'
+  | 'Recovering'
+  | 'Capture ended'
+  | 'Receiver disconnected'
+  | 'Streaming stopped';
+
+export type CaptureHealthStatus =
+  | 'Not capturing'
+  | 'Active'
+  | 'Paused / Muted'
+  | 'Capture ended';
+
+export interface SignalingStabilitySnapshot {
+  socketState: 'disconnected' | 'connecting' | 'connected' | 'error';
+  reconnectAttempt: number;
+  lastReconnectAttemptAt: number | null;
+  lastReconnectResult: string | null;
+  lastHeartbeatSentAt: number | null;
+  lastHeartbeatAckAt: number | null;
+  consecutiveMissedHeartbeats: number;
+  backendAvailable: boolean;
+  lastBackendError: string | null;
+  turnExpiresAt?: number | null;
+}
+
 export interface PeerConnectionRecoveryInfo {
   attempt: number;
   maxAttempts: number;
@@ -58,6 +96,8 @@ export interface PeerConnectionRecoveryInfo {
   lastError: string | null;
   mode: 'idle' | 'ice-restart' | 'peer-replace';
   nextRetryAt: number | null;
+  lastRecoveryAttemptAt?: number | null;
+  lastRecoveryResult?: string | null;
 }
 
 export type ResolutionPresetId = '720p' | '1080p' | '1440p' | '4k' | 'native';
@@ -219,10 +259,13 @@ export interface StreamTelemetrySnapshot {
   audioPlaybackStatus?: AudioPlaybackStatus | null;
   autoplayBlocked?: boolean | null;
   audioDiagnosticStatus?: AudioDiagnosticState | null;
+  /** Continuous media progress health timestamps */
+  lastSuccessfulVideoFrameAt?: number | null;
+  lastSuccessfulAudioPacketAt?: number | null;
 }
 
 export interface ConnectedReceiverSlot {
-  slotIndex: number; // 0..5 (up to 6 initial capacity)
+  slotIndex: number; // 0..14 (up to 15 receiver slots)
   receiverDeviceId: string;
   deviceName: string;
   platform: CastoraPlatform;
@@ -286,6 +329,7 @@ export interface ManagedDeviceRecord {
   resolution: string | null;
   fps: number | null;
   bitrateKbps: number | null;
+  packetLossPct: number | null;
   audioStatus: 'Sharing audio' | 'Video only' | 'Off' | 'Unavailable';
   hasIncomingAudioTrack: boolean;
   incomingMuted: boolean;

@@ -15,6 +15,7 @@ const NAV_ITEMS: NavDestinationItem[] = [
   { id: 'sessions', label: 'Session', matches: ['sessions'] },
   { id: 'devices', label: 'Devices', matches: ['devices'] },
   { id: 'multi-view', label: 'Screens', matches: ['multi-view', 'cast'] },
+  { id: 'digital-signage', label: 'Digital Signage', matches: ['digital-signage', 'signage-player'] },
   { id: 'settings', label: 'Settings', matches: ['settings', 'activity'] },
 ];
 
@@ -49,7 +50,7 @@ export function TopControlBar({
       data-castora-chrome
       className="sticky top-0 z-30 border-b border-[#E2E8F0] bg-white"
     >
-      <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between gap-6 px-4 sm:px-6">
+      <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between gap-4 px-4 sm:px-6">
         {/* Zone 1: Brand */}
         <button
           type="button"
@@ -64,10 +65,10 @@ export function TopControlBar({
           </span>
         </button>
 
-        {/* Zone 2: Primary 4-section navigation */}
+        {/* Zone 2: Primary navigation */}
         <nav
           aria-label="Primary Navigation"
-          className="hidden md:flex items-center gap-1"
+          className="hidden md:flex items-center gap-0.5 lg:gap-1"
         >
           {NAV_ITEMS.map((item) => {
             const isActive = item.matches.includes(activeDestination);
@@ -77,7 +78,7 @@ export function TopControlBar({
                 type="button"
                 aria-current={isActive ? 'page' : undefined}
                 onClick={() => onSelectDestination(item.id)}
-                className={`relative rounded-lg px-3.5 py-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+                className={`relative rounded-lg px-2.5 lg:px-3 py-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
                   isActive
                     ? 'bg-[#EFF6FF] text-[#2563EB]'
                     : 'text-[#64748B] hover:bg-[#F8FAFC] hover:text-[#172033]'

@@ -136,3 +136,49 @@ body:has(.castora-video-fs:-webkit-full-screen) [data-castora-card-footer] {
   padding: 0 !important;
   background: #000000 !important;
 }
+
+/* Multi-stream grid fullscreen: hide all metadata, headers, footers, badges, and UI controls so only live video shows */
+.castora-panel-fs-host:fullscreen,
+.castora-panel-fs-host:-webkit-full-screen {
+  width: 100vw !important;
+  height: 100vh !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  background: #000000 !important;
+  overflow: hidden !important;
+}
+
+.castora-panel-fs-host:fullscreen::backdrop,
+.castora-panel-fs-host:-webkit-full-screen::backdrop {
+  background: #000000 !important;
+}
+
+.castora-panel-fs-host:fullscreen [data-castora-card-header],
+.castora-panel-fs-host:-webkit-full-screen [data-castora-card-header],
+.castora-panel-fs-host:fullscreen [data-castora-card-footer],
+.castora-panel-fs-host:-webkit-full-screen [data-castora-card-footer],
+.castora-panel-fs-host:fullscreen [data-castora-chrome],
+.castora-panel-fs-host:-webkit-full-screen [data-castora-chrome] {
+  display: none !important;
+}
+
+.castora-panel-fs-host:fullscreen .castora-surface-card,
+.castora-panel-fs-host:-webkit-full-screen .castora-surface-card {
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: #000000 !important;
+}
+
+.castora-panel-fs-host:fullscreen .castora-video-fs,
+.castora-panel-fs-host:-webkit-full-screen .castora-video-fs {
+  max-height: none !important;
+  background: #000000 !important;
+}
+
+.castora-panel-fs-host:fullscreen video,
+.castora-panel-fs-host:-webkit-full-screen video {
+  object-fit: contain !important;
+  background: #000000 !important;
+}
+

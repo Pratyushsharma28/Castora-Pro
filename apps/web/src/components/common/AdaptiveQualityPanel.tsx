@@ -361,11 +361,11 @@ export function AdaptiveQualityPanel({
             </div>
           </div>
 
-          {/* Per-Peer Independent Adaptation Status (up to 6 receivers) */}
+          {/* Per-Peer Independent Adaptation Status (up to 15 receivers) */}
           <div className="border-t border-[#E2E8F0] bg-white">
             {webrtcState.outboundPeers.length === 0 ? (
               <div className="px-4 py-3 text-xs text-[#64748B] sm:px-5">
-                Per-peer adaptive status activates once you share your screen with connected room participants (up to 6 peers, each adapted independently).
+                Per-peer adaptive status activates once you share your screen with connected room participants (up to 15 peers, each adapted independently).
               </div>
             ) : (
               <div className="overflow-x-auto">

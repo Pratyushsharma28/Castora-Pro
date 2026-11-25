@@ -343,7 +343,7 @@ export function ReceiversView({
             Rooms &amp; Participants
           </h1>
           <p className="text-sm text-[#64748B]">
-            Create or join a room with up to 6 paired participants. All approved members can share and view screens.
+            Create or join a room with up to 15 paired participants. All approved members can share and view screens.
           </p>
         </div>
         <div className="flex items-center gap-3">

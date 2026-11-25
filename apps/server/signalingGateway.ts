@@ -27,7 +27,8 @@ import type {
 
 const WS_PATH = '/castora';
 const MAX_CONTROL_PAYLOAD_BYTES = 64 * 1024;
-const HEARTBEAT_PING_INTERVAL_MS = 30_000;
+const HEARTBEAT_PING_INTERVAL_MS = 15_000;
+const MAX_MISSED_PONGS = 3;
 
 interface SignalingGatewayOptions {
   server: http.Server | https.Server;
@@ -144,7 +145,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
       token?: string;
       deviceType?: DetectedDeviceType;
       boundDeviceId?: string;
-      isAlive: boolean;
+      missedPongs: number;
     }
   >();
 
@@ -175,7 +176,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
         remoteAddress: extractClientAddress(req),
         token: extractBearerOrQueryToken(req),
         deviceType: extractDeviceTypeFromQuery(req),
-        isAlive: true,
+        missedPongs: 0,
       });
       wss.emit('connection', ws, req);
     });
@@ -184,12 +185,12 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
   const pingInterval = setInterval(() => {
     for (const client of wss.clients) {
       const meta = socketMeta.get(client);
-      if (meta && !meta.isAlive) {
-        client.terminate();
-        continue;
-      }
       if (meta) {
-        meta.isAlive = false;
+        if (meta.missedPongs >= MAX_MISSED_PONGS) {
+          client.terminate();
+          continue;
+        }
+        meta.missedPongs += 1;
       }
       if (client.readyState === WebSocket.OPEN) {
         client.ping();
@@ -201,17 +202,17 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
   wss.on('connection', (ws: WebSocket) => {
     const meta = socketMeta.get(ws) ?? {
       remoteAddress: 'unknown',
-      isAlive: true,
+      missedPongs: 0,
     };
 
     ws.on('pong', () => {
       const current = socketMeta.get(ws);
-      if (current) current.isAlive = true;
+      if (current) current.missedPongs = 0;
     });
 
     ws.on('message', (data, isBinary) => {
       const currentMeta = socketMeta.get(ws) ?? meta;
-      currentMeta.isAlive = true;
+      currentMeta.missedPongs = 0;
 
       if (isBinary) {
         sendJson(
@@ -293,11 +294,14 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
       handleValidatedEnvelope(ws, currentMeta, envelope);
     });
 
-    ws.on('close', () => {
-      const cleanup = roomManager.handleDisconnect(ws);
-      if (cleanup.disconnectedDeviceId) {
-        for (const item of cleanup.updatedRooms) {
-          emitTerminatedStreams(item.room.roomId, item.terminatedStreams, 'network_lost');
+    const publishDisconnectCleanup = (
+      cleanup: ReturnType<RoomManager['handleDisconnect']>,
+      emitDisconnectNotice: boolean
+    ) => {
+      if (!cleanup.disconnectedDeviceId) return;
+      for (const item of cleanup.updatedRooms) {
+        emitTerminatedStreams(item.room.roomId, item.terminatedStreams, 'network_lost');
+        if (emitDisconnectNotice) {
           const notice = createServerEnvelope({
             messageType: 'disconnect',
             receiverDeviceId: null,
@@ -313,18 +317,34 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
           for (const peerSocket of item.peerSockets) {
             sendJson(peerSocket, notice);
           }
-          broadcastRoomState(roomManager, item.room, item.peerSockets);
         }
+        broadcastRoomState(roomManager, item.room, item.peerSockets);
+      }
+    };
+
+    ws.on('close', (code) => {
+      // Explicit/clean WebSocket closes (1000/1005) run immediate cleanup;
+      // abnormal proxy/network drops (1006, 1001, 1011-1013, 4000+) get a grace window
+      // so active casts keep streaming while WebSocket reconnects.
+      const isCleanClose = code === 1000 || code === 1005;
+      if (isCleanClose) {
+        publishDisconnectCleanup(roomManager.handleDisconnect(ws), true);
+        return;
+      }
+      const res = roomManager.beginDisconnectGrace(ws, (cleanup) => {
+        publishDisconnectCleanup(cleanup, true);
+      });
+      if (!res.deferred && res.immediateCleanup) {
+        publishDisconnectCleanup(res.immediateCleanup, true);
       }
     });
 
     ws.on('error', () => {
-      const cleanup = roomManager.handleDisconnect(ws);
-      if (cleanup.disconnectedDeviceId) {
-        for (const item of cleanup.updatedRooms) {
-          emitTerminatedStreams(item.room.roomId, item.terminatedStreams, 'network_lost');
-          broadcastRoomState(roomManager, item.room, item.peerSockets);
-        }
+      const res = roomManager.beginDisconnectGrace(ws, (cleanup) => {
+        publishDisconnectCleanup(cleanup, true);
+      });
+      if (!res.deferred && res.immediateCleanup) {
+        publishDisconnectCleanup(res.immediateCleanup, false);
       }
     });
   });
@@ -522,7 +542,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
               receiverDeviceId: envelope.senderDeviceId,
               roomId: envelope.roomId,
               code:
-                submitResult.code === 'ROOM_FULL'
+                submitResult.code === 'ROOM_CAPACITY_REACHED'
                   ? 'SESSION_FULL'
                   : submitResult.code === 'RATE_LIMITED'
                     ? 'INTERNAL_ERROR'
@@ -537,7 +557,10 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
                           submitResult.code === 'DUPLICATE_DEVICE_NAME'
                         ? 'INVALID_MESSAGE'
                         : 'INVALID_ROOM_ID',
-              message: submitResult.message,
+              message:
+                submitResult.code === 'ROOM_CAPACITY_REACHED'
+                  ? `ROOM_CAPACITY_REACHED: ${submitResult.message}`
+                  : submitResult.message,
               recoverable: true,
               relatedMessageId: envelope.messageId,
             })
@@ -607,8 +630,11 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
               createErrorEnvelope({
                 receiverDeviceId: envelope.senderDeviceId,
                 roomId: envelope.roomId,
-                code: approval.code === 'ROOM_FULL' ? 'SESSION_FULL' : 'INVALID_MESSAGE',
-                message: approval.message,
+                code: approval.code === 'ROOM_CAPACITY_REACHED' ? 'SESSION_FULL' : 'INVALID_MESSAGE',
+                message:
+                  approval.code === 'ROOM_CAPACITY_REACHED'
+                    ? `ROOM_CAPACITY_REACHED: ${approval.message}`
+                    : approval.message,
                 recoverable: true,
                 relatedMessageId: envelope.messageId,
               })
@@ -971,6 +997,7 @@ export function attachSignalingGateway(options: SignalingGatewayOptions): {
     wss,
     shutdown: () => {
       clearInterval(pingInterval);
+      roomManager.clearAllDisconnectGraceTimers();
       for (const client of wss.clients) {
         client.close(1001, 'Server shutting down');
       }
